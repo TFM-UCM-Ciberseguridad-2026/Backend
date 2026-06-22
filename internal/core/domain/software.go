@@ -1,0 +1,10 @@
+package domain
+
+/*
+Este archivo define la entidad de dominio de Software y la especificación CPE.
+
+Propósito arquitectónico y teórico:
+1. Ubicación en Arquitectura Hexagonal: Se localiza en `internal/core/domain`, en el corazón de la lógica de negocio pura.
+2. Representación de CPE (Common Platform Enumeration): Estructura el formato estándar industrial de nomenclatura de sistemas operativos, aplicaciones y hardware (CPE v2.3), que es el estándar utilizado por las bases de datos de vulnerabilidades (NIST NVD) para asociar fallas de seguridad a componentes específicos.
+3. Entidad del Inventario: Permite catalogar el software detectado en los sistemas locales para realizar auditorías automáticas de seguridad mediante análisis de CPEs y cruce con base de datos de CVEs.
+*/

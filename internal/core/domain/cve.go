@@ -1,0 +1,11 @@
+package domain
+
+/*
+Este archivo define la entidad de dominio de vulnerabilidades (CVE - Common Vulnerabilities and Exposures).
+
+Propósito arquitectónico y teórico:
+1. Ubicación en Arquitectura Hexagonal: Se sitúa en `internal/core/domain`, la capa más interna de la arquitectura. Representa lógica de negocio pura y estructuras de datos del dominio, completamente libre de dependencias de frameworks, bases de datos o librerías externas.
+2. Entidad de Dominio: Estructura la representación de una vulnerabilidad de seguridad pública.
+3. Definición de CVE: El identificador universal (CVE-YYYY-NNNNN) sirve como clave primaria conceptual para correlacionar debilidades de seguridad del sistema.
+4. Desacoplamiento de Formatos de APIs: Aísla las variaciones de formatos devueltos por el API del NIST/NVD de los procesos internos del negocio.
+*/
