@@ -9,3 +9,13 @@ Propósito arquitectónico y teórico:
 3. Relaciones de Red: Define la pertenencia y ubicación de los endpoints en subredes específicas (direccionamiento CIDR, VLANs, Gateways).
 4. Contextualización de la Superficie de Ataque: Proporciona el mapeo lógico de la infraestructura de red para evaluar el impacto lateral y la severidad contextual de las vulnerabilidades descubiertas en el software instalado en cada host.
 */
+
+// Endpoint representa la entidad de dominio de un equipo en la red (nodo Endpoint en Neo4j).
+type Endpoint struct {
+	EndpointID      int    `json:"endpoint_id"`
+	Hostname        string `json:"hostname"`
+	Tipo            string `json:"tipo"`
+	InternetExposed bool   `json:"internet_exposed"`
+}
+
+

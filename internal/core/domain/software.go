@@ -8,3 +8,11 @@ Propósito arquitectónico y teórico:
 2. Representación de CPE (Common Platform Enumeration): Estructura el formato estándar industrial de nomenclatura de sistemas operativos, aplicaciones y hardware (CPE v2.3), que es el estándar utilizado por las bases de datos de vulnerabilidades (NIST NVD) para asociar fallas de seguridad a componentes específicos.
 3. Entidad del Inventario: Permite catalogar el software detectado en los sistemas locales para realizar auditorías automáticas de seguridad mediante análisis de CPEs y cruce con base de datos de CVEs.
 */
+
+// Software representa la entidad de dominio de una aplicación, sistema operativo o componente catalogado (nodo Software en Neo4j).
+type Software struct {
+	SoftwareID int    `json:"software_id"`
+	Nombre     string `json:"nombre"`
+	Version    string `json:"version"`
+}
+
