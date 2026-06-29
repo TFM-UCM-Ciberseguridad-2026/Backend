@@ -1,4 +1,7 @@
 package domain
+package model
+
+import "time"
 
 /*
 Este archivo define la entidad de dominio de Software y la especificación CPE.
@@ -11,8 +14,13 @@ Propósito arquitectónico y teórico:
 
 // Software representa la entidad de dominio de una aplicación, sistema operativo o componente catalogado (nodo Software en Neo4j).
 type Software struct {
-	SoftwareID int    `json:"software_id"`
-	Nombre     string `json:"nombre"`
-	Version    string `json:"version"`
+	SoftwareID 		int64    `json:"software_id"`
+	Name     		string `json:"name"`
+	Version    		string `json:"version"`
+	Type			string `json:"type"`
+	CPE 			string `json:"cpe"`
+	PURL 			string `json:"purl"`
+	ReleaseDate 	*time.Time `json:"release_date"`
+	Vendor 			string `json:"vendor"`
 }
 

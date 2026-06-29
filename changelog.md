@@ -6,3 +6,9 @@ Todos los cambios notables realizados en el backend del Orquestador serán docum
 
 ### Añadido
 - **Estructura de Directorios:** Seguimos patron de arquitectura hexagonal pura, la estructura de carpetas esta siguiendo las practicas de esta arquitectura y se ha creado un poco la base de los archivos necesarios, en ellos hay comentarios de su funcionalidad con la aplicacion.
+
+
+## [0.1.1] - 2026-06-27 - Tillo
+
+### Modificacion
+- **Dominios en Core:** Ampliacion de los dominios en core para acercarlo al modelo de BBDD propuesto. Se han añadido ademas los dominios Remediation y Finding para gestionar la asociacion de vulnerabilidades con un Endpoint y las remediaciones de dichas vulnerabilidades

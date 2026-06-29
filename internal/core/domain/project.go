@@ -1,4 +1,5 @@
 package domain
+package model
 
 /*
 Este archivo define la entidad de dominio para los Proyectos (Projects).
@@ -10,6 +11,6 @@ Propósito arquitectónico y teórico:
 
 // Project representa la entidad de dominio de un proyecto (nodo Project en Neo4j).
 type Project struct {
-	ProjectID string `json:"project_id"`
+	ProjectID int64 `json:"project_id"`
 	Nombre    string `json:"nombre"`
 }

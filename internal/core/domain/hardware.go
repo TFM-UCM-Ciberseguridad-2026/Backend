@@ -10,7 +10,11 @@ Propósito arquitectónico y teórico:
 
 // Hardware representa la entidad de dominio de un componente físico (nodo Hardware en Neo4j).
 type Hardware struct {
-	HardwareID string `json:"hardware_id"`
-	Modelo     string `json:"modelo"`
-	Tipo       string `json:"tipo"`
+	HardwareID 		int64 `json:"hardware_id"`
+	Model     		string `json:"modelo"`
+	Type       		string `json:"tipo"`
+	Manufacturer 	string `json:"fabricante"`
+	CPU		 		string `json:"cpu"`
+	RAMGB 			int    `json:"ram_gb"`
+	StorageGB 		int    `json:"storage_gb"`
 }

@@ -1,4 +1,5 @@
 package domain
+package model
 
 /*
 Este archivo define la entidad de dominio para las Redes (Networks).
@@ -10,7 +11,10 @@ Propósito arquitectónico y teórico:
 
 // Network representa la entidad de dominio de una subred (nodo Network en Neo4j).
 type Network struct {
-	NetworkID int    `json:"network_id"` // Puede ser int o string según los constraints de Neo4j
-	Nombre    string `json:"nombre"`
-	CIDR      string `json:"cidr"`
+	NetworkID 	int64    `json:"network_id"` // Puede ser int o string según los constraints de Neo4j
+	Nombre    	string `json:"nombre"`
+	CIDR      	string `json:"cidr"`
+	Gateway   	string `json:"gateway"`
+	VLANID		int64 `json:"vlan_id"`
+
 }
