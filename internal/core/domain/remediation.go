@@ -14,10 +14,8 @@ Propósito arquitectónico y teórico:
 
 // Remediation representa la entidad de dominio de una solución de seguridad implementada para corregir una vulnerabilidad específica. (nodo Remediation en Neo4j).
 type Remediation struct {
-	RemediationID  	int64  `json:"remediation_id"`
-	FixedVersion   	string `json:"fixed_version"`
-	Status 			string `json:"status"`
-	AppliedAt 		*time.Time `json:"applied_at"`
+	RemediationID int64      `json:"remediation_id"`
+	FixedVersion  string     `json:"fixed_version"`
+	Status        string     `json:"status"`
+	AppliedAt     *time.Time `json:"applied_at"`
 }
-
-

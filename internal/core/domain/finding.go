@@ -14,13 +14,10 @@ Propósito arquitectónico y teórico:
 
 // Finding representa la entidad de dominio de un problema de seguridad especifico encontradio en el entrono. Una vulnerabildiad es una debilidad en el software pero el finding es la evidencia de que esa vulnerabilidad existe en un endpoint especifico. (nodo Finding en Neo4j).
 type Finding struct {
-	FindingID      	int64  `json:"finding_id"`
-	RiskScore	  	float64 `json:"risk_score"`
-	Status			string `json:"status"`
-	FirstSeen		time.Time `json:"first_seen"`
-	LastSeen		*time.Time `json:"last_seen"`
-	ResolvedAt		*time.Time `json:"resolved_at"`
-
+	FindingID  int64      `json:"finding_id"`
+	RiskScore  float64    `json:"risk_score"`
+	Status     string     `json:"status"`
+	FirstSeen  time.Time  `json:"first_seen"`
+	LastSeen   *time.Time `json:"last_seen"`
+	ResolvedAt *time.Time `json:"resolved_at"`
 }
-
-

@@ -14,7 +14,10 @@ import (
 func main() {
 	fmt.Println("Iniciando Motor TFM (Backend) - Prueba de Persistencia Masiva...")
 
-	cfg := config.LoadConfig()
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		log.Fatalf("Error cargando la configuración: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
