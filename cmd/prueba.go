@@ -40,7 +40,11 @@ func main() {
 	_ = endpointRepo.Save(ctx, ep)
 
 	// 2. Vulnerability
-	vuln := &domain.Vulnerability{CVEID: "CVE-2025-0001", Description: "RCE Crítico", BaseScore: 9.9}
+	vuln := &domain.Vulnerability{
+		CVEID:       "CVE-2025-0001",
+		Description: domain.Description{Lang: "es", Value: "RCE Crítico"},
+		BaseScore:   9.9,
+	}
 	_ = vulnRepo.Save(ctx, vuln)
 
 	// 3. Software

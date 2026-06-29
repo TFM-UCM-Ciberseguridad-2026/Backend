@@ -72,3 +72,9 @@ type DatabaseHelper interface {
 	ExecuteRead(ctx context.Context, query string, params map[string]any) (any, error)
 	GetNodeInfo(ctx context.Context, label string, propertyKey string, propertyValue any) (map[string]any, error)
 }
+
+// VulnerabilityAPIscanner escanea vuln de la api del nist (puerto de salida)
+type VulnerabilityAPIscanner interface {
+	// FetchVulnerabilities obtiene una lista de vulnerabilidades desde el API externa.
+	FetchVulnerabilities(ctx context.Context, limit int, offset int) ([]domain.Vulnerability, error)
+}

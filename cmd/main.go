@@ -10,6 +10,6 @@ Propósito arquitectónico y teórico:
 4. Orquestador de Bootstrap: Asocia los adaptadores específicos a sus correspondientes puertos (interfaces) y los inyecta en el constructor de los servicios de aplicación, iniciando posteriormente el servidor web.
 */
 
-func main() {
-	// TODO: Initialize adapters, services, and start server
-}
+// func main() {
+// 	// TODO: Initialize adapters, services, and start server
+// }

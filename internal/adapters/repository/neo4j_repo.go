@@ -120,7 +120,7 @@ func (r *neo4jVulnRepo) Save(ctx context.Context, vuln *domain.Vulnerability) er
 	`
 	params := map[string]any{
 		"cve":   vuln.CVEID,
-		"desc":  vuln.Description,
+		"desc":  vuln.Description.Value, // <-- CHANGED: Extract the string value from the Struct
 		"score": vuln.BaseScore,
 	}
 
@@ -167,9 +167,15 @@ func (r *neo4jVulnRepo) GetByID(ctx context.Context, cveID string) (*domain.Vuln
 	record := result.(map[string]any)
 	score, _ := record["score"].(float64)
 
+	// Recuperar la descripción como string y meterla en el Struct
+	descStr := ""
+	if d, ok := record["desc"].(string); ok {
+		descStr = d
+	}
+
 	vuln := &domain.Vulnerability{
 		CVEID:       record["cve"].(string),
-		Description: record["desc"].(string),
+		Description: domain.Description{Lang: "en", Value: descStr}, // <-- CHANGED: Wrap in Description struct
 		BaseScore:   score,
 	}
 
