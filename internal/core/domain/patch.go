@@ -1,5 +1,4 @@
 package domain
-package model
 
 import "time"
 
@@ -13,8 +12,8 @@ Propósito arquitectónico y teórico:
 
 // Patch representa la entidad de dominio de un parche de seguridad (nodo Patch en Neo4j).
 type Patch struct {
-	PatchID 		int64    `json:"patch_id"`
-	Description    	string `json:"description"`
-	ReleaseDate 	*time.Time `json:"release_date"`
-	URL 			string `json:"url"`
+	PatchID     int64      `json:"patch_id"`
+	Description string     `json:"description"`
+	ReleaseDate *time.Time `json:"release_date"`
+	URL         string     `json:"url"`
 }
