@@ -16,7 +16,7 @@ Propósito arquitectónico y teórico:
 3. Desacoplamiento de Variables: Centraliza las constantes y configuraciones iniciales para que el resto de los componentes operen de manera agnóstica al entorno de despliegue (desarrollo, preproducción, producción).
 */
 
-// DatabaseConfig contiene las credenciales y parámetros de conexión para la base de datos.
+// DatabaseConfig contiene las credenciales y parámetros de conexión para la base de datos (Postgres/MySQL - Legacy o futuro).
 type DatabaseConfig struct {
 	Host     string
 	Port     string
@@ -34,8 +34,13 @@ type NVDConfig struct {
 
 // Config centraliza todas las variables de configuración cargadas del entorno.
 type Config struct {
-	Database DatabaseConfig
-	NVD      NVDConfig
+	Port          string
+	Env           string
+	Neo4jURI      string
+	Neo4jUser     string
+	Neo4jPassword string
+	Database      DatabaseConfig
+	NVD           NVDConfig
 }
 
 // ParseEnvFile lee un archivo .env y extrae sus pares clave-valor a un mapa.
@@ -107,16 +112,22 @@ func LoadEnv(path string) error {
 
 // LoadConfig inicializa y carga la configuración de la aplicación.
 // Primero intenta cargar el archivo .env local si existe, y luego recupera las variables del entorno.
+// NOTA: Se modificó la firma original en Backend para devolver (*Config, error) compatible con Lucas.
 func LoadConfig() (*Config, error) {
 	// Intentamos cargar el archivo .env por defecto en la raíz.
-	// Si no existe, no lanzamos error ya que las variables podrían venir directamente del entorno (Docker, Kubernetes, etc.)
+	// Si no existe, no lanzamos error ya que las variables podrían venir directamente del entorno.
 	err := LoadEnv(".env")
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("error cargando el archivo .env: %w", err)
 	}
 
 	cfg := &Config{
-		Database: DatabaseConfig{ // config por defecto TODO
+		Port:          getEnv("PORT", "8080"),
+		Env:           getEnv("ENV", "development"),
+		Neo4jURI:      getEnv("NEO4J_URI", "bolt://localhost:7687"),
+		Neo4jUser:     getEnv("NEO4J_USER", "neo4j"),
+		Neo4jPassword: getEnv("NEO4J_PASSWORD", "password"),
+		Database: DatabaseConfig{
 			Host:     getEnv("DB_HOST", "localhost"),
 			Port:     getEnv("DB_PORT", "5432"),
 			User:     getEnv("DB_USER", ""),
