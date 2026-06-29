@@ -18,51 +18,61 @@ Propósito arquitectónico y teórico:
 type EndpointPort interface {
 	Save(ctx context.Context, endpoint *domain.Endpoint) error        // Guarda en la DB
 	GetByID(ctx context.Context, id int64) (*domain.Endpoint, error) // Te da con el id el objeto recuperado de la bd
+	DeleteByID(ctx context.Context, id int64) error                  // Borra un nodo de la BD
 }
 
 type VulnerabilityPort interface {
 	Save(ctx context.Context, vuln *domain.Vulnerability) error
 	GetByID(ctx context.Context, cveID string) (*domain.Vulnerability, error)
+	DeleteByID(ctx context.Context, cveID string) error
 }
 
 type SoftwarePort interface {
 	Save(ctx context.Context, software *domain.Software) error
 	GetByID(ctx context.Context, id int64) (*domain.Software, error)
+	DeleteByID(ctx context.Context, id int64) error
 }
 
 type FindingPort interface {
 	Save(ctx context.Context, finding *domain.Finding) error
 	GetByID(ctx context.Context, id int64) (*domain.Finding, error)
+	DeleteByID(ctx context.Context, id int64) error
 }
 
 type RemediationPort interface {
 	Save(ctx context.Context, remediation *domain.Remediation) error
 	GetByID(ctx context.Context, id int64) (*domain.Remediation, error)
+	DeleteByID(ctx context.Context, id int64) error
 }
 
 type ExploitPort interface {
 	Save(ctx context.Context, exploit *domain.Exploit) error
 	GetByID(ctx context.Context, id int64) (*domain.Exploit, error)
+	DeleteByID(ctx context.Context, id int64) error
 }
 
 type HardwarePort interface {
 	Save(ctx context.Context, hardware *domain.Hardware) error
 	GetByID(ctx context.Context, id int64) (*domain.Hardware, error)
+	DeleteByID(ctx context.Context, id int64) error
 }
 
 type NetworkPort interface {
 	Save(ctx context.Context, network *domain.Network) error
 	GetByID(ctx context.Context, id int64) (*domain.Network, error)
+	DeleteByID(ctx context.Context, id int64) error
 }
 
 type PatchPort interface {
 	Save(ctx context.Context, patch *domain.Patch) error
 	GetByID(ctx context.Context, id int64) (*domain.Patch, error)
+	DeleteByID(ctx context.Context, id int64) error
 }
 
 type ProjectPort interface {
 	Save(ctx context.Context, project *domain.Project) error
 	GetByID(ctx context.Context, id int64) (*domain.Project, error)
+	DeleteByID(ctx context.Context, id int64) error
 }
 
 // DatabaseHelper es un puerto genérico para ejecutar consultas Cypher (Neo4j) que no están 

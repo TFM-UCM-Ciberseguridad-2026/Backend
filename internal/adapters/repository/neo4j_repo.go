@@ -102,6 +102,12 @@ func (r *neo4jRepo) GetByID(ctx context.Context, id int64) (*domain.Endpoint, er
 	return endpoint, nil
 }
 
+// DeleteByID elimina un Endpoint de Neo4j por su ID.
+func (r *neo4jRepo) DeleteByID(ctx context.Context, id int64) error {
+	query := `MATCH (e:Endpoint {id: $id}) DETACH DELETE e`
+	return r.ExecuteWrite(ctx, query, map[string]any{"id": id})
+}
+
 // ==========================================
 // IMPLEMENTACIÓN DE VulnerabilityPort
 // ==========================================
@@ -182,6 +188,12 @@ func (r *neo4jVulnRepo) GetByID(ctx context.Context, cveID string) (*domain.Vuln
 	return vuln, nil
 }
 
+// DeleteByID elimina una Vulnerabilidad de Neo4j por su CVEID.
+func (r *neo4jVulnRepo) DeleteByID(ctx context.Context, cveID string) error {
+	query := `MATCH (v:Vulnerability {cve_id: $cve}) DETACH DELETE v`
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{"cve": cveID})
+}
+
 // ==========================================
 // IMPLEMENTACIÓN DE SoftwarePort
 // ==========================================
@@ -206,6 +218,11 @@ func (r *neo4jSoftwareRepo) GetByID(ctx context.Context, id int64) (*domain.Soft
 	}, nil
 }
 
+func (r *neo4jSoftwareRepo) DeleteByID(ctx context.Context, id int64) error {
+	query := `MATCH (n:Software {id: $id}) DETACH DELETE n`
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
+}
+
 // ==========================================
 // IMPLEMENTACIÓN DE FindingPort
 // ==========================================
@@ -222,6 +239,11 @@ func (r *neo4jFindingRepo) GetByID(ctx context.Context, id int64) (*domain.Findi
 	props, err := executeReadHelper(ctx, r.driver, query, map[string]any{"id": id})
 	if err != nil || props == nil { return nil, err }
 	return &domain.Finding{FindingID: getInt64(props, "id"), RiskScore: getFloat64(props, "risk_score"), Status: getString(props, "status")}, nil
+}
+
+func (r *neo4jFindingRepo) DeleteByID(ctx context.Context, id int64) error {
+	query := `MATCH (n:Finding {id: $id}) DETACH DELETE n`
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
 }
 
 // ==========================================
@@ -242,6 +264,11 @@ func (r *neo4jRemediationRepo) GetByID(ctx context.Context, id int64) (*domain.R
 	return &domain.Remediation{RemediationID: getInt64(props, "id"), FixedVersion: getString(props, "fixed_version"), Status: getString(props, "status")}, nil
 }
 
+func (r *neo4jRemediationRepo) DeleteByID(ctx context.Context, id int64) error {
+	query := `MATCH (n:Remediation {id: $id}) DETACH DELETE n`
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
+}
+
 // ==========================================
 // IMPLEMENTACIÓN DE ExploitPort
 // ==========================================
@@ -258,6 +285,11 @@ func (r *neo4jExploitRepo) GetByID(ctx context.Context, id int64) (*domain.Explo
 	props, err := executeReadHelper(ctx, r.driver, query, map[string]any{"id": id})
 	if err != nil || props == nil { return nil, err }
 	return &domain.Exploit{ExploitID: getInt64(props, "id"), RequiredPrivilege: getString(props, "required_privilege"), PrivilegeGranted: getString(props, "privilege_granted"), Technique: getString(props, "technique")}, nil
+}
+
+func (r *neo4jExploitRepo) DeleteByID(ctx context.Context, id int64) error {
+	query := `MATCH (n:Exploit {id: $id}) DETACH DELETE n`
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
 }
 
 // ==========================================
@@ -278,6 +310,11 @@ func (r *neo4jHardwareRepo) GetByID(ctx context.Context, id int64) (*domain.Hard
 	return &domain.Hardware{HardwareID: getInt64(props, "id"), Model: getString(props, "model"), Type: getString(props, "type"), Manufacturer: getString(props, "manufacturer"), CPU: getString(props, "cpu"), RAMGB: int(getInt64(props, "ram")), StorageGB: int(getInt64(props, "storage"))}, nil
 }
 
+func (r *neo4jHardwareRepo) DeleteByID(ctx context.Context, id int64) error {
+	query := `MATCH (n:Hardware {id: $id}) DETACH DELETE n`
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
+}
+
 // ==========================================
 // IMPLEMENTACIÓN DE NetworkPort
 // ==========================================
@@ -294,6 +331,11 @@ func (r *neo4jNetworkRepo) GetByID(ctx context.Context, id int64) (*domain.Netwo
 	props, err := executeReadHelper(ctx, r.driver, query, map[string]any{"id": id})
 	if err != nil || props == nil { return nil, err }
 	return &domain.Network{NetworkID: getInt64(props, "id"), Nombre: getString(props, "nombre"), CIDR: getString(props, "cidr"), Gateway: getString(props, "gateway"), VLANID: getInt64(props, "vlan_id")}, nil
+}
+
+func (r *neo4jNetworkRepo) DeleteByID(ctx context.Context, id int64) error {
+	query := `MATCH (n:Network {id: $id}) DETACH DELETE n`
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
 }
 
 // ==========================================
@@ -314,6 +356,11 @@ func (r *neo4jPatchRepo) GetByID(ctx context.Context, id int64) (*domain.Patch, 
 	return &domain.Patch{PatchID: getInt64(props, "id"), Description: getString(props, "description"), URL: getString(props, "url")}, nil
 }
 
+func (r *neo4jPatchRepo) DeleteByID(ctx context.Context, id int64) error {
+	query := `MATCH (n:Patch {id: $id}) DETACH DELETE n`
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
+}
+
 // ==========================================
 // IMPLEMENTACIÓN DE ProjectPort
 // ==========================================
@@ -330,6 +377,11 @@ func (r *neo4jProjectRepo) GetByID(ctx context.Context, id int64) (*domain.Proje
 	props, err := executeReadHelper(ctx, r.driver, query, map[string]any{"id": id})
 	if err != nil || props == nil { return nil, err }
 	return &domain.Project{ProjectID: getInt64(props, "id"), Nombre: getString(props, "nombre")}, nil
+}
+
+func (r *neo4jProjectRepo) DeleteByID(ctx context.Context, id int64) error {
+	query := `MATCH (n:Project {id: $id}) DETACH DELETE n`
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
 }
 
 // ==========================================
