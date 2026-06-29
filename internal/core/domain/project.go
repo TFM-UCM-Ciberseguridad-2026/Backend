@@ -1,5 +1,4 @@
 package domain
-package model
 
 /*
 Este archivo define la entidad de dominio para los Proyectos (Projects).

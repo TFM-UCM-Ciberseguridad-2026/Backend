@@ -1,5 +1,4 @@
 package domain
-package model 
 
 /*
 Este archivo define las entidades de dominio para Endpoints.
