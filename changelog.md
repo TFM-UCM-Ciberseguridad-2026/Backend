@@ -12,3 +12,8 @@ Todos los cambios notables realizados en el backend del Orquestador serán docum
 
 ### Modificacion
 - **Dominios en Core:** Ampliacion de los dominios en core para acercarlo al modelo de BBDD propuesto. Se han añadido ademas los dominios Remediation y Finding para gestionar la asociacion de vulnerabilidades con un Endpoint y las remediaciones de dichas vulnerabilidades
+
+## [0.1.2] - 2026-06-27 - Lucas
+
+### Modificacion
+- Parse .envs en internal/config/config.go y parseo de api del nist en internal/adapters/privider/nvd.go
