@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/provider"
-	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository/neo4j"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/config"
 )
 
@@ -22,14 +22,14 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	driver, err := repository.NewNeo4jDriver(ctx, cfg)
+	driver, err := neo4j.NewDriver(ctx, cfg)
 	if err != nil {
 		log.Fatalf("Error conectando a Neo4j: %v", err)
 	}
 	defer driver.Close(ctx)
 
 	// Inicializar los puertos
-	_, vulnRepo, _, _, _, _, _, _, _, _, _, dbHelper := repository.NewNeo4jRepository(driver)
+	_, vulnRepo, _, _, _, _, _, _, _, _, _, dbHelper := neo4j.NewRepository(driver)
 	nistScanner := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey)
 
 	fmt.Println("Conexión a Neo4j establecida.")

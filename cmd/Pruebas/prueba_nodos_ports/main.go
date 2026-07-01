@@ -6,7 +6,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository/neo4j"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/config"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 )
@@ -21,7 +21,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	driver, err := repository.NewNeo4jDriver(ctx, cfg)
+	driver, err := neo4j.NewDriver(ctx, cfg)
 	if err != nil {
 		log.Fatalf("Error conectando a Neo4j: %v", err)
 	}
@@ -29,7 +29,7 @@ func main() {
 	fmt.Println("Conexión a Neo4j establecida con éxito.")
 
 	// Instanciamos los 11 repositorios específicos
-	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, exploitRepo, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper := repository.NewNeo4jRepository(driver)
+	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, exploitRepo, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper := neo4j.NewRepository(driver)
 	_ = dbHelper
 	_ = softwareInstRepo
 
