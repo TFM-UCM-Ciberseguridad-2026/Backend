@@ -12,6 +12,8 @@ es de Red: Define la pertenencia y ubicación de los endpoints en subredes espec
 */
 
 // Endpoint representa la entidad de dominio de un equipo en la red (nodo Endpoint en Neo4j).
+
+// TODO: Faltan campos respecto al nist, ademas se pueden subdividir en structs mas pequeñas para que sea mas legible
 type Endpoint struct {
 	EndpointID      int64  `json:"endpoint_id"`
 	Hostname        string `json:"hostname"`

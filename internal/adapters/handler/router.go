@@ -8,3 +8,4 @@ Propósito arquitectónico y teórico:
 2. Multiplexación de Peticiones: Mapea los patrones de rutas y verbos HTTP (sintaxis nativa de Go 1.22+: "METHOD /path/{param}") con sus respectivos controladores de la capa de handlers.
 3. Cadena de Filtros (Middleware Chain): Envuelve el enrutador en las funciones decoradoras (CORS, Logger) para aplicarles reglas de seguridad y auditoría global de forma centralizada.
 */
+//va a haber una api que se sea /fetch/vuln/endpoint?endpoint=nombreendpoint

@@ -1,6 +1,19 @@
 package main
 
 /*
+import (
+	"context"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/config"
+
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/provider"
+)
+*/
+
+/*
 Este archivo implementa el Compositor Principal (Composition Root) del sistema.
 
 Propósito arquitectónico y teórico:
@@ -10,6 +23,7 @@ Propósito arquitectónico y teórico:
 4. Orquestador de Bootstrap: Asocia los adaptadores específicos a sus correspondientes puertos (interfaces) y los inyecta en el constructor de los servicios de aplicación, iniciando posteriormente el servidor web.
 */
 
+
 func main() {
-	// TODO: Initialize adapters, services, and start server
+	//TODO
 }
