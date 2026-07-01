@@ -137,14 +137,14 @@ func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 	cve := dto.CVE
 
 	// 1. Extraer descripción (Prioridad Español, fallback a Inglés)
-	var finalDesc domain.Description
+	var finalDesc string
 	for _, d := range cve.Descriptions {
 		if d.Lang == "es" {
-			finalDesc = domain.Description{Lang: "es", Value: d.Value}
+			finalDesc = d.Value
 			break
 		}
 		if d.Lang == "en" {
-			finalDesc = domain.Description{Lang: "en", Value: d.Value}
+			finalDesc = d.Value
 		}
 	}
 

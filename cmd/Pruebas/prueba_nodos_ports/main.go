@@ -28,9 +28,10 @@ func main() {
 	defer driver.Close(ctx)
 	fmt.Println("Conexión a Neo4j establecida con éxito.")
 
-	// Instanciamos los 10 repositorios específicos
-	endpointRepo, vulnRepo, softwareRepo, findingRepo, remediationRepo, exploitRepo, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper := repository.NewNeo4jRepository(driver)
+	// Instanciamos los 11 repositorios específicos
+	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, exploitRepo, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper := repository.NewNeo4jRepository(driver)
 	_ = dbHelper
+	_ = softwareInstRepo
 
 	// Limpiamos la base de datos para la prueba limpia
 	fmt.Println("Limpiando base de datos...")
@@ -45,7 +46,7 @@ func main() {
 	// 2. Vulnerability
 	vuln := &domain.Vulnerability{
 		CVEID:       "CVE-2025-0001",
-		Description: domain.Description{Lang: "es", Value: "RCE Crítico"},
+		Description: "RCE Crítico",
 		BaseScore:   9.9,
 	}
 	_ = vulnRepo.Save(ctx, vuln)

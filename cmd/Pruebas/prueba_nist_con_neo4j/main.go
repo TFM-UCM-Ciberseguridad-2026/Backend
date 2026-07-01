@@ -31,7 +31,7 @@ func main() {
 	defer driver.Close(ctx)
 	
 	// Obtenemos todos los repositorios, pero solo usaremos vulnRepo y dbHelper
-	_, vulnRepo, _, _, _, _, _, _, _, _, dbHelper := repository.NewNeo4jRepository(driver)
+	_, vulnRepo, _, _, _, _, _, _, _, _, _, dbHelper := repository.NewNeo4jRepository(driver)
 
 	fmt.Println("Conexión a Neo4j establecida.")
 	
@@ -80,7 +80,7 @@ func main() {
 			fmt.Printf("Recuperado con éxito de la Base de Datos:\n")
 			fmt.Printf("    ID:          %s\n", dbVuln.CVEID)
 			fmt.Printf("    Score:       %.1f\n", dbVuln.BaseScore)
-			fmt.Printf("    Descripción: %s\n", dbVuln.Description.Value)
+			fmt.Printf("    Descripción: %s\n", dbVuln.Description)
 		} else {
 			fmt.Println("No se encontró la vulnerabilidad en Neo4j.")
 		}

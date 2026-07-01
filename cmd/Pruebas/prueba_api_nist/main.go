@@ -59,7 +59,7 @@ func main() {
 		fmt.Printf("    Score CVSS:  %.1f\n", vuln.BaseScore)
 		fmt.Printf("    CWE:         %s\n", vuln.CWE)
 		fmt.Printf("    Primer CPE:  %s\n", vuln.CPE)
-		fmt.Printf("    Descripción (%s): %s\n", vuln.Description.Lang, vuln.Description.Value)
+		fmt.Printf("    Descripción (%s): %s\n", vuln.Description, vuln.Description)
 		fmt.Println("--------------------------------------------------------------------------------")
 	}
 
