@@ -1,6 +1,10 @@
 package ports
 
-import "github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
+import (
+	"context"
+
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
+)
 
 /*
 Este archivo define los Puertos (Ports) de entrada y salida para los servicios de la aplicación (vulnerabilidades, exploits y persistencia).
@@ -12,7 +16,7 @@ Propósito arquitectónico y teórico:
 */
 
 type EndpointPort interface {
-	Save(ctx context.Context, endpoint *domain.Endpoint) error        // Guarda en la DB
+	Save(ctx context.Context, endpoint *domain.Endpoint) error       // Guarda en la DB
 	GetByID(ctx context.Context, id int64) (*domain.Endpoint, error) // Te da con el id el objeto recuperado de la bd
 	DeleteByID(ctx context.Context, id int64) error                  // Borra un nodo de la BD
 }
@@ -77,7 +81,7 @@ type SoftwareInstallationPort interface {
 	DeleteByID(ctx context.Context, id string) error
 }
 
-// DatabaseHelper es un puerto genérico para ejecutar consultas Cypher (Neo4j) que no están 
+// DatabaseHelper es un puerto genérico para ejecutar consultas Cypher (Neo4j) que no están
 // estrictamente ligadas a un único dominio, permitiendo ingestas dinámicas o consultas puras.
 type DatabaseHelper interface {
 	ExecuteWrite(ctx context.Context, query string, params map[string]any) error

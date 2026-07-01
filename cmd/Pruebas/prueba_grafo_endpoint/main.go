@@ -126,7 +126,7 @@ func main() {
 	// 8. Vulnerability
 	vuln1 := &domain.Vulnerability{
 		CVEID:       "CVE-2025-0001",
-		Description: domain.Description{Lang: "es", Value: "RCE Crítico"},
+		Description: "RCE Crítico",
 		BaseScore:  10,
 	}
 	if err := vulnRepo.Save(ctx, vuln1); err != nil { 
@@ -136,7 +136,7 @@ func main() {
 
 	vuln2 := &domain.Vulnerability{
 		CVEID:       "CVE-2025-0002",
-		Description: domain.Description{Lang: "es", Value: "DoS"},
+		Description: "DoS",
 		BaseScore:   5,
 	}
 	if err := vulnRepo.Save(ctx, vuln2); err != nil { 
@@ -146,7 +146,7 @@ func main() {
 
 	vuln3 := &domain.Vulnerability{
 		CVEID:       "CVE-2025-0003",
-		Description: domain.Description{Lang: "es", Value: "LFI"},
+		Description: "LFI",
 		BaseScore:   8.5,
 	}
 	if err := vulnRepo.Save(ctx, vuln3); err != nil { 

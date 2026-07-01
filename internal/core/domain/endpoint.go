@@ -1,5 +1,4 @@
 package domain
-package model 
 
 /*
 Este archivo define las entidades de dominio para Endpoints.
@@ -17,10 +16,8 @@ type Endpoint struct {
 	EndpointID      int64  `json:"endpoint_id"`
 	Hostname        string `json:"hostname"`
 	Type            string `json:"tipo"`
-	Status		  	string `json:"status"`
-	Criticality	  	string `json:"criticality"`
+	Status          string `json:"status"`
+	Criticality     string `json:"criticality"`
 	InternetExposed bool   `json:"internet_exposed"`
-	Environment     string `json:"environment"`	
+	Environment     string `json:"environment"`
 }
-
-
