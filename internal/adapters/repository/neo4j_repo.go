@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/ports"
@@ -28,6 +29,7 @@ func NewNeo4jRepository(driver neo4j.DriverWithContext) (
 	ports.EndpointPort,
 	ports.VulnerabilityPort,
 	ports.SoftwarePort,
+	ports.SoftwareInstallationPort,
 	ports.FindingPort,
 	ports.RemediationPort,
 	ports.ExploitPort,
@@ -40,6 +42,7 @@ func NewNeo4jRepository(driver neo4j.DriverWithContext) (
 	return &neo4jRepo{driver: driver},
 		&neo4jVulnRepo{driver: driver},
 		&neo4jSoftwareRepo{driver: driver},
+		&neo4jSoftwareInstallationRepo{driver: driver},
 		&neo4jFindingRepo{driver: driver},
 		&neo4jRemediationRepo{driver: driver},
 		&neo4jExploitRepo{driver: driver},
@@ -126,7 +129,7 @@ func (r *neo4jVulnRepo) Save(ctx context.Context, vuln *domain.Vulnerability) er
 	`
 	params := map[string]any{
 		"cve":   vuln.CVEID,
-		"desc":  vuln.Description.Value, // <-- CHANGED: Extract the string value from the Struct
+		"desc":  vuln.Description,
 		"score": vuln.BaseScore,
 	}
 
@@ -181,7 +184,7 @@ func (r *neo4jVulnRepo) GetByID(ctx context.Context, cveID string) (*domain.Vuln
 
 	vuln := &domain.Vulnerability{
 		CVEID:       record["cve"].(string),
-		Description: domain.Description{Lang: "en", Value: descStr}, // <-- CHANGED: Wrap in Description struct
+		Description: descStr,
 		BaseScore:   score,
 	}
 
@@ -222,6 +225,85 @@ func (r *neo4jSoftwareRepo) DeleteByID(ctx context.Context, id int64) error {
 	query := `MATCH (n:Software {id: $id}) DETACH DELETE n`
 	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
 }
+
+// ==========================================
+// IMPLEMENTACIÓN DE SoftwareInstallationPort
+// ==========================================
+type neo4jSoftwareInstallationRepo struct{ driver neo4j.DriverWithContext }
+
+func getTime(m map[string]any, k string) time.Time {
+    if v, ok := m[k].(time.Time); ok {
+        return v
+    }
+    return time.Time{}
+}
+
+func getTimePtr(m map[string]any, k string) *time.Time {
+    if v, ok := m[k].(time.Time); ok {
+        return &v
+    }
+    return nil
+}
+
+func (r *neo4jSoftwareInstallationRepo) Save(ctx context.Context, si *domain.SoftwareInstallation) error {
+    query := `
+        MERGE (n:SoftwareInstallation {id: $id})
+        SET n.first_seen = $first_seen,
+            n.last_seen = $last_seen,
+            n.status = $status,
+            n.install_path = $install_path,
+            n.detected_by = $detected_by,
+            n.package_manager = $package_manager
+    `
+
+    var lastSeen any
+	if si.LastSeen != nil {
+		lastSeen = *si.LastSeen
+	} else {
+		lastSeen = nil
+	}
+
+	params := map[string]any{
+		"id":              si.InstallationID,
+		"first_seen":      si.FirstSeen,
+		"last_seen":       lastSeen,
+		"status":          si.Status,
+		"install_path":    si.InstallPath,
+		"detected_by":     si.DetectedBy,
+		"package_manager": si.PackageManager,
+	}
+
+    return executeWriteHelper(ctx, r.driver, query, params)
+}
+
+
+func (r *neo4jSoftwareInstallationRepo) GetByID(ctx context.Context, id string) (*domain.SoftwareInstallation, error) {
+    query := `MATCH (n:SoftwareInstallation {id: $id}) RETURN properties(n) AS props`
+    props, err := executeReadHelper(ctx, r.driver, query, map[string]any{"id": id})
+    if err != nil || props == nil {
+        return nil, err
+    }
+
+    installation := &domain.SoftwareInstallation{
+        InstallationID: getString(props, "id"),
+        Status:         getString(props, "status"),
+        InstallPath:    getString(props, "install_path"),
+        DetectedBy:     getString(props, "detected_by"),
+        PackageManager: getString(props, "package_manager"),
+		FirstSeen:      getTime(props, "first_seen"),
+		LastSeen:       getTimePtr(props, "last_seen"),
+    }
+
+    // first_seen and last_seen need explicit time casting handling
+    return installation, nil
+}
+
+
+func (r *neo4jSoftwareInstallationRepo) DeleteByID(ctx context.Context, id string) error {
+    query := `MATCH (n:SoftwareInstallation {id: $id}) DETACH DELETE n`
+    return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
+}
+
 
 // ==========================================
 // IMPLEMENTACIÓN DE FindingPort
