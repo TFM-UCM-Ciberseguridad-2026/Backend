@@ -34,7 +34,7 @@ func main() {
 	fmt.Println("Conexión a Neo4j establecida con éxito.")
 
 	// Instanciamos los 11 repositorios específicos
-	endpointRepo, vulnRepo, softwareRepo, installationRepo, findingRepo, remediationRepo, exploitRepo, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper := neo4j.NewRepository(driver)
+	endpointRepo, vulnRepo, softwareRepo, installationRepo, findingRepo, remediationRepo, exploitRepo, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo := neo4j.NewRepository(driver)
 	_ = dbHelper
 
 	// Limpiamos la base de datos para la prueba limpia
@@ -176,238 +176,119 @@ func main() {
 	fmt.Println("\n=== CREANDO RELACIONES DEL GRAFO ===")
 
 	// HAS_ENDPOINT
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (p:Project {id: $projectID})
-		MATCH (e:Endpoint {id: $endpointID})
-		MERGE (p)-[:HAS_ENDPOINT]->(e)
-	`, map[string]any{
-		"projectID":  1,
-		"endpointID": 1,
-	})
+	err = relRepo.LinkProjectToEndpoint(ctx, 1, 1)
 	if err != nil {
 		log.Fatalf("Error creando relación HAS_ENDPOINT: %v", err)
 	}
 
 	// HAS_HARDWARE
 
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (e:Endpoint {id: $endpointID})
-		MATCH (h:Hardware {id: $hardwareID})
-		MERGE (e)-[:HAS_HARDWARE]->(h)
-	`, map[string]any{
-		"endpointID": 1,
-		"hardwareID": 200,
-	})
+	err = relRepo.LinkEndpointToHardware(ctx, 1, 200)
 	if err != nil {
 		log.Fatalf("Error creando relación HAS_HARDWARE: %v", err)
 	}
 
 	// CONNECTED_TO
 
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (e:Endpoint {id: $endpointID})
-		MATCH (n:Network {id: $networkID})
-		MERGE (e)-[:CONNECTED_TO]->(n)
-	`, map[string]any{
-		"endpointID": 1,
-		"networkID":  5,
-	})
+	err = relRepo.LinkEndpointToNetwork(ctx, 1, 5)
 	if err != nil {
 		log.Fatalf("Error creando relación CONNECTED_TO: %v", err)
 	}
 
 	// HAS_INSTALLATION_1_openssl
 
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (e:Endpoint {id: $endpointID})
-		MATCH (si:SoftwareInstallation {id: $installationID})
-		MERGE (e)-[:HAS_INSTALLATION]->(si)
-	`, map[string]any{
-		"endpointID":     1,
-		"installationID": "inst-openssl-srv-prod-01",
-	})
+	err = relRepo.LinkEndpointToInstallation(ctx, 1, "inst-openssl-srv-prod-01")
 	if err != nil {
 		log.Fatalf("Error creando relación HAS_INSTALLATION OpenSSL: %v", err)
 	}
 
 	// HAS_INSTALLATION_2_postgresql
 
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (e:Endpoint {id: $endpointID})
-		MATCH (si:SoftwareInstallation {id: $installationID})
-		MERGE (e)-[:HAS_INSTALLATION]->(si)
-	`, map[string]any{
-		"endpointID":     1,
-		"installationID": "inst-postgresql-srv-prod-01",
-	})
+	err = relRepo.LinkEndpointToInstallation(ctx, 1, "inst-postgresql-srv-prod-01")
 	if err != nil {
 		log.Fatalf("Error creando relación HAS_INSTALLATION PostgreSQL: %v", err)
 	}
 
 	// INSTANCE_OF_openssl
 
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (si:SoftwareInstallation {id: $installationID})
-		MATCH (s:Software {id: $softwareID})
-		MERGE (si)-[:INSTANCE_OF]->(s)
-	`, map[string]any{
-		"installationID": "inst-openssl-srv-prod-01",
-		"softwareID":     3001,
-	})
+	err = relRepo.LinkInstallationToSoftware(ctx, "inst-openssl-srv-prod-01", 3001)
 	if err != nil {
 		log.Fatalf("Error creando relación INSTANCE_OF OpenSSL: %v", err)
 	}
 
 	// INSTANCE_OF_postgresql
 
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (si:SoftwareInstallation {id: $installationID})
-		MATCH (s:Software {id: $softwareID})
-		MERGE (si)-[:INSTANCE_OF]->(s)
-	`, map[string]any{
-		"installationID": "inst-postgresql-srv-prod-01",
-		"softwareID":     10,
-	})
+	err = relRepo.LinkInstallationToSoftware(ctx, "inst-postgresql-srv-prod-01", 10)
 	if err != nil {
 		log.Fatalf("Error creando relación INSTANCE_OF PostgreSQL: %v", err)
 	}
 
 	//HAS_FINDING_1
 
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (si:SoftwareInstallation {id: $installationID})
-		MATCH (f:Finding {id: $findingID})
-		MERGE (si)-[:HAS_FINDING]->(f)
-	`, map[string]any{
-		"installationID": "inst-openssl-srv-prod-01",
-		"findingID":      100,
-	})
+	err = relRepo.LinkInstallationToFinding(ctx, "inst-openssl-srv-prod-01", 100)
 	if err != nil {
 		log.Fatalf("Error creando relación HAS_FINDING #100: %v", err)
 	}
 
 	//HAS_FINDING_2
 
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (si:SoftwareInstallation {id: $installationID})
-		MATCH (f:Finding {id: $findingID})
-		MERGE (si)-[:HAS_FINDING]->(f)
-	`, map[string]any{
-		"installationID": "inst-openssl-srv-prod-01",
-		"findingID":      1001,
-	})
+	err = relRepo.LinkInstallationToFinding(ctx, "inst-openssl-srv-prod-01", 1001)
 	if err != nil {
 		log.Fatalf("Error creando relación HAS_FINDING #1001: %v", err)
 	}
 
 	//HAS_FINDING_3
 
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (si:SoftwareInstallation {id: $installationID})
-		MATCH (f:Finding {id: $findingID})
-		MERGE (si)-[:HAS_FINDING]->(f)
-	`, map[string]any{
-		"installationID": "inst-postgresql-srv-prod-01",
-		"findingID":      1002,
-	})
+	err = relRepo.LinkInstallationToFinding(ctx, "inst-postgresql-srv-prod-01", 1002)
 	if err != nil {
 		log.Fatalf("Error creando relación HAS_FINDING #1002: %v", err)
 	}
 
 	// AFFECTED_BY_1
 
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (f:Finding {id: $findingID})
-		MATCH (v:Vulnerability {cve_id: $cveID})
-		MERGE (f)-[:OF_VULNERABILITY]->(v)
-	`, map[string]any{
-		"findingID": 100,
-		"cveID":     "CVE-2025-0001",
-	})
+	err = relRepo.LinkFindingToVulnerability(ctx, 100, "CVE-2025-0001")
 	if err != nil {
 		log.Fatalf("Error creando relación OF_VULNERABILITY #100: %v", err)
 	}
 
 	// AFFECTED_BY_2
 
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (f:Finding {id: $findingID})
-		MATCH (v:Vulnerability {cve_id: $cveID})
-		MERGE (f)-[:OF_VULNERABILITY]->(v)
-	`, map[string]any{
-		"findingID": 1001,
-		"cveID":     "CVE-2025-0002",
-	})
+	err = relRepo.LinkFindingToVulnerability(ctx, 1001, "CVE-2025-0002")
 	if err != nil {
 		log.Fatalf("Error creando relación OF_VULNERABILITY #1001: %v", err)
 	}
 
 	// AFFECTED_BY_3
 
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (f:Finding {id: $findingID})
-		MATCH (v:Vulnerability {cve_id: $cveID})
-		MERGE (f)-[:OF_VULNERABILITY]->(v)
-	`, map[string]any{
-		"findingID": 1002,
-		"cveID":     "CVE-2025-0003",
-	})
+	err = relRepo.LinkFindingToVulnerability(ctx, 1002, "CVE-2025-0003")
 	if err != nil {
 		log.Fatalf("Error creando relación OF_VULNERABILITY #1002: %v", err)
 	}
 
 	// HAS_EXPLOIT
 
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (f:Finding {id: $findingID})
-		MATCH (r:Exploit {id: $ExploitID})
-		MERGE (f)-[:HAS_EXPLOIT]->(r)
-	`, map[string]any{
-		"findingID":     100,
-		"ExploitID": 33,
-	})
+	err = relRepo.LinkFindingToExploit(ctx, 100, 33)
 	if err != nil {
 		log.Fatalf("Error creando relación HAS_EXPLOIT: %v", err)
 	}
 
 	// HAS_REMEDIATION
 
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (f:Finding {id: $findingID})
-		MATCH (r:Remediation {id: $remediationID})
-		MERGE (f)-[:HAS_REMEDIATION]->(r)
-	`, map[string]any{
-		"findingID":     100,
-		"remediationID": 50,
-	})
+	err = relRepo.LinkFindingToRemediation(ctx, 100, 50)
 	if err != nil {
 		log.Fatalf("Error creando relación HAS_REMEDIATION: %v", err)
 	}
 
 	// USES_PATCH
 
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (r:Remediation {id: $remediationID})
-		MATCH (p:Patch {id: $patchID})
-		MERGE (r)-[:USES_PATCH]->(p)
-	`, map[string]any{
-		"remediationID": 50,
-		"patchID":       7,
-	})
+	err = relRepo.LinkRemediationToPatch(ctx, 50, 7)
 	if err != nil {
 		log.Fatalf("Error creando relación USES_PATCH: %v", err)
 	}
 
 	// FIXES
 
-	err = dbHelper.ExecuteWrite(ctx, `
-		MATCH (p:Patch {id: $patchID})
-		MATCH (v:Vulnerability {cve_id: $cveID})
-		MERGE (p)-[:FIXES]->(v)
-	`, map[string]any{
-		"patchID": 7,
-		"cveID":   "CVE-2025-0001",
-	})
+	err = relRepo.LinkPatchToVulnerability(ctx, 7, "CVE-2025-0001")
 	if err != nil {
 		log.Fatalf("Error creando relación FIXES: %v", err)
 	}
