@@ -31,7 +31,7 @@ func main() {
 	defer driver.Close(ctx)
 	
 	// Obtenemos todos los repositorios, pero solo usaremos vulnRepo y dbHelper
-	_, vulnRepo, _, _, _, _, _, _, _, _, _, dbHelper := neo4j.NewRepository(driver)
+	_, vulnRepo, _, _, _, _, _, _, _, _, _, dbHelper, _ := neo4j.NewRepository(driver)
 
 	fmt.Println("Conexión a Neo4j establecida.")
 	
