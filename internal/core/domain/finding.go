@@ -15,9 +15,17 @@ Propósito arquitectónico y teórico:
 // Finding representa la entidad de dominio de un problema de seguridad especifico encontradio en el entrono. Una vulnerabildiad es una debilidad en el software pero el finding es la evidencia de que esa vulnerabilidad existe en un endpoint especifico. (nodo Finding en Neo4j).
 type Finding struct {
 	FindingID  int64      `json:"finding_id"`
-	RiskScore  float64    `json:"risk_score"`
 	Status     string     `json:"status"`
 	FirstSeen  time.Time  `json:"first_seen"`
 	LastSeen   *time.Time `json:"last_seen"`
 	ResolvedAt *time.Time `json:"resolved_at"`
+
+	// Desglose del cálculo de riesgo de este finding concreto (CVSS environmental
+	// del endpoint x EPSS/KEV x factor de remediación). RiskScore = Likelihood * RemediationFactor * ImpactScore.
+	ImpactScore       float64    `json:"impact_score"`
+	Likelihood        float64    `json:"likelihood"`
+	RemediationFactor float64    `json:"remediation_factor"`
+	RiskScore         float64    `json:"risk_score"`
+	PriorityScore     float64    `json:"priority_score"` // Cola de parcheo, separada del riesgo (riesgo x multiplicadores KEV/parche disponible)
+	RiskComputedAt    *time.Time `json:"risk_computed_at"`
 }
