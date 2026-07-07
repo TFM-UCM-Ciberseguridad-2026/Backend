@@ -68,7 +68,15 @@ func main() {
 	fmt.Println("CreateProject ejecutado.")
 
 	// CU 2: Añadir endpoint al proyecto
-	ep := &domain.Endpoint{EndpointID: 555, Hostname: "srv-orchestrator", Type: "Windows", InternetExposed: true}
+	ep := &domain.Endpoint{
+		EndpointID:         555, 
+		Hostname:           "srv-orchestrator", 
+		Type:               "Windows", 
+		InternetExposed:    true,
+		ConfidentialityReq: "High",
+		IntegrityReq:       "High",
+		AvailabilityReq:    "High",
+	}
 	if err := orchestrator.AddEndpointToProject(ctx, 100, ep); err != nil {
 		log.Fatalf("Error AddEndpointToProject: %v", err)
 	}
@@ -97,14 +105,29 @@ func main() {
 	fmt.Println("RegisterSoftwareInstallation ejecutado.")
 
 	// CU 6: Generar Finding
-	find := &domain.Finding{FindingID: 808, RiskScore: 9.8, Status: "OPEN"}
+	find := &domain.Finding{
+		FindingID:         808, 
+		Status:            "OPEN",
+		ImpactScore:       6.5,
+		Likelihood:        0.8,
+		RemediationFactor: 1.0,
+		PriorityScore:     7.2,
+		RiskScore:         9.8,
+	}
 	if err := orchestrator.GenerateFinding(ctx, "inst-tomcat-555", find); err != nil {
 		log.Fatalf("Error GenerateFinding: %v", err)
 	}
 	fmt.Println("GenerateFinding ejecutado.")
 
 	// CU 7: Asociar vulnerabilidades y remediaciones al finding
-	vuln := &domain.Vulnerability{CVEID: "CVE-2026-TEST", Description: "Vulnerabilidad inventada de prueba", BaseScore: 9.8}
+	vuln := &domain.Vulnerability{
+		CVEID:       "CVE-2026-TEST", 
+		Description: "Vulnerabilidad inventada de prueba", 
+		BaseScore:   9.8,
+		CVSSVector:  "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+		KEV:         true,
+		EPSSScore:   0.95,
+	}
 	rem := &domain.Remediation{RemediationID: 303, FixedVersion: "9.0.43", Status: "PENDING"}
 	if err := orchestrator.AssociateVulnerabilitiesAndRemediations(ctx, 808, vuln, rem); err != nil {
 		log.Fatalf("Error AssociateVulnerabilitiesAndRemediations: %v", err)

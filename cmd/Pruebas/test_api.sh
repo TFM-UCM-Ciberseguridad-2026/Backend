@@ -24,7 +24,10 @@ curl -s -X POST $BASE_URL/projects/100/endpoints \
         "endpoint_id": 555, 
         "hostname": "srv-orchestrator", 
         "tipo": "Windows", 
-        "internet_exposed": true
+        "internet_exposed": true,
+        "confidentiality_req": "High",
+        "integrity_req": "High",
+        "availability_req": "High"
       }' | jq || echo "OK (sin jq)"
 
 echo -e "\n\n3. Asociando Hardware al Endpoint..."
@@ -69,8 +72,12 @@ curl -s -X POST $BASE_URL/installations/inst-tomcat-555/findings \
   -H "Content-Type: application/json" \
   -d '{
         "finding_id": 808,
-        "risk_score": 9.8,
-        "status": "OPEN"
+        "status": "OPEN",
+        "impact_score": 6.5,
+        "likelihood": 0.8,
+        "remediation_factor": 1.0,
+        "priority_score": 7.2,
+        "risk_score": 9.8
       }' | jq || echo "OK (sin jq)"
 
 echo -e "\n\n7. Asociando CVE y Remediación al Finding..."
@@ -80,7 +87,10 @@ curl -s -X POST $BASE_URL/findings/808/vuln-remediations \
         "vulnerability": {
           "cve_id": "CVE-2026-TEST",
           "description": "Vulnerabilidad inventada de prueba",
-          "base_score": 9.8
+          "base_score": 9.8,
+          "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+          "kev": true,
+          "epss_score": 0.95
         },
         "remediation": {
           "remediation_id": 303,

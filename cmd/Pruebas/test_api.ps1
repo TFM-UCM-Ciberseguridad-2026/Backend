@@ -6,7 +6,7 @@ $BaseUrl = "http://localhost:8080/api"
 $Headers = @{ "Content-Type" = "application/json" }
 
 Write-Host "=== LIMPIANDO NEO4J ===" -ForegroundColor Yellow
-go run cmd\Pruebas\clean_db\main.go
+go run clean_db\main.go
 
 Write-Host "`n1. Creando Proyecto..." -ForegroundColor Cyan
 $bodyProj = @{
@@ -21,6 +21,9 @@ $bodyEp = @{
     hostname = "srv-orchestrator"
     tipo = "Windows"
     internet_exposed = $true
+    confidentiality_req = "High"
+    integrity_req = "High"
+    availability_req = "High"
 } | ConvertTo-Json
 Invoke-RestMethod -Uri "$BaseUrl/projects/100/endpoints" -Method Post -Headers $Headers -Body $bodyEp
 
@@ -61,8 +64,12 @@ Invoke-RestMethod -Uri "$BaseUrl/endpoints/555/installations" -Method Post -Head
 Write-Host "`n6. Generando Finding para la Instalación..." -ForegroundColor Cyan
 $bodyFind = @{
     finding_id = 808
-    risk_score = 9.8
     status = "OPEN"
+    impact_score = 6.5
+    likelihood = 0.8
+    remediation_factor = 1.0
+    priority_score = 7.2
+    risk_score = 9.8
 } | ConvertTo-Json
 Invoke-RestMethod -Uri "$BaseUrl/installations/inst-tomcat-555/findings" -Method Post -Headers $Headers -Body $bodyFind
 
@@ -72,6 +79,9 @@ $bodyVulnRem = @{
         cve_id = "CVE-2026-TEST"
         description = "Vulnerabilidad inventada de prueba"
         base_score = 9.8
+        cvss_vector = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+        kev = $true
+        epss_score = 0.95
     }
     remediation = @{
         remediation_id = 303
