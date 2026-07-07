@@ -63,6 +63,13 @@ func getFloat64(m map[string]any, k string) float64 {
 	return 0.0
 }
 
+func getBool(m map[string]any, k string) bool {
+	if v, ok := m[k].(bool); ok {
+		return v
+	}
+	return false
+}
+
 func getTime(m map[string]any, k string) time.Time {
 	if v, ok := m[k].(time.Time); ok {
 		return v
