@@ -6,7 +6,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository/neo4j"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/config"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 )
@@ -21,16 +21,17 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	driver, err := repository.NewNeo4jDriver(ctx, cfg)
+	driver, err := neo4j.NewDriver(ctx, cfg)
 	if err != nil {
 		log.Fatalf("Error conectando a Neo4j: %v", err)
 	}
 	defer driver.Close(ctx)
 	fmt.Println("Conexión a Neo4j establecida con éxito.")
 
-	// Instanciamos los 10 repositorios específicos
-	endpointRepo, vulnRepo, softwareRepo, findingRepo, remediationRepo, exploitRepo, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper := repository.NewNeo4jRepository(driver)
+	// Instanciamos los 11 repositorios específicos
+	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, exploitRepo, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, _ := neo4j.NewRepository(driver)
 	_ = dbHelper
+	_ = softwareInstRepo
 
 	// Limpiamos la base de datos para la prueba limpia
 	fmt.Println("Limpiando base de datos...")
@@ -45,7 +46,7 @@ func main() {
 	// 2. Vulnerability
 	vuln := &domain.Vulnerability{
 		CVEID:       "CVE-2025-0001",
-		Description: domain.Description{Lang: "es", Value: "RCE Crítico"},
+		Description: "RCE Crítico",
 		BaseScore:   9.9,
 	}
 	_ = vulnRepo.Save(ctx, vuln)

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/provider"
-	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository/neo4j"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/config"
 )
 
@@ -22,14 +22,14 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	driver, err := repository.NewNeo4jDriver(ctx, cfg)
+	driver, err := neo4j.NewDriver(ctx, cfg)
 	if err != nil {
 		log.Fatalf("Error conectando a Neo4j: %v", err)
 	}
 	defer driver.Close(ctx)
 
 	// Inicializar los puertos
-	_, vulnRepo, _, _, _, _, _, _, _, _, dbHelper := repository.NewNeo4jRepository(driver)
+	_, vulnRepo, _, _, _, _, _, _, _, _, _, dbHelper, _ := neo4j.NewRepository(driver)
 	nistScanner := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey)
 
 	fmt.Println("Conexión a Neo4j establecida.")
@@ -53,19 +53,19 @@ func main() {
 
 	// Verificamos la creación
 	vulnCreated, _ := vulnRepo.GetByID(ctx, realVuln.CVEID)
-	fmt.Printf("[LECTURA] (Tras CREATE) -> ID: %s, Score: %.1f, Desc: %s...\n", vulnCreated.CVEID, vulnCreated.BaseScore, vulnCreated.Description.Value[:40])
+	fmt.Printf("[LECTURA] (Tras CREATE) -> ID: %s, Score: %.1f, Desc: %s...\n", vulnCreated.CVEID, vulnCreated.BaseScore, vulnCreated.Description[:40])
 
 	fmt.Println("\n=== FASE 2: UPDATE (Modificación vía MERGE) ===")
 	// Modificamos la vulnerabilidad (mismo CVE, distinto score simulando mitigación)
 	realVuln.BaseScore = 0.0
-	realVuln.Description.Value = "[MITIGADA] " + realVuln.Description.Value
+	realVuln.Description = "[MITIGADA] " + realVuln.Description
 
 	_ = vulnRepo.Save(ctx, &realVuln)
 	fmt.Println("[SAVE] Nodos modificados usando Save() de nuevo.")
 
 	// Verificamos la modificación
 	vulnDB, _ := vulnRepo.GetByID(ctx, realVuln.CVEID)
-	fmt.Printf("[LECTURA] (Tras UPDATE) -> Score: %.1f, Desc: %s...\n", vulnDB.BaseScore, vulnDB.Description.Value[:40])
+	fmt.Printf("[LECTURA] (Tras UPDATE) -> Score: %.1f, Desc: %s...\n", vulnDB.BaseScore, vulnDB.Description[:40])
 
 	fmt.Println("\n=== FASE 3: DELETE ===")
 	err = vulnRepo.DeleteByID(ctx, realVuln.CVEID)

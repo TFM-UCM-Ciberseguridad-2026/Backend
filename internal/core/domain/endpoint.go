@@ -1,5 +1,7 @@
 package domain
 
+import "time"
+
 /*
 Este archivo define las entidades de dominio para Endpoints.
 
@@ -19,7 +21,18 @@ type Endpoint struct {
 	Hostname        string `json:"hostname"`
 	Type            string `json:"tipo"`
 	Status          string `json:"status"`
-	Criticality     string `json:"criticality"`
 	InternetExposed bool   `json:"internet_exposed"`
 	Environment     string `json:"environment"`
+
+	// Security requirements CIA del endpoint (Low/Medium/High), usados como CR/IR/AR
+	// en el cálculo del CVSS environmental de cada finding asociado.
+	ConfidentialityReq string `json:"confidentiality_req"`
+	IntegrityReq       string `json:"integrity_req"`
+	AvailabilityReq    string `json:"availability_req"`
+
+	// Riesgo agregado del endpoint, cacheado a partir de los findings asociados
+	// (no se setea a mano, lo recalcula el servicio de riesgo).
+	RiskScore      float64    `json:"risk_score"`
+	RiskTier       string     `json:"risk_tier"` //Se puede quitar si no se considera necesario
+	RiskComputedAt *time.Time `json:"risk_computed_at"`
 }

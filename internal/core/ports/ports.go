@@ -16,7 +16,7 @@ Propósito arquitectónico y teórico:
 */
 
 type EndpointPort interface {
-	Save(ctx context.Context, endpoint *domain.Endpoint) error        // Guarda en la DB
+	Save(ctx context.Context, endpoint *domain.Endpoint) error       // Guarda en la DB
 	GetByID(ctx context.Context, id int64) (*domain.Endpoint, error) // Te da con el id el objeto recuperado de la bd
 	DeleteByID(ctx context.Context, id int64) error                  // Borra un nodo de la BD
 }
@@ -75,7 +75,28 @@ type ProjectPort interface {
 	DeleteByID(ctx context.Context, id int64) error
 }
 
-// DatabaseHelper es un puerto genérico para ejecutar consultas Cypher (Neo4j) que no están 
+type SoftwareInstallationPort interface {
+	Save(ctx context.Context, installation *domain.SoftwareInstallation) error
+	GetByID(ctx context.Context, id string) (*domain.SoftwareInstallation, error)
+	DeleteByID(ctx context.Context, id string) error
+}
+
+// RelationshipPort abstrae la creación de relaciones entre entidades del dominio
+type RelationshipPort interface {
+	LinkProjectToEndpoint(ctx context.Context, projectID int64, endpointID int64) error
+	LinkEndpointToHardware(ctx context.Context, endpointID int64, hardwareID int64) error
+	LinkEndpointToNetwork(ctx context.Context, endpointID int64, networkID int64) error
+	LinkEndpointToInstallation(ctx context.Context, endpointID int64, installationID string) error
+	LinkInstallationToSoftware(ctx context.Context, installationID string, softwareID int64) error
+	LinkInstallationToFinding(ctx context.Context, installationID string, findingID int64) error
+	LinkFindingToVulnerability(ctx context.Context, findingID int64, cveID string) error
+	LinkFindingToExploit(ctx context.Context, findingID int64, exploitID int64) error
+	LinkFindingToRemediation(ctx context.Context, findingID int64, remediationID int64) error
+	LinkRemediationToPatch(ctx context.Context, remediationID int64, patchID int64) error
+	LinkPatchToVulnerability(ctx context.Context, patchID int64, cveID string) error
+}
+
+// DatabaseHelper es un puerto genérico para ejecutar consultas Cypher (Neo4j) que no están
 // estrictamente ligadas a un único dominio, permitiendo ingestas dinámicas o consultas puras.
 type DatabaseHelper interface {
 	ExecuteWrite(ctx context.Context, query string, params map[string]any) error
