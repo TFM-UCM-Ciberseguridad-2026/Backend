@@ -109,3 +109,20 @@ type VulnerabilityAPIscanner interface {
 	// FetchVulnerabilities obtiene una lista de vulnerabilidades desde el API externa.
 	FetchVulnerabilities(ctx context.Context, limit int, offset int) ([]domain.Vulnerability, error)
 }
+
+//Los CRUDS para el mitre... consutarlo con Julve
+
+type TTPPort interface {
+	Save(ctx context.Context, ttp *domain.TTP) error
+	GetByID(ctx context.Context, id string) (*domain.TTP, error)
+	DeleteByID(ctx context.Context, id string) error
+	RelateToVulnerability(ctx context.Context, cveID string, ttpID string) error
+}
+
+type ThreatActorPort interface {
+	Save(ctx context.Context, actor *domain.ThreatActor) error
+	GetByID(ctx context.Context, id string) (*domain.ThreatActor, error)
+	DeleteByID(ctx context.Context, id string) error
+	RelateToTTP(ctx context.Context, actorID string, ttpID string) error
+	GetTopThreatActors(ctx context.Context, limit int) ([]domain.ThreatActorThreat, error)
+}
