@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/config"
-	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository/neo4j"
-	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/service"
 	http_handler "github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/handler/http"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository/neo4j"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/config"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/service"
 )
 
 /*
@@ -47,6 +47,7 @@ func main() {
 
 	// 3. Inicialización de Repositorios (Adaptadores Outbound)
 	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, _, hardwareRepo, networkRepo, _, projectRepo, _, relRepo := neo4j.NewRepository(driver)
+	infraRepo := neo4j.NewInfrastructureRepository(driver)
 
 	// 4. Inicialización del Servicio/Orquestador (Core)
 	orchestrator := service.NewOrchestrator(
@@ -60,16 +61,29 @@ func main() {
 		vulnRepo,
 		remediationRepo,
 		relRepo,
+		infraRepo,
 	)
 
 	// 5. Inicialización de los Controladores HTTP (Adaptadores Inbound)
 	handler := http_handler.NewOrchestratorHandler(orchestrator)
 	router := http_handler.NewRouter(handler)
 
+	// Middleware CORS para evitar bloqueos del navegador en desarrollo
+	corsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		router.ServeHTTP(w, r)
+	})
+
 	// 6. Levantar Servidor Web
 	port := ":8080"
 	fmt.Printf("Servidor HTTP levantado en el puerto %s\n", port)
-	if err := http.ListenAndServe(port, router); err != nil {
+	if err := http.ListenAndServe(port, corsHandler); err != nil {
 		log.Fatalf("Error crítico en el servidor HTTP: %v", err)
 	}
 }

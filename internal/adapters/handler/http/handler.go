@@ -137,7 +137,7 @@ func (h *OrchestratorHandler) RegisterSoftwareInstallation(w http.ResponseWriter
 // POST /api/installations/{id}/findings
 func (h *OrchestratorHandler) GenerateFinding(w http.ResponseWriter, r *http.Request) {
 	instID := r.PathValue("id")
-	
+
 	var finding domain.Finding
 	if err := json.NewDecoder(r.Body).Decode(&finding); err != nil {
 		sendError(w, "Invalid JSON", http.StatusBadRequest)
@@ -174,4 +174,23 @@ func (h *OrchestratorHandler) AssociateVulnerabilitiesAndRemediations(w http.Res
 		return
 	}
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
+}
+
+// GET /api/infrastructure
+func (h *OrchestratorHandler) GetInfrastructure(w http.ResponseWriter, r *http.Request) {
+	graph, err := h.orchestrator.GetInfrastructure(r.Context())
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, graph, http.StatusOK)
+}
+
+// POST /api/infrastructure/populate
+func (h *OrchestratorHandler) PopulateInfrastructure(w http.ResponseWriter, r *http.Request) {
+	if err := h.orchestrator.PopulateExampleInfrastructure(r.Context()); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]string{"status": "success", "message": "Example infrastructure populated successfully"}, http.StatusOK)
 }

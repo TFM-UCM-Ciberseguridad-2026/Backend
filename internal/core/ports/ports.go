@@ -126,3 +126,8 @@ type ThreatActorPort interface {
 	RelateToTTP(ctx context.Context, actorID string, ttpID string) error
 	GetTopThreatActors(ctx context.Context, limit int) ([]domain.ThreatActorThreat, error)
 }
+
+type InfrastructurePort interface {
+	GetGraphData(ctx context.Context) (*domain.GraphData, error)
+	CleanAndSeedInfrastructure(ctx context.Context) error
+}
