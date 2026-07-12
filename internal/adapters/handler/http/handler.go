@@ -194,3 +194,13 @@ func (h *OrchestratorHandler) PopulateInfrastructure(w http.ResponseWriter, r *h
 	}
 	sendJSON(w, map[string]string{"status": "success", "message": "Example infrastructure populated successfully"}, http.StatusOK)
 }
+
+// GET /api/infrastructure/top-apts
+func (h *OrchestratorHandler) GetTopAPTs(w http.ResponseWriter, r *http.Request) {
+	results, err := h.orchestrator.GetTopAPTs(r.Context())
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, results, http.StatusOK)
+}

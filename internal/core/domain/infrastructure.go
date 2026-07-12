@@ -21,3 +21,17 @@ type GraphData struct {
 	Nodes         []GraphNode         `json:"nodes"`
 	Relationships []GraphRelationship `json:"relationships"`
 }
+
+// APTThreatResult representa un Actor de Amenaza (APT) correlacionado con las TTPs
+// encontradas en la infraestructura del usuario, ordenado por relevancia.
+type APTThreatResult struct {
+	ActorID          string   `json:"actor_id"`
+	ActorName        string   `json:"actor_name"`
+	Origin           string   `json:"origin"`
+	Motivation       string   `json:"motivation"`
+	MatchedTTPCount  int      `json:"matched_ttp_count"`
+	TotalInfraTTPs   int      `json:"total_infra_ttps"`
+	CoveragePercent  float64  `json:"coverage_percent"`
+	MatchedTTPNames  []string `json:"matched_ttp_names"`
+	MatchedTTPIDs    []string `json:"matched_ttp_ids"`
+}

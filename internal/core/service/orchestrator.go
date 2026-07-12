@@ -150,3 +150,11 @@ func (o *Orchestrator) GetInfrastructure(ctx context.Context) (*domain.GraphData
 func (o *Orchestrator) PopulateExampleInfrastructure(ctx context.Context) error {
 	return o.infraPort.CleanAndSeedInfrastructure(ctx)
 }
+
+// GetTopAPTs obtiene la lista rankeada de Actores de Amenaza (APT) que más TTPs comparten
+// con las vulnerabilidades detectadas en la infraestructura del usuario.
+func (o *Orchestrator) GetTopAPTs(ctx context.Context) ([]domain.APTThreatResult, error) {
+	return o.infraPort.GetTopAPTsByInfrastructureTTPs(ctx, 10)
+}
+
+
