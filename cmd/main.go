@@ -6,10 +6,11 @@ import (
 	"log"
 	"time"
 
-	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/config"
-	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository/neo4j"
-	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/service"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/handler"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/handler/middleware"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository/neo4j"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/config"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/service"
 )
 
 /*
@@ -46,6 +47,7 @@ func main() {
 
 	// 3. Inicialización de Repositorios (Adaptadores Outbound)
 	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, _, hardwareRepo, networkRepo, _, projectRepo, _, relRepo := neo4j.NewRepository(driver)
+	infraRepo := neo4j.NewInfrastructureRepository(driver)
 
 	// 4. Inicialización del Servicio/Orquestador (Core)
 	orchestrator := service.NewOrchestrator(
@@ -59,14 +61,18 @@ func main() {
 		vulnRepo,
 		remediationRepo,
 		relRepo,
+		infraRepo,
 	)
 
 	// 5. Inicialización de los Controladores HTTP (Adaptadores Inbound)
 	h := handler.NewOrchestratorHandler(orchestrator)
 	router := handler.NewRouter(h)
 
+	// Middleware CORS para evitar bloqueos del navegador en desarrollo
+	corsHandler := middleware.CORS(router)
+
 	// 6. Levantar Servidor Web (con Graceful Shutdown)
 	port := ":8080"
-	server := handler.NewServer(port, router)
+	server := handler.NewServer(port, corsHandler)
 	server.Start()
 }

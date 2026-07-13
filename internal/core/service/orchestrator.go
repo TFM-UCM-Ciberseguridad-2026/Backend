@@ -28,6 +28,7 @@ type Orchestrator struct {
 	vulnPort         ports.VulnerabilityPort
 	remediationPort  ports.RemediationPort
 	relationshipPort ports.RelationshipPort
+	infraPort        ports.InfrastructurePort
 }
 
 func NewOrchestrator(
@@ -41,6 +42,7 @@ func NewOrchestrator(
 	vulnPort ports.VulnerabilityPort,
 	remediationPort ports.RemediationPort,
 	relationshipPort ports.RelationshipPort,
+	infraPort ports.InfrastructurePort,
 ) *Orchestrator {
 	return &Orchestrator{
 		projectPort:      projectPort,
@@ -53,6 +55,7 @@ func NewOrchestrator(
 		vulnPort:         vulnPort,
 		remediationPort:  remediationPort,
 		relationshipPort: relationshipPort,
+		infraPort:        infraPort,
 	}
 }
 
@@ -108,7 +111,7 @@ func (o *Orchestrator) GenerateFinding(ctx context.Context, installationID strin
 	return o.relationshipPort.LinkInstallationToFinding(ctx, installationID, finding.FindingID)
 }
 
-// AssociateVulnerabilitiesAndRemediations guarda la vulnerabilidad (CVE), el parche o mitigación, 
+// AssociateVulnerabilitiesAndRemediations guarda la vulnerabilidad (CVE), el parche o mitigación,
 // y relaciona ambas partes al finding detectado.
 func (o *Orchestrator) AssociateVulnerabilitiesAndRemediations(ctx context.Context, findingID int64, vuln *domain.Vulnerability, rem *domain.Remediation) error {
 	if err := o.vulnPort.Save(ctx, vuln); err != nil {
@@ -122,3 +125,24 @@ func (o *Orchestrator) AssociateVulnerabilitiesAndRemediations(ctx context.Conte
 	}
 	return o.relationshipPort.LinkFindingToRemediation(ctx, findingID, rem.RemediationID)
 }
+
+// GetInfrastructure recupera el grafo actual de infraestructura del usuario.
+// Si la base de datos está vacía (0 nodos), automáticamente la inicializa con el escenario de prueba.
+func (o *Orchestrator) GetInfrastructure(ctx context.Context) (*domain.GraphData, error) {
+	graph, err := o.infraPort.GetGraphData(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return graph, nil
+}
+
+
+
+// GetTopAPTs obtiene la lista rankeada de Actores de Amenaza (APT) que más TTPs comparten
+// con las vulnerabilidades detectadas en la infraestructura del usuario.
+func (o *Orchestrator) GetTopAPTs(ctx context.Context) ([]domain.APTThreatResult, error) {
+	return o.infraPort.GetTopAPTsByInfrastructureTTPs(ctx, 10)
+}
+
+
