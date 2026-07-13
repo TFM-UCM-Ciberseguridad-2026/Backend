@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/http"
 	"time"
 
-	http_handler "github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/handler/http"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/handler"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/handler/middleware"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository/neo4j"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/config"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/service"
@@ -65,25 +65,14 @@ func main() {
 	)
 
 	// 5. Inicialización de los Controladores HTTP (Adaptadores Inbound)
-	handler := http_handler.NewOrchestratorHandler(orchestrator)
-	router := http_handler.NewRouter(handler)
+	h := handler.NewOrchestratorHandler(orchestrator)
+	router := handler.NewRouter(h)
 
 	// Middleware CORS para evitar bloqueos del navegador en desarrollo
-	corsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		router.ServeHTTP(w, r)
-	})
+	corsHandler := middleware.CORS(router)
 
-	// 6. Levantar Servidor Web
+	// 6. Levantar Servidor Web (con Graceful Shutdown)
 	port := ":8080"
-	fmt.Printf("Servidor HTTP levantado en el puerto %s\n", port)
-	if err := http.ListenAndServe(port, corsHandler); err != nil {
-		log.Fatalf("Error crítico en el servidor HTTP: %v", err)
-	}
+	server := handler.NewServer(port, corsHandler)
+	server.Start()
 }

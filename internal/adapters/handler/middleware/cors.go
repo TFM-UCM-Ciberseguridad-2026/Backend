@@ -1,5 +1,7 @@
 package middleware
 
+import "net/http"
+
 /*
 Este archivo define la capa de Middleware (Interceptores HTTP).
 
@@ -9,3 +11,17 @@ Propósito arquitectónico y teórico:
 3. Control de CORS (Cross-Origin Resource Sharing): Inyecta cabeceras HTTP que declaran orígenes permitidos, métodos y cabeceras admitidas por el servidor para autorizar llamadas cross-origin del navegador.
 4. Observabilidad e Instrumentación: Loguea el tráfico HTTP de entrada (IP, método, ruta) y evalúa el tiempo de respuesta en milisegundos para monitorear el rendimiento de la API.
 */
+
+// CORS es un middleware que añade cabeceras para permitir peticiones cross-origin
+func CORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
