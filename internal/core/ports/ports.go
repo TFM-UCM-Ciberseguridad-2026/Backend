@@ -129,6 +129,5 @@ type ThreatActorPort interface {
 
 type InfrastructurePort interface {
 	GetGraphData(ctx context.Context) (*domain.GraphData, error)
-	CleanAndSeedInfrastructure(ctx context.Context) error
 	GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int) ([]domain.APTThreatResult, error)
 }

@@ -134,22 +134,10 @@ func (o *Orchestrator) GetInfrastructure(ctx context.Context) (*domain.GraphData
 		return nil, err
 	}
 
-	// Auto-seed si la base de datos está completamente vacía
-	if len(graph.Nodes) == 0 {
-		if err := o.infraPort.CleanAndSeedInfrastructure(ctx); err != nil {
-			return nil, err
-		}
-		// Volver a consultar tras la ingesta automática
-		return o.infraPort.GetGraphData(ctx)
-	}
-
 	return graph, nil
 }
 
-// PopulateExampleInfrastructure limpia la base de datos y la semilla con datos de prueba estructurados.
-func (o *Orchestrator) PopulateExampleInfrastructure(ctx context.Context) error {
-	return o.infraPort.CleanAndSeedInfrastructure(ctx)
-}
+
 
 // GetTopAPTs obtiene la lista rankeada de Actores de Amenaza (APT) que más TTPs comparten
 // con las vulnerabilidades detectadas en la infraestructura del usuario.

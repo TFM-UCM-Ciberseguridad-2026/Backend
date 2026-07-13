@@ -186,14 +186,7 @@ func (h *OrchestratorHandler) GetInfrastructure(w http.ResponseWriter, r *http.R
 	sendJSON(w, graph, http.StatusOK)
 }
 
-// POST /api/infrastructure/populate
-func (h *OrchestratorHandler) PopulateInfrastructure(w http.ResponseWriter, r *http.Request) {
-	if err := h.orchestrator.PopulateExampleInfrastructure(r.Context()); err != nil {
-		sendError(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	sendJSON(w, map[string]string{"status": "success", "message": "Example infrastructure populated successfully"}, http.StatusOK)
-}
+
 
 // GET /api/infrastructure/top-apts
 func (h *OrchestratorHandler) GetTopAPTs(w http.ResponseWriter, r *http.Request) {
