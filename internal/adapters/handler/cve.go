@@ -185,3 +185,23 @@ func (h *OrchestratorHandler) AssociateVulnerabilitiesAndRemediations(w http.Res
 	}
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
 }
+
+// GET /api/infrastructure
+func (h *OrchestratorHandler) GetInfrastructure(w http.ResponseWriter, r *http.Request) {
+	graph, err := h.orchestrator.GetInfrastructure(r.Context())
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, graph, http.StatusOK)
+}
+
+// GET /api/infrastructure/top-apts
+func (h *OrchestratorHandler) GetTopAPTs(w http.ResponseWriter, r *http.Request) {
+	results, err := h.orchestrator.GetTopAPTs(r.Context())
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, results, http.StatusOK)
+}

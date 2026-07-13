@@ -30,5 +30,8 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	mux.HandleFunc("POST /api/installations/{id}/findings", h.GenerateFinding)
 	mux.HandleFunc("POST /api/findings/{id}/vuln-remediations", h.AssociateVulnerabilitiesAndRemediations)
 
+	mux.HandleFunc("GET /api/infrastructure", h.GetInfrastructure)
+	mux.HandleFunc("GET /api/infrastructure/top-apts", h.GetTopAPTs)
+
 	return mux
 }
