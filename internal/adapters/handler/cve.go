@@ -205,3 +205,30 @@ func (h *OrchestratorHandler) GetTopAPTs(w http.ResponseWriter, r *http.Request)
 	}
 	sendJSON(w, results, http.StatusOK)
 }
+
+/*
+ScanSoftwareVulnerabilities maneja la solicitud HTTP POST para ejecutar el escaneo y registro automático de vulnerabilidades.
+Ruta: POST /api/installations/{id}/scan-vulns?software_id={software_id}
+- 'id': Corresponde al ID de la instalación del software.
+- 'software_id': ID numérico (Query Parameter) que apunta al software instalado.
+Llama directamente al servicio Orchestrator y devuelve un JSON indicando estado exitoso o el respectivo código de error HTTP.
+*/
+func (h *OrchestratorHandler) ScanSoftwareVulnerabilities(w http.ResponseWriter, r *http.Request) {
+	instID := r.PathValue("id")
+	swIDStr := r.URL.Query().Get("software_id")
+	if swIDStr == "" {
+		sendError(w, "Missing software_id query parameter", http.StatusBadRequest)
+		return
+	}
+	swID, err := strconv.ParseInt(swIDStr, 10, 64)
+	if err != nil {
+		sendError(w, "Invalid software_id", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.orchestrator.AutoScanAndRegisterVulnerabilities(r.Context(), instID, swID); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]string{"status": "success"}, http.StatusOK)
+}

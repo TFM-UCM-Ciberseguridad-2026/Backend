@@ -8,6 +8,7 @@ import (
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/handler"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/handler/middleware"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/provider"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository/neo4j"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/config"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/service"
@@ -50,6 +51,7 @@ func main() {
 	infraRepo := neo4j.NewInfrastructureRepository(driver)
 
 	// 4. Inicialización del Servicio/Orquestador (Core)
+	nistAPIAdapter := provider.NewNistAPIAdapter("https://services.nvd.nist.gov/rest/json/cves/2.0", cfg.NVD.APIKey)
 	orchestrator := service.NewOrchestrator(
 		projectRepo,
 		endpointRepo,
@@ -62,6 +64,7 @@ func main() {
 		remediationRepo,
 		relRepo,
 		infraRepo,
+		nistAPIAdapter,
 	)
 
 	// 5. Inicialización de los Controladores HTTP (Adaptadores Inbound)

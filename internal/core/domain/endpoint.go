@@ -19,7 +19,7 @@ es de Red: Define la pertenencia y ubicación de los endpoints en subredes espec
 type Endpoint struct {
 	EndpointID      int64  `json:"endpoint_id"`
 	Hostname        string `json:"hostname"`
-	Type            string `json:"tipo"`
+	Type            string `json:"tipo"` // Tipo de activo/endpoint siguiendo la nomenclatura CPE: 'a' (aplicación/servicio), 'o' (sistema operativo) o 'h' (hardware/dispositivo)
 	Status          string `json:"status"`
 	InternetExposed bool   `json:"internet_exposed"`
 	Environment     string `json:"environment"`
