@@ -32,7 +32,7 @@ func main() {
 	log.Printf("Configuración cargada correctamente.")
 
 	// Inicializamos el adaptador inyectando la BaseURL y la APIKey desde la config
-	nistScanner := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey)
+	nistScanner := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey, cfg.NVD.TimeoutSeconds)
 
 	// --------- PRUEBA API DEL NIST (ELIMINAR DEL MAIN SIN PROBLEMAS, SOLO ES UNA PRUEBA) -----------------------
 	// ejecutar con go run cmd/main.go (estando dentro del dir backend)
@@ -48,7 +48,7 @@ func main() {
 	offset := 100000
 	vulnerabilities, err := nistScanner.FetchVulnerabilities(ctx, limit, offset) // el adapter te devuelve un objeto tipo vulnerability del domain!! adapter (parseamos api nist) -> port (adapter impl interfaz) -> domain (te devuelve un objeto estandar del domain, en este caso uno tipo vulnerability)
 	if err != nil {
-		log.Fatalf("❌ Error ejecutando el scanner de NIST: %v", err)
+		log.Fatalf("Error ejecutando el scanner de NIST: %v", err)
 	}
 
 	fmt.Printf("\nmostrando %d vulnerabilidades de la respuesta de NIST:\n", len(vulnerabilities))

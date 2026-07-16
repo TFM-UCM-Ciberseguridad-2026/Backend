@@ -32,22 +32,26 @@ type Orchestrator struct {
 	remediationPort  ports.RemediationPort
 	relationshipPort ports.RelationshipPort
 	infraPort        ports.InfrastructurePort
+	patchPort        ports.PatchPort
+	dbHelper         ports.DatabaseHelper
 	vulnScannerPort  ports.VulnerabilityAPIscanner
 }
 
 func NewOrchestrator(
-	projectPort ports.ProjectPort,
-	endpointPort ports.EndpointPort,
-	hardwarePort ports.HardwarePort,
-	networkPort ports.NetworkPort,
+	projectPort      ports.ProjectPort,
+	endpointPort     ports.EndpointPort,
+	hardwarePort     ports.HardwarePort,
+	networkPort      ports.NetworkPort,
 	softwareInstPort ports.SoftwareInstallationPort,
-	softwarePort ports.SoftwarePort,
-	findingPort ports.FindingPort,
-	vulnPort ports.VulnerabilityPort,
-	remediationPort ports.RemediationPort,
+	softwarePort     ports.SoftwarePort,
+	findingPort      ports.FindingPort,
+	vulnPort         ports.VulnerabilityPort,
+	remediationPort  ports.RemediationPort,
 	relationshipPort ports.RelationshipPort,
-	infraPort ports.InfrastructurePort,
-	vulnScannerPort ports.VulnerabilityAPIscanner,
+	infraPort        ports.InfrastructurePort,
+	patchPort        ports.PatchPort,
+	dbHelper         ports.DatabaseHelper,
+	vulnScannerPort  ports.VulnerabilityAPIscanner,
 ) *Orchestrator {
 	return &Orchestrator{
 		projectPort:      projectPort,
@@ -61,6 +65,8 @@ func NewOrchestrator(
 		remediationPort:  remediationPort,
 		relationshipPort: relationshipPort,
 		infraPort:        infraPort,
+		patchPort:        patchPort,
+		dbHelper:         dbHelper,
 		vulnScannerPort:  vulnScannerPort,
 	}
 }
@@ -185,24 +191,60 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 
 	// 4. Registrar vulnerabilidades y enlazarlas como hallazgos (Findings)
 	for _, v := range vulns {
-		// Guardar vulnerabilidad en la base de datos
 		vCopy := v
 		if err := o.vulnPort.Save(ctx, &vCopy); err != nil {
 			return fmt.Errorf("error al guardar la vulnerabilidad %s: %w", vCopy.CVEID, err)
 		}
 
+		// Guardar los parches si los hay y vincularlos a la vulnerabilidad
+		for _, p := range vCopy.Patches {
+			pCopy := p
+			// Auto-increment simple id for patch
+			idRes, err := o.dbHelper.ExecuteRead(ctx, "MATCH (p:Patch) RETURN coalesce(max(p.id), 0) AS maxId", nil)
+			if err == nil && idRes != nil {
+				if maxIdMap, ok := idRes.(map[string]any); ok {
+					if maxId, ok := maxIdMap["maxId"].(int64); ok {
+						pCopy.PatchID = maxId + 1
+					} else if maxIdFloat, ok := maxIdMap["maxId"].(float64); ok {
+						pCopy.PatchID = int64(maxIdFloat) + 1
+					}
+				}
+			}
+			if pCopy.PatchID == 0 {
+				pCopy.PatchID = int64(rand.Int31n(1000000) + 1)
+			}
+			
+			if err := o.patchPort.Save(ctx, &pCopy); err != nil {
+				continue
+			}
+			// Vincular parche a la vulnerabilidad
+			_ = o.relationshipPort.LinkPatchToVulnerability(ctx, pCopy.PatchID, vCopy.CVEID)
+		}
+
+		// Calcular métricas de riesgo dinámicamente
+		likelihood := 0.5
+		if vCopy.Exploit || vCopy.KEV {
+			likelihood = 0.9
+		}
+
+		remediationFactor := 1.0
+		if len(vCopy.Patches) > 0 {
+			remediationFactor = 0.5
+		}
+		
+		riskScore := vCopy.BaseScore * likelihood * remediationFactor
+
 		// Crear un Hallazgo (Finding) para conectar la instalación del software con el CVE detectado
 		now := time.Now().UTC()
-		// Generamos un ID de finding semi-aleatorio (int64) para simplificar la persistencia única
 		findingID := int64(rand.Int31n(1000000) + 1)
-		finding := &domain.Finding{ //TODO: retocar los valores por defectoooo TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
+		finding := &domain.Finding{
 			FindingID:         findingID,
 			Status:            "OPEN",
 			FirstSeen:         now,
 			ImpactScore:       vCopy.BaseScore,
-			Likelihood:        0.5,
-			RemediationFactor: 1.0,
-			RiskScore:         vCopy.BaseScore * 0.5,
+			Likelihood:        likelihood,
+			RemediationFactor: remediationFactor,
+			RiskScore:         riskScore,
 		}
 
 		if err := o.findingPort.Save(ctx, finding); err != nil {
@@ -218,5 +260,84 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		}
 	}
 
+	// Como se han añadido nuevos findings a una instalación, que lógicamente pertenece a un endpoint,
+	// sería ideal recalcular el riesgo del endpoint. Para simplificar, requeriríamos el endpointID asociado
+	// a la installationID. 
+	// Para este MVP, asumiremos que quien llame a AutoScan también puede llamar a RecalculateEndpointRisk
+	// si dispone del endpointID, o bien se actualizará de forma asíncrona.
+
+	return nil
+}
+
+// RecalculateEndpointRisk recalcula el riesgo de un endpoint agregando el riesgo de sus hallazgos.
+func (o *Orchestrator) RecalculateEndpointRisk(ctx context.Context, endpointID int64) error {
+	endpoint, err := o.endpointPort.GetByID(ctx, endpointID)
+	if err != nil {
+		return err
+	}
+	
+	// Usamos dbHelper para obtener el riesgo agregado (ej: valor máximo de risk_score entre sus findings)
+	query := `
+		MATCH (e:Endpoint {id: $endpointID})-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)
+		RETURN coalesce(max(f.risk_score), 0.0) as max_risk
+	`
+	res, err := o.dbHelper.ExecuteRead(ctx, query, map[string]any{"endpointID": endpointID})
+	if err != nil {
+		return err
+	}
+	
+	if maxRiskMap, ok := res.(map[string]any); ok {
+		if maxRisk, ok := maxRiskMap["max_risk"].(float64); ok {
+			endpoint.RiskScore = maxRisk
+			now := time.Now().UTC()
+			endpoint.RiskComputedAt = &now
+			return o.endpointPort.Save(ctx, endpoint)
+		}
+	}
+	
+	return nil
+}
+
+// CalculateExploitationPaths busca endpoints expuestos a internet con vulnerabilidades de alto riesgo.
+func (o *Orchestrator) CalculateExploitationPaths(ctx context.Context) ([]domain.ExploitationPathResult, error) {
+	return o.infraPort.CalculateExploitationPaths(ctx)
+}
+
+// SyncNistDaily obtiene las vulnerabilidades modificadas en las últimas 24 horas y actualiza la BBDD.
+func (o *Orchestrator) SyncNistDaily(ctx context.Context) error {
+	endDate := time.Now().UTC()
+	startDate := endDate.Add(-24 * time.Hour)
+
+	vulns, err := o.vulnScannerPort.FetchByDate(ctx, startDate, endDate)
+	if err != nil {
+		return fmt.Errorf("error sincronizando con NIST: %w", err)
+	}
+
+	for _, v := range vulns {
+		vCopy := v
+		if err := o.vulnPort.Save(ctx, &vCopy); err != nil {
+			continue // Loguear o continuar si una falla
+		}
+
+		for _, p := range vCopy.Patches {
+			pCopy := p
+			idRes, err := o.dbHelper.ExecuteRead(ctx, "MATCH (p:Patch) RETURN coalesce(max(p.id), 0) AS maxId", nil)
+			if err == nil && idRes != nil {
+				if maxIdMap, ok := idRes.(map[string]any); ok {
+					if maxId, ok := maxIdMap["maxId"].(int64); ok {
+						pCopy.PatchID = maxId + 1
+					} else if maxIdFloat, ok := maxIdMap["maxId"].(float64); ok {
+						pCopy.PatchID = int64(maxIdFloat) + 1
+					}
+				}
+			}
+			if pCopy.PatchID == 0 {
+				pCopy.PatchID = int64(rand.Int31n(1000000) + 1)
+			}
+			if err := o.patchPort.Save(ctx, &pCopy); err == nil {
+				_ = o.relationshipPort.LinkPatchToVulnerability(ctx, pCopy.PatchID, vCopy.CVEID)
+			}
+		}
+	}
 	return nil
 }

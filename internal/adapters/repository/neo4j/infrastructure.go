@@ -211,3 +211,50 @@ func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context,
 
 	return res.([]domain.APTThreatResult), nil
 }
+
+// CalculateExploitationPaths busca endpoints expuestos a internet con vulnerabilidades que permiten ejecución de código (RCE).
+func (r *infrastructureRepo) CalculateExploitationPaths(ctx context.Context) ([]domain.ExploitationPathResult, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (e:Endpoint {internet_exposed: true})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE v.base_score >= 9.0 OR v.exploitation_vector = true OR v.description =~ '.*(?i)(code execution|command injection|remote code execution|RCE).*'
+		RETURN e.id AS endpoint_id, e.hostname AS hostname, v.cve_id AS cve, v.description AS description, f.risk_score AS risk
+		ORDER BY f.risk_score DESC
+	`
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, query, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		var paths []domain.ExploitationPathResult
+		for result.Next(ctx) {
+			record := result.Record()
+			epID, _ := record.Get("endpoint_id")
+			hostname, _ := record.Get("hostname")
+			cve, _ := record.Get("cve")
+			desc, _ := record.Get("description")
+			risk, _ := record.Get("risk")
+
+			paths = append(paths, domain.ExploitationPathResult{
+				EndpointID:  epID.(int64),
+				Hostname:    hostname.(string),
+				CVE:         cve.(string),
+				Description: desc.(string),
+				Risk:        risk.(float64),
+			})
+		}
+		return paths, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.ExploitationPathResult{}, nil
+	}
+	return res.([]domain.ExploitationPathResult), nil
+}

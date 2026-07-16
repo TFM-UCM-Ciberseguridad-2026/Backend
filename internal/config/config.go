@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -28,8 +29,9 @@ type DatabaseConfig struct {
 
 // NVDConfig contiene las credenciales y URLs para interactuar con la API NIST NVD.
 type NVDConfig struct {
-	APIKey  string
-	BaseURL string
+	APIKey         string
+	BaseURL        string
+	TimeoutSeconds int
 }
 
 // Config centraliza todas las variables de configuración cargadas del entorno.
@@ -136,8 +138,9 @@ func LoadConfig() (*Config, error) {
 			SSLMode:  getEnv("DB_SSLMODE", ""),
 		},
 		NVD: NVDConfig{
-			APIKey:  getEnv("NVD_API_KEY", ""),
-			BaseURL: getEnv("NVD_BASE_URL", "https://services.nvd.nist.gov/rest/json/cves/2.0"),
+			APIKey:         getEnv("NVD_API_KEY", ""),
+			BaseURL:        getEnv("NVD_BASE_URL", "https://services.nvd.nist.gov/rest/json/cves/2.0"),
+			TimeoutSeconds: getEnvAsInt("NVD_API_TIMEOUT", 90),
 		},
 	}
 
@@ -148,6 +151,16 @@ func LoadConfig() (*Config, error) {
 func getEnv(key, defaultValue string) string {
 	if val, exists := os.LookupEnv(key); exists {
 		return val
+	}
+	return defaultValue
+}
+
+// getEnvAsInt es una función auxiliar para obtener un entero del entorno.
+func getEnvAsInt(key string, defaultValue int) int {
+	if val, exists := os.LookupEnv(key); exists {
+		if i, err := strconv.Atoi(val); err == nil {
+			return i
+		}
 	}
 	return defaultValue
 }

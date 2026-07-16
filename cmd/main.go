@@ -12,6 +12,7 @@ import (
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository/neo4j"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/config"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/service"
+	"github.com/go-co-op/gocron"
 )
 
 /*
@@ -47,11 +48,11 @@ func main() {
 	}()
 
 	// 3. Inicialización de Repositorios (Adaptadores Outbound)
-	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, _, hardwareRepo, networkRepo, _, projectRepo, _, relRepo := neo4j.NewRepository(driver)
+	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, _, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo := neo4j.NewRepository(driver)
 	infraRepo := neo4j.NewInfrastructureRepository(driver)
 
 	// 4. Inicialización del Servicio/Orquestador (Core)
-	nistAPIAdapter := provider.NewNistAPIAdapter("https://services.nvd.nist.gov/rest/json/cves/2.0", cfg.NVD.APIKey)
+	nistAPIAdapter := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey, cfg.NVD.TimeoutSeconds)
 	orchestrator := service.NewOrchestrator(
 		projectRepo,
 		endpointRepo,
@@ -64,6 +65,8 @@ func main() {
 		remediationRepo,
 		relRepo,
 		infraRepo,
+		patchRepo,
+		dbHelper,
 		nistAPIAdapter,
 	)
 
@@ -73,6 +76,20 @@ func main() {
 
 	// Middleware CORS para evitar bloqueos del navegador en desarrollo
 	corsHandler := middleware.CORS(router)
+
+	// Iniciar planificador Cron para la tarea diaria del NIST
+	s := gocron.NewScheduler(time.UTC)
+	s.Every(1).Day().At("02:00").Do(func() {
+		fmt.Println("Ejecutando tarea diaria: Sincronización con NIST...")
+		cronCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute) // Damos tiempo porque la API del NIST puede ser lenta
+		defer cancel()
+		if err := orchestrator.SyncNistDaily(cronCtx); err != nil {
+			log.Printf("Error en sincronización diaria NIST: %v", err)
+		} else {
+			log.Println("Sincronización diaria NIST completada con éxito.")
+		}
+	})
+	s.StartAsync()
 
 	// 6. Levantar Servidor Web (con Graceful Shutdown)
 	port := ":8080"

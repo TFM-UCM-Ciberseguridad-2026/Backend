@@ -2,6 +2,7 @@ package ports
 
 import (
 	"context"
+	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 )
@@ -110,6 +111,8 @@ type VulnerabilityAPIscanner interface {
 	FetchVulnerabilities(ctx context.Context, limit int, offset int) ([]domain.Vulnerability, error)
 	// FetchByCPE obtiene las vulnerabilidades asociadas a un CPE específico.
 	FetchByCPE(ctx context.Context, cpe string) ([]domain.Vulnerability, error)
+	// FetchByDate obtiene las vulnerabilidades modificadas en un rango de fechas.
+	FetchByDate(ctx context.Context, startDate, endDate time.Time) ([]domain.Vulnerability, error)
 }
 
 //Los CRUDS para el mitre... consutarlo con Julve
@@ -132,4 +135,5 @@ type ThreatActorPort interface {
 type InfrastructurePort interface {
 	GetGraphData(ctx context.Context) (*domain.GraphData, error)
 	GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int) ([]domain.APTThreatResult, error)
+	CalculateExploitationPaths(ctx context.Context) ([]domain.ExploitationPathResult, error)
 }
