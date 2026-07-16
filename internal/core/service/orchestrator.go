@@ -2,6 +2,9 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"math/rand"
+	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/ports"
@@ -29,6 +32,7 @@ type Orchestrator struct {
 	remediationPort  ports.RemediationPort
 	relationshipPort ports.RelationshipPort
 	infraPort        ports.InfrastructurePort
+	vulnScannerPort  ports.VulnerabilityAPIscanner
 }
 
 func NewOrchestrator(
@@ -43,6 +47,7 @@ func NewOrchestrator(
 	remediationPort ports.RemediationPort,
 	relationshipPort ports.RelationshipPort,
 	infraPort ports.InfrastructurePort,
+	vulnScannerPort ports.VulnerabilityAPIscanner,
 ) *Orchestrator {
 	return &Orchestrator{
 		projectPort:      projectPort,
@@ -56,6 +61,7 @@ func NewOrchestrator(
 		remediationPort:  remediationPort,
 		relationshipPort: relationshipPort,
 		infraPort:        infraPort,
+		vulnScannerPort:  vulnScannerPort,
 	}
 }
 
@@ -137,12 +143,80 @@ func (o *Orchestrator) GetInfrastructure(ctx context.Context) (*domain.GraphData
 	return graph, nil
 }
 
-
-
 // GetTopAPTs obtiene la lista rankeada de Actores de Amenaza (APT) que más TTPs comparten
 // con las vulnerabilidades detectadas en la infraestructura del usuario.
 func (o *Orchestrator) GetTopAPTs(ctx context.Context) ([]domain.APTThreatResult, error) {
 	return o.infraPort.GetTopAPTsByInfrastructureTTPs(ctx, 10)
 }
 
+/*
+AutoScanAndRegisterVulnerabilities implementa el caso de uso central para automatizar la detección y registro de fallos:
+ 1. Recupera la entidad del software a partir de su ID.
+ 2. Si no tiene una cadena CPE válida (o está vacía o es "N/A"), la genera dinámicamente usando el tipo de software (aplicación, sistema operativo, etc.) y la guarda en la base de datos para futuras referencias.
+ 3. Invoca el puerto externo VulnerabilityAPIscanner para buscar vulnerabilidades usando el CPE generado.
+ 4. Para cada vulnerabilidad encontrada, la guarda/actualiza en la base de datos de grafos Neo4j.
+ 5. Crea un Hallazgo (Finding) con puntaje de riesgo inicializado y genera los enlaces relacionales de infraestructura:
+    SoftwareInstallation -> [:HAS_FINDING] -> Finding -> [:OF_VULNERABILITY] -> Vulnerability.
+*/
+func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, installationID string, softwareID int64) error {
+	// 1. Obtener la entidad de software
+	sw, err := o.softwarePort.GetByID(ctx, softwareID)
+	if err != nil {
+		return fmt.Errorf("no se pudo recuperar el software: %w", err)
+	}
 
+	// 2. Resolver o generar CPE
+	cpe := sw.CPE
+	if cpe == "" || cpe == "N/A" {
+		// Generar automáticamente el CPE a partir del tipo (part), vendor, nombre del software y su versión
+		cpe = domain.GenerateCPE23(sw.Type, sw.Vendor, sw.Name, sw.Version)
+		sw.CPE = cpe
+		// Actualizar el software con el nuevo CPE generado
+		if err := o.softwarePort.Save(ctx, sw); err != nil {
+			return fmt.Errorf("error guardando software con CPE generado: %w", err)
+		}
+	}
+
+	// 3. Buscar vulnerabilidades a través del puerto de escaneo
+	vulns, err := o.vulnScannerPort.FetchByCPE(ctx, cpe)
+	if err != nil {
+		return fmt.Errorf("error consultando la API de vulnerabilidades para el CPE %s: %w", cpe, err)
+	}
+
+	// 4. Registrar vulnerabilidades y enlazarlas como hallazgos (Findings)
+	for _, v := range vulns {
+		// Guardar vulnerabilidad en la base de datos
+		vCopy := v
+		if err := o.vulnPort.Save(ctx, &vCopy); err != nil {
+			return fmt.Errorf("error al guardar la vulnerabilidad %s: %w", vCopy.CVEID, err)
+		}
+
+		// Crear un Hallazgo (Finding) para conectar la instalación del software con el CVE detectado
+		now := time.Now().UTC()
+		// Generamos un ID de finding semi-aleatorio (int64) para simplificar la persistencia única
+		findingID := int64(rand.Int31n(1000000) + 1)
+		finding := &domain.Finding{ //TODO: retocar los valores por defectoooo TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
+			FindingID:         findingID,
+			Status:            "OPEN",
+			FirstSeen:         now,
+			ImpactScore:       vCopy.BaseScore,
+			Likelihood:        0.5,
+			RemediationFactor: 1.0,
+			RiskScore:         vCopy.BaseScore * 0.5,
+		}
+
+		if err := o.findingPort.Save(ctx, finding); err != nil {
+			return fmt.Errorf("error al guardar el hallazgo para la vulnerabilidad %s: %w", vCopy.CVEID, err)
+		}
+
+		// Establecer las relaciones en Neo4j
+		if err := o.relationshipPort.LinkInstallationToFinding(ctx, installationID, finding.FindingID); err != nil {
+			return fmt.Errorf("error al enlazar la instalación al finding: %w", err)
+		}
+		if err := o.relationshipPort.LinkFindingToVulnerability(ctx, finding.FindingID, vCopy.CVEID); err != nil {
+			return fmt.Errorf("error al enlazar el finding a la vulnerabilidad: %w", err)
+		}
+	}
+
+	return nil
+}

@@ -108,6 +108,8 @@ type DatabaseHelper interface {
 type VulnerabilityAPIscanner interface {
 	// FetchVulnerabilities obtiene una lista de vulnerabilidades desde el API externa.
 	FetchVulnerabilities(ctx context.Context, limit int, offset int) ([]domain.Vulnerability, error)
+	// FetchByCPE obtiene las vulnerabilidades asociadas a un CPE específico.
+	FetchByCPE(ctx context.Context, cpe string) ([]domain.Vulnerability, error)
 }
 
 //Los CRUDS para el mitre... consutarlo con Julve

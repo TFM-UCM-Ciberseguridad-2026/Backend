@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/provider"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository/neo4j"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/config"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -31,12 +32,14 @@ func main() {
 
 	// 1. Instanciamos los repositorios
 	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, exploitRepo, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo := neo4j.NewRepository(driver)
+	infraRepo := neo4j.NewInfrastructureRepository(driver)
 
 	// Limpiamos base de datos
 	_ = dbHelper.ExecuteWrite(ctx, "MATCH (n) DETACH DELETE n", nil)
 	fmt.Println("[OK] Base de datos limpiada.")
 
 	// 2. Instanciamos el Orquestador Inyectando los Puertos
+	nistAPIAdapter := provider.NewNistAPIAdapter("https://services.nvd.nist.gov/rest/json/cves/2.0", cfg.NVD.APIKey)
 	orchestrator := service.NewOrchestrator(
 		projectRepo,
 		endpointRepo,
@@ -48,6 +51,8 @@ func main() {
 		vulnRepo,
 		remediationRepo,
 		relRepo,
+		infraRepo,
+		nistAPIAdapter,
 	)
 
 	fmt.Println("[OK] Orquestador instanciado correctamente con Inyección de Dependencias.")

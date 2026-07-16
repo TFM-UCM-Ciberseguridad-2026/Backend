@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -124,6 +125,49 @@ func (a *NistAPIAdapter) FetchVulnerabilities(ctx context.Context, limit int, of
 	}
 
 	// Mapeo de DTOs externos a Entidades de Dominio Puras
+	var vulnerabilities []domain.Vulnerability
+	for _, item := range apiResponse.Vulnerabilities {
+		vulnerabilities = append(vulnerabilities, toDomainEntity(item))
+	}
+
+	return vulnerabilities, nil
+}
+
+/*
+FetchByCPE consulta la API REST oficial de NIST NVD v2.0 usando un CPE (Common Platform Enumeration) dado.
+1. Recibe el identificador CPE (ej. cpe:2.3:a:apache:tomcat:9.0.37:*:*:*:*:*:*:*) y lo escapa de manera segura.
+2. Construye la URL agregando el parámetro de consulta ?cpeName={cpe}.
+3. Inyecta la API Key en las cabeceras (si está configurada) para evitar bloqueos por límite de peticiones.
+4. Envía la solicitud y decodifica la respuesta JSON en DTOs, mapeando el resultado a entidades limpias de dominio.
+*/
+func (a *NistAPIAdapter) FetchByCPE(ctx context.Context, cpe string) ([]domain.Vulnerability, error) {
+	escapedCPE := url.QueryEscape(cpe)
+	reqURL := fmt.Sprintf("%s?cpeName=%s", a.baseURL, escapedCPE)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creando request para NIST por CPE: %w", err)
+	}
+
+	if a.apiKey != "" {
+		req.Header.Set("apiKey", a.apiKey)
+	}
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error ejecutando llamada HTTP a NIST por CPE: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("api nist devolvió status code inválido por CPE: %d", resp.StatusCode)
+	}
+
+	var apiResponse NistResponseDTO
+	if err := json.NewDecoder(resp.Body).Decode(&apiResponse); err != nil {
+		return nil, fmt.Errorf("error decodificando JSON de NIST por CPE: %w", err)
+	}
+
 	var vulnerabilities []domain.Vulnerability
 	for _, item := range apiResponse.Vulnerabilities {
 		vulnerabilities = append(vulnerabilities, toDomainEntity(item))
