@@ -1,6 +1,9 @@
 package service
 
-import "math"
+import (
+	"math"
+	"strings"
+)
 
 // Parámetros de diseño documentados (ver spec del sistema).
 // Ajustar tras calibración con criterio experto sobre 20-30 endpoints conocidos.
@@ -29,33 +32,136 @@ func CalculateLikelihood(isKEV bool, hasExploit bool, epss float64) float64 {
 	return epss
 }
 
-// CalculateFindingRisk aplica la fórmula:  riesgo = L × R × impacto
+// CalculateExposureFactor deriva la exposición del endpoint según las reglas de la spec:
+//
+//	Exposicion inicial      → 0.70
+//	Expuesto a internet     → +0.30
+//	Expuesto via red(AV:N)  → +0.15
+//	Esta en operacion        → +0.05
+func CalculateExposureFactor(internetExposed bool, environment string, cvssVector string) float64 {
+	exposure := 0.70
+	if internetExposed {
+		exposure += 0.30
+	}
+	if hasNetworkAttackVector(cvssVector) {
+		exposure += 0.15
+	}
+	if isProductionEnvironment(environment) {
+		exposure += 0.05
+	}
+	return clamp(exposure, 0.0, 1.0)
+}
+
+// HELPERS
+func hasNetworkAttackVector(cvssVector string) bool {
+	return strings.Contains(strings.ToUpper(cvssVector), "AV:N")
+}
+
+func isProductionEnvironment(environment string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(environment))
+	return normalized == "prod" || normalized == "production" || normalized == "produccion" || normalized == "producción"
+}
+
+func clamp(value, min, max float64) float64 {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+// CalculateFindingRisk aplica la fórmula:  riesgo = L × R x exposicion × impacto
 // Todos los parámetros deben estar normalizados a [0, 1].
-func CalculateFindingRisk(likelihood, remediationFactor, impactScore float64) float64 {
-	return likelihood * remediationFactor * impactScore
+func CalculateFindingRisk(likelihood, exposureFactor, remediationFactor, impactScore float64) float64 {
+	return clamp(likelihood*exposureFactor*remediationFactor*impactScore, 0.0, 1.0)
+}
+
+const (
+	maxAssetCriticality = 1.75
+	minAssetCriticality = 0.75
+	maxUrgencyBoost     = 2.00
+	minUrgencyBoost     = 1.00
+)
+
+// CalculateAssetCriticality deriva la criticidad del activo según los requisitos CIA, exposición a Internet y entorno.
+func CalculateAssetCriticality(internetExposed bool, environment, confidentialityReq, integrityReq, availabilityReq string) float64 {
+	criticality := 1.00
+
+	if isProductionEnvironment(environment) {
+		criticality += 0.30
+	} else if isStagingEnvironment(environment) {
+		criticality += 0.10
+	}
+
+	criticality += ciaRequirementBoost(confidentialityReq)
+	criticality += ciaRequirementBoost(integrityReq)
+	criticality += ciaRequirementBoost(availabilityReq)
+
+	if internetExposed {
+		criticality += 0.15
+	}
+
+	return clamp(criticality, minAssetCriticality, maxAssetCriticality)
+}
+
+// HELPERS
+// verifica si el entorno es de staging/preproducción para ajustar la criticidad del activo.
+func isStagingEnvironment(environment string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(environment))
+	return normalized == "staging" || normalized == "pre" || normalized == "preproduction" || normalized == "preprod"
+}
+
+// asigna un valor de criticidad según los requisitos de confidencialidad, integridad y disponibilidad (CIA) del activo.
+func ciaRequirementBoost(requirement string) float64 {
+	normalized := strings.ToLower(strings.TrimSpace(requirement))
+	switch normalized {
+	case "h", "high", "alto", "alta":
+		return 0.15
+	case "m", "medium", "medio", "media":
+		return 0.07
+	default:
+		return 0.00
+	}
+}
+
+// Urgencia sobre la prioridad de parcheo: se calcula con la siguiente fórmula:
+//
+//	urgency_boost = 1.0 + impact_boost + kev_boost + exploit_boost + patch_boost
+//
+// Donde cada boost es un valor entre 0 y 1, y el resultado final se clampa entre [1.0, 2.0].
+func CalculateUrgencyBoost(impact float64, isKEV bool, hasExploit bool, patchAvailable bool) float64 {
+	boost := 1.00
+
+	switch {
+	case impact >= 0.95:
+		boost += 0.50
+	case impact >= 0.80:
+		boost += 0.35
+	case impact >= 0.60:
+		boost += 0.15
+	}
+
+	if isKEV {
+		boost += 0.30
+	}
+	if hasExploit {
+		boost += 0.20
+	}
+	if patchAvailable {
+		boost += 0.10
+	}
+
+	return clamp(boost, minUrgencyBoost, maxUrgencyBoost)
 }
 
 // CalculatePriorityScore deriva la cola de priorización de parcheo.
-// Se calcula sobre el riesgo del finding y se multiplica por factores contextuales.
-// KEV y patch/workaround son independientes y acumulables.
-// El resultado se acota a [0, 1] aunque los multiplicadores pueden superarlo.
-func CalculatePriorityScore(riskScore float64, isKEV bool, patchAvailable bool, workaroundOnly bool) float64 {
-	priority := riskScore
+// Se calcula con la siguiente formula:
+//  priority_score = risk_score * asset_criticality * urgency_boost
 
-	if isKEV {
-		priority *= kevMultiplier
-	}
-	switch {
-	case patchAvailable:
-		priority *= patchMultiplier
-	case workaroundOnly:
-		priority *= workaroundMultiplier
-	}
-
-	if priority > 1.0 {
-		priority = 1.0
-	}
-	return priority
+func CalculatePriorityScore(riskScore, assetCriticality, urgencyBoost float64) float64 {
+	return clamp(riskScore*assetCriticality*urgencyBoost, 0.0, 1.0)
 }
 
 // AggregateEndpointRisk combina los scores de todos los findings de un endpoint

@@ -28,6 +28,7 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 		    f.id                    AS finding_id,
 		    f.status                AS finding_status,
 		    f.remediation_factor    AS remediation_factor,
+		    f.exposure_factor       AS exposure_factor,
 		    p IS NOT NULL           AS has_patch,
 		    v.cve_id                AS cve_id,
 		    v.cvss_vector           AS cvss_vector,
@@ -35,6 +36,8 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 		    v.epss_score            AS cached_epss,
 		    v.kev                   AS cached_kev,
 		    v.exploit               AS has_exploit,
+			e.internet_exposed      AS internet_exposed,
+			e.environment            AS environment,
 		    e.confidentiality_req   AS cr,
 		    e.integrity_req         AS ir,
 		    e.availability_req      AS ar
@@ -63,6 +66,8 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 			epss, _ := rec.Get("cached_epss")
 			kev, _ := rec.Get("cached_kev")
 			exploit, _ := rec.Get("has_exploit")
+			internetExposed, _ := rec.Get("internet_exposed")
+			environment, _ := rec.Get("environment")
 			cr, _ := rec.Get("cr")
 			ir, _ := rec.Get("ir")
 			ar, _ := rec.Get("ar")
@@ -78,6 +83,8 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 				CachedEPSS:         toFloat64(epss),
 				CachedKEV:          toBool(kev),
 				HasExploit:         toBool(exploit),
+				InternetExposed:    toBool(internetExposed),
+				Environment:        toStr(environment),
 				ConfidentialityReq: toStr(cr),
 				IntegrityReq:       toStr(ir),
 				AvailabilityReq:    toStr(ar),
@@ -97,13 +104,16 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 }
 
 // UpdateFindingScores persiste los scores calculados en el nodo Finding.
-func (r *riskRepo) UpdateFindingScores(ctx context.Context, findingID int64, impactScore, likelihood, remediationFactor, riskScore, priorityScore float64) error {
+func (r *riskRepo) UpdateFindingScores(ctx context.Context, findingID int64, impactScore, likelihood, exposureFactor, remediationFactor, riskScore, assetCriticality, urgencyBoost, priorityScore float64) error {
 	query := `
 		MATCH (f:Finding {id: $id})
 		SET f.impact_score       = $impact_score,
 		    f.likelihood         = $likelihood,
+			f.exposure_factor     = $exposure_factor,
 		    f.remediation_factor = $remediation_factor,
 		    f.risk_score         = $risk_score,
+		    f.asset_criticality  = $asset_criticality,
+		    f.urgency_boost      = $urgency_boost,
 		    f.priority_score     = $priority_score,
 		    f.risk_computed_at   = $now
 	`
@@ -111,8 +121,11 @@ func (r *riskRepo) UpdateFindingScores(ctx context.Context, findingID int64, imp
 		"id":                 findingID,
 		"impact_score":       impactScore,
 		"likelihood":         likelihood,
+		"exposure_factor":    exposureFactor,
 		"remediation_factor": remediationFactor,
 		"risk_score":         riskScore,
+		"asset_criticality":  assetCriticality,
+		"urgency_boost":      urgencyBoost,
 		"priority_score":     priorityScore,
 		"now":                time.Now().UTC(),
 	})

@@ -55,7 +55,7 @@ var testFindings = []struct {
 	},
 	{
 		findingID: 9012, remediationID: 9022, installationID: "inst-misc-risk-test",
-		remediationFactor: 1.0, // sin parche
+		remediationFactor: 1.0,              // sin parche
 		cveID:             "CVE-2023-12345", // ficticio: no está en KEV ni EPSS → default 0.1
 		cvssVector:        "CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:L/I:N/A:L",
 		baseScore:         1.8,
@@ -219,8 +219,11 @@ func main() {
 		RETURN v.cve_id         AS cve,
 		       f.impact_score   AS impact,
 		       f.likelihood     AS likelihood,
+			   f.exposure_factor AS exposure,
 		       f.remediation_factor AS rem_factor,
 		       f.risk_score     AS risk,
+			   f.asset_criticality AS asset_crit,
+			   f.urgency_boost AS urgency,
 		       f.priority_score AS priority
 		ORDER BY priority DESC
 	`, map[string]any{"ep_id": endpointID})
@@ -234,15 +237,21 @@ func main() {
 		cve, _ := rec.Get("cve")
 		impact, _ := rec.Get("impact")
 		likelihood, _ := rec.Get("likelihood")
+		exposure, _ := rec.Get("exposure")
 		remFactor, _ := rec.Get("rem_factor")
 		risk, _ := rec.Get("risk")
+		assetCrit, _ := rec.Get("asset_crit")
+		urgency, _ := rec.Get("urgency")
 		priority, _ := rec.Get("priority")
 
 		fmt.Printf("  │ #%d %-22s\n", i, cve)
 		fmt.Printf("  │    Impact (env)    : %.4f\n", toF(impact))
 		fmt.Printf("  │    Likelihood      : %.4f\n", toF(likelihood))
+		fmt.Printf("  │    Exposure Factor : %.4f\n", toF(exposure))
 		fmt.Printf("  │    Remediation (R) : %.2f\n", toF(remFactor))
 		fmt.Printf("  │    Risk Score      : %.4f\n", toF(risk))
+		fmt.Printf("  │    Asset Criticality: %.4f\n", toF(assetCrit))
+		fmt.Printf("  │    Urgency Boost   : %.4f\n", toF(urgency))
 		fmt.Printf("  │    Priority Score  : %.4f\n", toF(priority))
 		if i < len(testFindings) {
 			fmt.Println("  ├──────────────────────────────────────────────────────────────")

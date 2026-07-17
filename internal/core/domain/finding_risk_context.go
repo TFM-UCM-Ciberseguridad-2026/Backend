@@ -9,12 +9,14 @@ type FindingRiskContext struct {
 	RemediationFactor float64
 	PatchAvailable    bool // true si existe un nodo Patch vinculado a la remediación
 
-	CVEID          string
-	CVSSVector     string
+	CVEID           string
+	CVSSVector      string
 	CachedBaseScore float64 // fallback si el vector es inválido o está vacío
-	CachedEPSS     float64 // valor almacenado en Neo4j; se sobreescribe con datos frescos
-	CachedKEV      bool
-	HasExploit     bool
+	CachedEPSS      float64 // valor almacenado en Neo4j; se sobreescribe con datos frescos
+	CachedKEV       bool
+	HasExploit      bool
+	InternetExposed bool   // true si el endpoint tiene IP pública o está en una subred expuesta a Internet
+	Environment     string // entorno del endpoint (producción, desarrollo, etc.)
 
 	// Requisitos CIA del endpoint (Low/Medium/High)
 	ConfidentialityReq string

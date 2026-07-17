@@ -291,14 +291,29 @@ func (o *Orchestrator) ComputeEndpointRisk(ctx context.Context, endpointID int64
 
 		likelihood := CalculateLikelihood(isKEV, fc.HasExploit, epss)
 
-		riskScore := CalculateFindingRisk(likelihood, fc.RemediationFactor, impactScore)
+		exposureFactor := CalculateExposureFactor(fc.InternetExposed, fc.Environment, fc.CVSSVector)
+		riskScore := CalculateFindingRisk(likelihood, exposureFactor, fc.RemediationFactor, impactScore)
 
-		// Para la prioridad: workaround si remediation_factor está entre 0.1 y 0.9
-		workaroundOnly := fc.RemediationFactor > 0.0 && fc.RemediationFactor < 1.0 && !fc.PatchAvailable
-		priorityScore := CalculatePriorityScore(riskScore, isKEV, fc.PatchAvailable, workaroundOnly)
+		// Para la prioridad de parcheo, necesitamos la criticidad del activo y el boost de urgencia
+		assetCriticality := CalculateAssetCriticality(
+			fc.InternetExposed,
+			fc.Environment,
+			fc.ConfidentialityReq,
+			fc.IntegrityReq,
+			fc.AvailabilityReq,
+		)
+
+		urgencyBoost := CalculateUrgencyBoost(
+			impactScore,
+			isKEV,
+			fc.HasExploit,
+			fc.PatchAvailable,
+		)
+
+		priorityScore := CalculatePriorityScore(riskScore, assetCriticality, urgencyBoost)
 
 		if err := o.riskPort.UpdateFindingScores(
-			ctx, fc.FindingID, impactScore, likelihood, fc.RemediationFactor, riskScore, priorityScore,
+			ctx, fc.FindingID, impactScore, likelihood, exposureFactor, fc.RemediationFactor, riskScore, assetCriticality, urgencyBoost, priorityScore,
 		); err != nil {
 			return fmt.Errorf("error actualizando scores del finding %d: %w", fc.FindingID, err)
 		}
