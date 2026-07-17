@@ -54,7 +54,7 @@ func main() {
 
 	// 3. Inicializar Proveedor (NIST NVD)
 	fmt.Println("\n--- PARTE 2: Descargando de NIST NVD y verificando conversiones ---")
-	nistScanner := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey)
+	nistScanner := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey, cfg.NVD.TimeoutSeconds)
 	fmt.Printf("Conectando a NIST NVD (%s)...\n", cfg.NVD.BaseURL)
 
 	// 4. Obtener 100 Vulnerabilidades
