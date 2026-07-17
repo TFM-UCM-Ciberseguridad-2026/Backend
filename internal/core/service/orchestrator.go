@@ -221,30 +221,17 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 			_ = o.relationshipPort.LinkPatchToVulnerability(ctx, pCopy.PatchID, vCopy.CVEID)
 		}
 
-		// Calcular métricas de riesgo dinámicamente
-		likelihood := 0.5
-		if vCopy.Exploit || vCopy.KEV {
-			likelihood = 0.9
-		}
-
-		remediationFactor := 1.0
-		if len(vCopy.Patches) > 0 {
-			remediationFactor = 0.5
-		}
-		
-		riskScore := vCopy.BaseScore * likelihood * remediationFactor
-
 		// Crear un Hallazgo (Finding) para conectar la instalación del software con el CVE detectado
 		now := time.Now().UTC()
 		findingID := int64(rand.Int31n(1000000) + 1)
-		finding := &domain.Finding{
+		finding := &domain.Finding{ //TODO: retocar los valores por defectoooo TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
 			FindingID:         findingID,
 			Status:            "OPEN",
 			FirstSeen:         now,
 			ImpactScore:       vCopy.BaseScore,
-			Likelihood:        likelihood,
-			RemediationFactor: remediationFactor,
-			RiskScore:         riskScore,
+			Likelihood:        0.5,
+			RemediationFactor: 1.0,
+			RiskScore:         vCopy.BaseScore * 0.5,
 		}
 
 		if err := o.findingPort.Save(ctx, finding); err != nil {
@@ -260,47 +247,7 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		}
 	}
 
-	// Como se han añadido nuevos findings a una instalación, que lógicamente pertenece a un endpoint,
-	// sería ideal recalcular el riesgo del endpoint. Para simplificar, requeriríamos el endpointID asociado
-	// a la installationID. 
-	// Para este MVP, asumiremos que quien llame a AutoScan también puede llamar a RecalculateEndpointRisk
-	// si dispone del endpointID, o bien se actualizará de forma asíncrona.
-
 	return nil
-}
-
-// RecalculateEndpointRisk recalcula el riesgo de un endpoint agregando el riesgo de sus hallazgos.
-func (o *Orchestrator) RecalculateEndpointRisk(ctx context.Context, endpointID int64) error {
-	endpoint, err := o.endpointPort.GetByID(ctx, endpointID)
-	if err != nil {
-		return err
-	}
-	
-	// Usamos dbHelper para obtener el riesgo agregado (ej: valor máximo de risk_score entre sus findings)
-	query := `
-		MATCH (e:Endpoint {id: $endpointID})-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)
-		RETURN coalesce(max(f.risk_score), 0.0) as max_risk
-	`
-	res, err := o.dbHelper.ExecuteRead(ctx, query, map[string]any{"endpointID": endpointID})
-	if err != nil {
-		return err
-	}
-	
-	if maxRiskMap, ok := res.(map[string]any); ok {
-		if maxRisk, ok := maxRiskMap["max_risk"].(float64); ok {
-			endpoint.RiskScore = maxRisk
-			now := time.Now().UTC()
-			endpoint.RiskComputedAt = &now
-			return o.endpointPort.Save(ctx, endpoint)
-		}
-	}
-	
-	return nil
-}
-
-// CalculateExploitationPaths busca endpoints expuestos a internet con vulnerabilidades de alto riesgo.
-func (o *Orchestrator) CalculateExploitationPaths(ctx context.Context) ([]domain.ExploitationPathResult, error) {
-	return o.infraPort.CalculateExploitationPaths(ctx)
 }
 
 // SyncNistDaily obtiene las vulnerabilidades modificadas en las últimas 24 horas y actualiza la BBDD.

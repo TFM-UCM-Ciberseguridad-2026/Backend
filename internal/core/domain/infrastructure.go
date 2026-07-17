@@ -35,12 +35,3 @@ type APTThreatResult struct {
 	MatchedTTPNames  []string `json:"matched_ttp_names"`
 	MatchedTTPIDs    []string `json:"matched_ttp_ids"`
 }
-
-// ExploitationPathResult representa una ruta crítica de explotación en la red.
-type ExploitationPathResult struct {
-	EndpointID  int64   `json:"endpoint_id"`
-	Hostname    string  `json:"hostname"`
-	CVE         string  `json:"cve"`
-	Description string  `json:"description"`
-	Risk        float64 `json:"risk"`
-}
