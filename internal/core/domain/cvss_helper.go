@@ -399,8 +399,168 @@ func CalculateCVSS31BaseScore(av, ac, pr, ui, s, c, i, a string) (float64, error
 	return roundup(baseScore), nil
 }
 
+// CalculateCVSS31EnvironmentalScore calcula el Environmental Score de CVSS 3.1
+// aplicando los Security Requirements (CR/IR/AR) del endpoint al vector base del CVE.
+// cr, ir, ar aceptan "Low", "Medium" o "High" (case-insensitive).
+// Devuelve un valor normalizado [0, 1].
+func CalculateCVSS31EnvironmentalScore(cvssVector, cr, ir, ar string) (float64, error) {
+	metrics, err := parseCVSS31Vector(cvssVector)
+	if err != nil {
+		return 0, err
+	}
+
+	// Security Requirements: High=1.5, Medium=1.0, Low=0.5
+	crVal := requirementValue(cr)
+	irVal := requirementValue(ir)
+	arVal := requirementValue(ar)
+
+	// CIA numeric values (mismos que el base score)
+	cVal, err := ciaValue(metrics["C"])
+	if err != nil {
+		return 0, err
+	}
+	iVal, err := ciaValue(metrics["I"])
+	if err != nil {
+		return 0, err
+	}
+	aVal, err := ciaValue(metrics["A"])
+	if err != nil {
+		return 0, err
+	}
+
+	// ISCModified = min(1 − (1−C·CR)(1−I·IR)(1−A·AR), 0.915)
+	iscMod := 1.0 - (1.0-cVal*crVal)*(1.0-iVal*irVal)*(1.0-aVal*arVal)
+	if iscMod > 0.915 {
+		iscMod = 0.915
+	}
+
+	if iscMod <= 0 {
+		return 0.0, nil
+	}
+
+	// Modified Impact (misma lógica que base, usando ISCModified)
+	s := metrics["S"]
+	var modImpact float64
+	if s == "U" {
+		modImpact = 6.42 * iscMod
+	} else {
+		modImpact = 7.52*(iscMod-0.029) - 3.25*math.Pow(iscMod-0.02, 15)
+	}
+
+	if modImpact <= 0 {
+		return 0.0, nil
+	}
+
+	// Modified Exploitability = base exploitability (no hay métricas Modified de ataque)
+	modExp, err := baseExploitability(metrics)
+	if err != nil {
+		return 0, err
+	}
+
+	// Environmental Score (sin métricas Temporal → E/RL/RC = 1.0)
+	var envScore float64
+	if s == "U" {
+		envScore = math.Min(modImpact+modExp, 10.0)
+	} else {
+		envScore = math.Min(1.08*(modImpact+modExp), 10.0)
+	}
+
+	return roundup(envScore) / 10.0, nil // normalizado a [0,1]
+}
+
+// requirementValue convierte Low/Medium/High al coeficiente numérico de la spec.
+func requirementValue(req string) float64 {
+	switch strings.ToLower(req) {
+	case "high", "h":
+		return 1.5
+	case "low", "l":
+		return 0.5
+	default: // Medium, Not Defined, vacío
+		return 1.0
+	}
+}
+
+// ciaValue convierte N/L/H al coeficiente CIA del base score CVSS 3.1.
+func ciaValue(v string) (float64, error) {
+	switch v {
+	case "H":
+		return 0.56, nil
+	case "L":
+		return 0.22, nil
+	case "N":
+		return 0.0, nil
+	default:
+		return 0, fmt.Errorf("invalid CIA value: %s", v)
+	}
+}
+
+// baseExploitability recalcula la exploitability del vector CVSS 3.1.
+func baseExploitability(m map[string]string) (float64, error) {
+	avMap := map[string]float64{"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.20}
+	acMap := map[string]float64{"L": 0.77, "H": 0.44}
+	uiMap := map[string]float64{"N": 0.85, "R": 0.62}
+
+	av, ok := avMap[m["AV"]]
+	if !ok {
+		return 0, fmt.Errorf("invalid AV: %s", m["AV"])
+	}
+	ac, ok := acMap[m["AC"]]
+	if !ok {
+		return 0, fmt.Errorf("invalid AC: %s", m["AC"])
+	}
+	ui, ok := uiMap[m["UI"]]
+	if !ok {
+		return 0, fmt.Errorf("invalid UI: %s", m["UI"])
+	}
+
+	var pr float64
+	switch m["S"] {
+	case "U":
+		prMap := map[string]float64{"N": 0.85, "L": 0.62, "H": 0.27}
+		pr, ok = prMap[m["PR"]]
+	case "C":
+		prMap := map[string]float64{"N": 0.85, "L": 0.68, "H": 0.50}
+		pr, ok = prMap[m["PR"]]
+	default:
+		return 0, fmt.Errorf("invalid S: %s", m["S"])
+	}
+	if !ok {
+		return 0, fmt.Errorf("invalid PR: %s", m["PR"])
+	}
+
+	return 8.22 * av * ac * pr * ui, nil
+}
+
+// parseCVSS31Vector parsea un vector CVSS:3.1/AV:N/AC:L/... en un mapa de métricas.
+func parseCVSS31Vector(vectorStr string) (map[string]string, error) {
+	if !strings.HasPrefix(vectorStr, "CVSS:3.1") {
+		return nil, fmt.Errorf("vector no es CVSS 3.1: %s", vectorStr)
+	}
+
+	parts := strings.Split(vectorStr, "/")
+	metrics := make(map[string]string, len(parts))
+	for _, p := range parts {
+		if strings.HasPrefix(p, "CVSS:") {
+			continue
+		}
+		kv := strings.SplitN(p, ":", 2)
+		if len(kv) == 2 {
+			metrics[kv[0]] = kv[1]
+		}
+	}
+
+	required := []string{"AV", "AC", "PR", "UI", "S", "C", "I", "A"}
+	for _, k := range required {
+		if _, ok := metrics[k]; !ok {
+			return nil, fmt.Errorf("vector CVSS 3.1 incompleto: falta métrica %s", k)
+		}
+	}
+
+	return metrics, nil
+}
+
 /*
-roundup implementa el redondeo hacia arriba a un decimal especificado en el Apéndice A de la especificación oficial de CVSS v3.1.
+roundup implementa el redondeo hacia arriba a un decimal.
 */
 func roundup(input float64) float64 {
 	intInput := math.Round(input * 100000)

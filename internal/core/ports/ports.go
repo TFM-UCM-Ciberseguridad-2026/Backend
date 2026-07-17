@@ -143,3 +143,20 @@ type EPSSProvider interface {
 type KEVProvider interface {
 	FetchKEV(ctx context.Context) (map[string]bool, error)
 }
+
+// RiskPort agrupa las queries Neo4j específicas del motor de riesgo.
+// Se separa de los puertos CRUD para no contaminar el contrato base de cada entidad.
+type RiskPort interface {
+	// GetFindingContextsByEndpoint recorre Endpoint→Installation→Finding→Vulnerability
+	// y devuelve todo lo necesario para calcular el riesgo de cada finding.
+	GetFindingContextsByEndpoint(ctx context.Context, endpointID int64) ([]domain.FindingRiskContext, error)
+
+	// UpdateFindingScores persiste los scores calculados en el nodo Finding.
+	UpdateFindingScores(ctx context.Context, findingID int64, impactScore, likelihood, remediationFactor, riskScore, priorityScore float64) error
+
+	// UpdateEndpointRisk persiste el riesgo agregado en el nodo Endpoint.
+	UpdateEndpointRisk(ctx context.Context, endpointID int64, riskScore float64, riskTier string) error
+
+	// GetAllEndpointIDs devuelve los IDs de todos los endpoints para el recálculo diario.
+	GetAllEndpointIDs(ctx context.Context) ([]int64, error)
+}

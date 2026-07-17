@@ -33,6 +33,9 @@ type Orchestrator struct {
 	relationshipPort ports.RelationshipPort
 	infraPort        ports.InfrastructurePort
 	vulnScannerPort  ports.VulnerabilityAPIscanner
+	riskPort         ports.RiskPort
+	epssProvider     ports.EPSSProvider
+	kevProvider      ports.KEVProvider
 }
 
 func NewOrchestrator(
@@ -63,6 +66,15 @@ func NewOrchestrator(
 		infraPort:        infraPort,
 		vulnScannerPort:  vulnScannerPort,
 	}
+}
+
+// WithRisk inyecta los componentes del motor de riesgo y devuelve el mismo orquestador.
+// Permite que el código existente siga usando NewOrchestrator sin cambios.
+func (o *Orchestrator) WithRisk(riskPort ports.RiskPort, epss ports.EPSSProvider, kev ports.KEVProvider) *Orchestrator {
+	o.riskPort = riskPort
+	o.epssProvider = epss
+	o.kevProvider = kev
+	return o
 }
 
 // CreateProject guarda el proyecto principal.
@@ -218,5 +230,99 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		}
 	}
 
+	return nil
+}
+
+// ComputeEndpointRisk calcula y persiste el riesgo de todos los findings abiertos de un endpoint.
+// Flujo:
+//  1. Recupera el contexto completo de cada finding (CVSSVector, CIA del endpoint, flags de vuln).
+//  2. Obtiene scores EPSS frescos y el catálogo KEV actual de las APIs externas.
+//  3. Para cada finding: calcula environmental score, likelihood y risk_score.
+//  4. Agrega el riesgo a nivel de endpoint y clasifica el tier.
+//  5. Persiste todos los scores en Neo4j.
+func (o *Orchestrator) ComputeEndpointRisk(ctx context.Context, endpointID int64) error {
+	// 1. Contexto de findings del endpoint
+	contexts, err := o.riskPort.GetFindingContextsByEndpoint(ctx, endpointID)
+	if err != nil {
+		return fmt.Errorf("error obteniendo contexto de findings: %w", err)
+	}
+	if len(contexts) == 0 {
+		return o.riskPort.UpdateEndpointRisk(ctx, endpointID, 0.0, "LOW")
+	}
+
+	// 2. Recopilar CVE IDs y obtener datos frescos de EPSS y KEV
+	cveIDs := make([]string, 0, len(contexts))
+	for _, fc := range contexts {
+		if fc.CVEID != "" {
+			cveIDs = append(cveIDs, fc.CVEID)
+		}
+	}
+
+	epssScores, err := o.epssProvider.FetchEPSS(ctx, cveIDs)
+	if err != nil {
+		return fmt.Errorf("error obteniendo scores EPSS: %w", err)
+	}
+
+	kevCatalog, err := o.kevProvider.FetchKEV(ctx)
+	if err != nil {
+		return fmt.Errorf("error obteniendo catálogo KEV: %w", err)
+	}
+
+	// 3. Calcular riesgo por finding
+	var findingScores []float64
+
+	for _, fc := range contexts {
+		// EPSS fresco o default conservador si el CVE aún no tiene score
+		epss, found := epssScores[fc.CVEID]
+		if !found {
+			epss = 0.1
+		}
+
+		isKEV := kevCatalog[fc.CVEID] || fc.CachedKEV
+
+		// Impact score: CVSS Environmental (contextualizado con CIA del endpoint)
+		impactScore, envErr := domain.CalculateCVSS31EnvironmentalScore(
+			fc.CVSSVector, fc.ConfidentialityReq, fc.IntegrityReq, fc.AvailabilityReq,
+		)
+		if envErr != nil {
+			// Vector inválido o vacío: fallback al base score normalizado
+			impactScore = fc.CachedBaseScore / 10.0
+		}
+
+		likelihood := CalculateLikelihood(isKEV, fc.HasExploit, epss)
+
+		riskScore := CalculateFindingRisk(likelihood, fc.RemediationFactor, impactScore)
+
+		// Para la prioridad: workaround si remediation_factor está entre 0.1 y 0.9
+		workaroundOnly := fc.RemediationFactor > 0.0 && fc.RemediationFactor < 1.0 && !fc.PatchAvailable
+		priorityScore := CalculatePriorityScore(riskScore, isKEV, fc.PatchAvailable, workaroundOnly)
+
+		if err := o.riskPort.UpdateFindingScores(
+			ctx, fc.FindingID, impactScore, likelihood, fc.RemediationFactor, riskScore, priorityScore,
+		); err != nil {
+			return fmt.Errorf("error actualizando scores del finding %d: %w", fc.FindingID, err)
+		}
+
+		findingScores = append(findingScores, riskScore)
+	}
+
+	// 4. Agregar riesgo del endpoint
+	endpointRisk := AggregateEndpointRisk(findingScores)
+	tier := ClassifyRiskTier(endpointRisk)
+
+	return o.riskPort.UpdateEndpointRisk(ctx, endpointID, endpointRisk, tier)
+}
+
+// ComputeAllEndpointsRisk recalcula el riesgo de todos los endpoints (para el cron diario).
+func (o *Orchestrator) ComputeAllEndpointsRisk(ctx context.Context) error {
+	ids, err := o.riskPort.GetAllEndpointIDs(ctx)
+	if err != nil {
+		return fmt.Errorf("error obteniendo IDs de endpoints: %w", err)
+	}
+	for _, id := range ids {
+		if err := o.ComputeEndpointRisk(ctx, id); err != nil {
+			return fmt.Errorf("error calculando riesgo del endpoint %d: %w", id, err)
+		}
+	}
 	return nil
 }

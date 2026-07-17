@@ -232,3 +232,31 @@ func (h *OrchestratorHandler) ScanSoftwareVulnerabilities(w http.ResponseWriter,
 	}
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusOK)
 }
+
+// POST /api/endpoints/{id}/compute-risk
+// Calcula y persiste el riesgo de todos los findings abiertos del endpoint indicado.
+// Llama a las APIs EPSS y KEV para obtener datos frescos antes de calcular.
+func (h *OrchestratorHandler) ComputeEndpointRisk(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	endpointID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		sendError(w, "Invalid endpoint ID", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.orchestrator.ComputeEndpointRisk(r.Context(), endpointID); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]string{"status": "risk computed"}, http.StatusOK)
+}
+
+// POST /api/risk/recalculate-all
+// Recalcula el riesgo de todos los endpoints. Pensado para el cron diario o trigger manual.
+func (h *OrchestratorHandler) ComputeAllRisks(w http.ResponseWriter, r *http.Request) {
+	if err := h.orchestrator.ComputeAllEndpointsRisk(r.Context()); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]string{"status": "all risks recomputed"}, http.StatusOK)
+}
