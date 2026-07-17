@@ -54,19 +54,32 @@ type NistDescriptionDTO struct {
 }
 
 type NistMetricsDTO struct {
+	CVSSMetricV40 []CVSSV40DTO `json:"cvssMetricV40"`
 	CVSSMetricV31 []CVSSV31DTO `json:"cvssMetricV31"`
 	CVSSMetricV2  []CVSSV2DTO  `json:"cvssMetricV2"`
 }
 
+type CVSSV40DTO struct {
+	CVSSData struct {
+		Version      string  `json:"version"`
+		VectorString string  `json:"vectorString"`
+		BaseScore    float64 `json:"baseScore"`
+	} `json:"cvssData"`
+}
+
 type CVSSV31DTO struct {
 	CVSSData struct {
-		BaseScore float64 `json:"baseScore"`
+		Version      string  `json:"version"`
+		VectorString string  `json:"vectorString"`
+		BaseScore    float64 `json:"baseScore"`
 	} `json:"cvssData"`
 }
 
 type CVSSV2DTO struct {
 	CVSSData struct {
-		BaseScore float64 `json:"baseScore"`
+		Version      string  `json:"version"`
+		VectorString string  `json:"vectorString"`
+		BaseScore    float64 `json:"baseScore"`
 	} `json:"cvssData"`
 }
 
@@ -244,12 +257,40 @@ func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 		}
 	}
 
-	// 2. Extraer score (Prioridad CVSS v3.1, fallback a v2)
+	// 2. Extraer score y vector CVSS (Prioridad v4.0 -> v3.1 -> v2.0)
 	var baseScore float64
-	if len(cve.Metrics.CVSSMetricV31) > 0 {
+	var cvssVector string
+	var nvdVector string
+
+	if len(cve.Metrics.CVSSMetricV40) > 0 {
+		rawVec := cve.Metrics.CVSSMetricV40[0].CVSSData.VectorString
+		v31Vector, v31Score, err := domain.CVSS4ToCVSS31(rawVec)
+		if err == nil {
+			cvssVector = v31Vector
+			nvdVector = v31Vector
+			baseScore = v31Score
+		} else {
+			cvssVector = ""
+			nvdVector = ""
+			baseScore = cve.Metrics.CVSSMetricV40[0].CVSSData.BaseScore
+		}
+	} else if len(cve.Metrics.CVSSMetricV31) > 0 {
+		rawVec := cve.Metrics.CVSSMetricV31[0].CVSSData.VectorString
+		cvssVector = rawVec
+		nvdVector = rawVec
 		baseScore = cve.Metrics.CVSSMetricV31[0].CVSSData.BaseScore
 	} else if len(cve.Metrics.CVSSMetricV2) > 0 {
-		baseScore = cve.Metrics.CVSSMetricV2[0].CVSSData.BaseScore
+		rawVec := cve.Metrics.CVSSMetricV2[0].CVSSData.VectorString
+		v31Vector, v31Score, err := domain.CVSS2ToCVSS31(rawVec)
+		if err == nil {
+			cvssVector = v31Vector
+			nvdVector = v31Vector
+			baseScore = v31Score
+		} else {
+			cvssVector = ""
+			nvdVector = ""
+			baseScore = cve.Metrics.CVSSMetricV2[0].CVSSData.BaseScore
+		}
 	}
 
 	// 3. Extraer CWE
@@ -285,6 +326,8 @@ func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 		CVEID:           cve.ID,
 		Description:     finalDesc,
 		BaseScore:       baseScore,
+		CVSSVector:      cvssVector,
+		NVDVector:       nvdVector,
 		CWE:             cwe,
 		CPE:             cpe,
 		TTPRelated:      "",    // Se rellenará en la capa de aplicación mediante integraciones de MITRE
