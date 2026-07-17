@@ -49,9 +49,13 @@ func main() {
 	// 3. Inicialización de Repositorios (Adaptadores Outbound)
 	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, _, hardwareRepo, networkRepo, _, projectRepo, _, relRepo := neo4j.NewRepository(driver)
 	infraRepo := neo4j.NewInfrastructureRepository(driver)
+	riskRepo := neo4j.NewRiskRepository(driver)
 
 	// 4. Inicialización del Servicio/Orquestador (Core)
 	nistAPIAdapter := provider.NewNistAPIAdapter("https://services.nvd.nist.gov/rest/json/cves/2.0", cfg.NVD.APIKey)
+	epssAdapter := provider.NewEPSSAdapter()
+	kevAdapter := provider.NewKEVAdapter()
+
 	orchestrator := service.NewOrchestrator(
 		projectRepo,
 		endpointRepo,
@@ -65,7 +69,7 @@ func main() {
 		relRepo,
 		infraRepo,
 		nistAPIAdapter,
-	)
+	).WithRisk(riskRepo, epssAdapter, kevAdapter)
 
 	// 5. Inicialización de los Controladores HTTP (Adaptadores Inbound)
 	h := handler.NewOrchestratorHandler(orchestrator)

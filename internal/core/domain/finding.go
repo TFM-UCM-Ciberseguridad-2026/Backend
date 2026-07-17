@@ -24,8 +24,11 @@ type Finding struct {
 	// del endpoint x EPSS/KEV x factor de remediación). RiskScore = Likelihood * RemediationFactor * ImpactScore.
 	ImpactScore       float64    `json:"impact_score"`
 	Likelihood        float64    `json:"likelihood"`
+	ExposureFactor    float64    `json:"exposure_factor"`
 	RemediationFactor float64    `json:"remediation_factor"`
 	RiskScore         float64    `json:"risk_score"`
-	PriorityScore     float64    `json:"priority_score"` // Cola de parcheo, separada del riesgo (riesgo x multiplicadores KEV/parche disponible)
+	AssetCriticality  float64    `json:"asset_criticality"` // factor de criticidad del activo según los requisitos CIA del endpoint
+	UrgencyBoost      float64    `json:"urgency_boost"`     //
+	PriorityScore     float64    `json:"priority_score"`    // Cola de parcheo, separada del riesgo (riesgo x multiplicadores KEV/parche disponible)
 	RiskComputedAt    *time.Time `json:"risk_computed_at"`
 }

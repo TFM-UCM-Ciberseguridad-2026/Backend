@@ -51,5 +51,11 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* GET /api/infrastructure/top-apts: Obtiene los actores de amenazas (APTs) que afectan la infraestructura auditada. */
 	mux.HandleFunc("GET /api/infrastructure/top-apts", h.GetTopAPTs)
 
+	/* POST /api/endpoints/{id}/compute-risk: Calcula el riesgo del endpoint con datos frescos de EPSS y KEV. */
+	mux.HandleFunc("POST /api/endpoints/{id}/compute-risk", h.ComputeEndpointRisk)
+
+	/* POST /api/risk/recalculate-all: Recalcula el riesgo de todos los endpoints (trigger manual o cron). */
+	mux.HandleFunc("POST /api/risk/recalculate-all", h.ComputeAllRisks)
+
 	return mux
 }
