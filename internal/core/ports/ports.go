@@ -133,3 +133,13 @@ type InfrastructurePort interface {
 	GetGraphData(ctx context.Context) (*domain.GraphData, error)
 	GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int) ([]domain.APTThreatResult, error)
 }
+
+// EPSSProvider obtiene scores de probabilidad de explotación desde la API FIRST/EPSS.
+type EPSSProvider interface {
+	FetchEPSS(ctx context.Context, cveIDs []string) (map[string]float64, error)
+}
+
+// KEVProvider obtiene el catálogo CISA Known Exploited Vulnerabilities.
+type KEVProvider interface {
+	FetchKEV(ctx context.Context) (map[string]bool, error)
+}
