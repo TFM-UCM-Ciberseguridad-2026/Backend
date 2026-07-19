@@ -158,4 +158,13 @@ type RiskPort interface {
 
 	// GetAllEndpointIDs devuelve los IDs de todos los endpoints para el recálculo diario.
 	GetAllEndpointIDs(ctx context.Context) ([]int64, error)
+
+	// GetFindingScoresByInstallation devuelve los scores de riesgo de todos los findings asociados a una instalación de software.
+	GetFindingScoresByInstallation(ctx context.Context, installationID string) ([]domain.FindingRiskSummary, error)
+
+	// UpdateSoftwareInstallationRisk actualiza el riesgo agregado de una instalación de software.
+	UpdateSoftwareInstallationRisk(ctx context.Context, installationID string, riskScore float64, riskTier string, driverFindingID int64, driverCVEID string) error
+
+	// GetInstallationIDsByEndpoint devuelve los IDs de todas las instalaciones de software asociadas a un endpoint.
+	GetInstallationIDsByEndpoint(ctx context.Context, endpointID int64) ([]string, error)
 }

@@ -206,3 +206,109 @@ func toBool(v any) bool {
 	}
 	return false
 }
+
+// GetFindingScoresByInstallation devuelve los scores de riesgo de todos los findings asociados a una instalación de software.
+func (r *riskRepo) GetFindingScoresByInstallation(ctx context.Context, installationID string) ([]domain.FindingRiskSummary, error) {
+	query := `
+        MATCH (:SoftwareInstallation {id: $installation_id})-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+        WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+        RETURN f.id AS finding_id,
+               v.cve_id AS cve_id,
+               f.risk_score AS risk_score,
+               f.status AS status
+        ORDER BY risk_score DESC
+    `
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"installation_id": installationID})
+		if err != nil {
+			return nil, err
+		}
+
+		var summaries []domain.FindingRiskSummary
+		for result.Next(ctx) {
+			rec := result.Record()
+			findingID, _ := rec.Get("finding_id")
+			cveID, _ := rec.Get("cve_id")
+			riskScore, _ := rec.Get("risk_score")
+			status, _ := rec.Get("status")
+
+			summaries = append(summaries, domain.FindingRiskSummary{
+				FindingID: toInt64(findingID),
+				CVEID:     toStr(cveID),
+				RiskScore: toFloat64(riskScore),
+				Status:    toStr(status),
+			})
+		}
+
+		return summaries, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.FindingRiskSummary{}, nil
+	}
+	return res.([]domain.FindingRiskSummary), nil
+}
+
+// UpdateSoftwareInstallationRisk actualiza el riesgo agregado y el tier en el nodo SoftwareInstallation.
+func (r *riskRepo) UpdateSoftwareInstallationRisk(ctx context.Context, installationID string, riskScore float64, riskTier string, driverFindingID int64, driverCVEID string) error {
+	query := `
+        MATCH (si:SoftwareInstallation {id: $installation_id})
+        SET si.risk_score = $risk_score,
+            si.risk_tier = $risk_tier,
+            si.driver_finding_id = $driver_finding_id,
+            si.driver_cve_id = $driver_cve_id,
+            si.risk_computed_at = $now
+    `
+
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{
+		"installation_id":   installationID,
+		"risk_score":        riskScore,
+		"risk_tier":         riskTier,
+		"driver_finding_id": driverFindingID,
+		"driver_cve_id":     driverCVEID,
+		"now":               time.Now().UTC(),
+	})
+}
+
+// GetInstallationIDsByEndpoint devuelve los IDs de todas las instalaciones de software asociadas a un endpoint.
+func (r *riskRepo) GetInstallationIDsByEndpoint(ctx context.Context, endpointID int64) ([]string, error) {
+	query := `
+        MATCH (:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+        RETURN si.id AS installation_id
+        ORDER BY installation_id
+    `
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"endpoint_id": endpointID})
+		if err != nil {
+			return nil, err
+		}
+
+		var ids []string
+		for result.Next(ctx) {
+			rec := result.Record()
+			installationID, _ := rec.Get("installation_id")
+			ids = append(ids, toStr(installationID))
+		}
+
+		return ids, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []string{}, nil
+	}
+	return res.([]string), nil
+}

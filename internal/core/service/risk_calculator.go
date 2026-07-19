@@ -164,38 +164,46 @@ func CalculatePriorityScore(riskScore, assetCriticality, urgencyBoost float64) f
 	return clamp(riskScore*assetCriticality*urgencyBoost, 0.0, 1.0)
 }
 
-// AggregateEndpointRisk combina los scores de todos los findings de un endpoint
+// AggregateRiskScores combina los scores de riesgo de todos los findings asociados a una instalación de software
 // en un único score representativo con las siguientes propiedades:
 //   - Monotónico: mitigar un finding nunca sube el score
 //   - Acotado [0, 1]
 //   - Dominado por el finding más crítico (driver)
 //   - La densidad de findings secundarios empuja hacia arriba de forma amortiguada
-func AggregateEndpointRisk(findingScores []float64) float64 {
-	if len(findingScores) == 0 {
+func AggregateRiskScores(scores []float64) float64 {
+	if len(scores) == 0 {
 		return 0.0
 	}
 
-	// Identificar el driver (finding de mayor riesgo)
 	driver := 0.0
-	for _, s := range findingScores {
-		if s > driver {
-			driver = s
+	for _, score := range scores {
+		if score > driver {
+			driver = score
 		}
 	}
 
-	// Masa probabilística del resto de findings (excluye una instancia del driver)
 	driverExcluded := false
-	masaProduct := 1.0
-	for _, s := range findingScores {
-		if s == driver && !driverExcluded {
+	massProduct := 1.0
+	for _, score := range scores {
+		if score == driver && !driverExcluded {
 			driverExcluded = true
 			continue
 		}
-		masaProduct *= (1.0 - s)
+		massProduct *= (1.0 - score)
 	}
-	masa := 1.0 - masaProduct
 
-	return driver + (1.0-driver)*masa*massFactor
+	secondaryMass := 1.0 - massProduct
+	return clamp(driver+(1.0-driver)*secondaryMass*massFactor, 0.0, 1.0)
+}
+
+// AggregateEndpointRisk combina los scores de riesgo de todos los findings asociados a un endpoint
+func AggregateEndpointRisk(scores []float64) float64 {
+	return AggregateRiskScores(scores)
+}
+
+// AggregateSoftwareInstallationRisk combina los scores de riesgo de todos los findings asociados a una instalación de software
+func AggregateSoftwareInstallationRisk(scores []float64) float64 {
+	return AggregateRiskScores(scores)
 }
 
 // ClassifyRiskTier convierte un score [0,1] en el tier de riesgo textual.
