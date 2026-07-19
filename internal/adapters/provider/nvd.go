@@ -40,6 +40,12 @@ type NistCveDTO struct {
 	Metrics        NistMetricsDTO       `json:"metrics"`
 	Weaknesses     []NistWeaknessDTO    `json:"weaknesses"`
 	Configurations []NistConfigDTO      `json:"configurations"`
+	References     []NistReferenceDTO   `json:"references"`
+}
+
+type NistReferenceDTO struct {
+	URL  string   `json:"url"`
+	Tags []string `json:"tags"`
 }
 
 type NistDescriptionDTO struct {
@@ -99,12 +105,15 @@ type NistAPIAdapter struct {
 }
 
 // NewNistAPIAdapter inicializa el adaptador de infraestructura
-func NewNistAPIAdapter(baseURL string, apiKey string) *NistAPIAdapter {
+func NewNistAPIAdapter(baseURL string, apiKey string, timeoutSeconds int) *NistAPIAdapter {
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 90
+	}
 	return &NistAPIAdapter{
 		baseURL: baseURL,
 		apiKey:  apiKey,
 		httpClient: &http.Client{
-			Timeout: 15 * time.Second,
+			Timeout: time.Duration(timeoutSeconds) * time.Second,
 		},
 	}
 }
@@ -189,6 +198,49 @@ func (a *NistAPIAdapter) FetchByCPE(ctx context.Context, cpe string) ([]domain.V
 	return vulnerabilities, nil
 }
 
+/*
+FetchByDate consulta la API REST oficial de NIST NVD v2.0 usando fechas de modificación.
+Usa lastModStartDate y lastModEndDate. Las fechas deben estar en formato ISO 8601 (YYYY-MM-DDTHH:MM:SS.000).
+*/
+func (a *NistAPIAdapter) FetchByDate(ctx context.Context, startDate, endDate time.Time) ([]domain.Vulnerability, error) {
+	// Formato ISO 8601: 2021-08-04T13:00:00.000
+	startStr := startDate.UTC().Format("2006-01-02T15:04:05.000")
+	endStr := endDate.UTC().Format("2006-01-02T15:04:05.000")
+	
+	reqURL := fmt.Sprintf("%s?lastModStartDate=%s&lastModEndDate=%s", a.baseURL, url.QueryEscape(startStr), url.QueryEscape(endStr))
+
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creando request para NIST por fecha: %w", err)
+	}
+
+	if a.apiKey != "" {
+		req.Header.Set("apiKey", a.apiKey)
+	}
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error ejecutando llamada HTTP a NIST por fecha: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("api nist devolvió status code inválido por fecha: %d", resp.StatusCode)
+	}
+
+	var apiResponse NistResponseDTO
+	if err := json.NewDecoder(resp.Body).Decode(&apiResponse); err != nil {
+		return nil, fmt.Errorf("error decodificando JSON de NIST por fecha: %w", err)
+	}
+
+	var vulnerabilities []domain.Vulnerability
+	for _, item := range apiResponse.Vulnerabilities {
+		vulnerabilities = append(vulnerabilities, toDomainEntity(item))
+	}
+
+	return vulnerabilities, nil
+}
+
 // toDomainEntity es el "Traductor" (Mapper) de Infraestructura -> Dominio
 func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 	cve := dto.CVE
@@ -253,6 +305,21 @@ func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 		cpe = cve.Configurations[0].Nodes[0].CPEMatch[0].Criteria
 	}
 
+	// 5. Extraer Parches (URLs con el tag "Patch")
+	var patches []domain.Patch
+	for _, ref := range cve.References {
+		for _, tag := range ref.Tags {
+			if tag == "Patch" {
+				patches = append(patches, domain.Patch{
+					PatchID:     0, // El ID se asignará antes de guardarlo en base de datos
+					Description: "Parche oficial (" + cve.ID + ")",
+					URL:         ref.URL,
+				})
+				break
+			}
+		}
+	}
+
 	// Construimos la entidad de dominio pura
 	return domain.Vulnerability{
 		VulnerabilityID: cve.ID, // Usamos temporalmente el CVEID como ID del nodo principal
@@ -267,5 +334,6 @@ func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 		Exploit:         false, // Valores por defecto (se alimentan desde otras APIs como FIRST o CISA)
 		KEV:             false,
 		EPSSScore:       0.0,
+		Patches:         patches,
 	}
 }
