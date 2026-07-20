@@ -147,7 +147,7 @@ func (h *OrchestratorHandler) RegisterSoftwareInstallation(w http.ResponseWriter
 // POST /api/installations/{id}/findings
 func (h *OrchestratorHandler) GenerateFinding(w http.ResponseWriter, r *http.Request) {
 	instID := r.PathValue("id")
-	
+
 	var finding domain.Finding
 	if err := json.NewDecoder(r.Body).Decode(&finding); err != nil {
 		sendError(w, "Invalid JSON", http.StatusBadRequest)
@@ -248,7 +248,10 @@ func (h *OrchestratorHandler) ComputeEndpointRisk(w http.ResponseWriter, r *http
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	sendJSON(w, map[string]string{"status": "risk computed"}, http.StatusOK)
+	sendJSON(w, map[string]any{
+		"status":      "risk computed",
+		"endpoint_id": endpointID,
+	}, http.StatusOK)
 }
 
 // POST /api/risk/recalculate-all
@@ -259,4 +262,25 @@ func (h *OrchestratorHandler) ComputeAllRisks(w http.ResponseWriter, r *http.Req
 		return
 	}
 	sendJSON(w, map[string]string{"status": "all risks recomputed"}, http.StatusOK)
+}
+
+// POST /api/installations/{id}/compute-risk
+// Calcula y persiste el riesgo de todos los findings abiertos de la instalación de software indicada.
+func (h *OrchestratorHandler) ComputeSoftwareInstallationRisk(w http.ResponseWriter, r *http.Request) {
+	installationID := r.PathValue("id")
+	if installationID == "" {
+		sendError(w, "Invalid installation ID", http.StatusBadRequest)
+		return
+	}
+
+	riskScore, err := h.orchestrator.ComputeSoftwareInstallationRisk(r.Context(), installationID)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]any{
+		"status":     "software installation risk computed",
+		"risk_score": riskScore,
+	}, http.StatusOK)
 }

@@ -41,20 +41,20 @@ type Orchestrator struct {
 }
 
 func NewOrchestrator(
-	projectPort      ports.ProjectPort,
-	endpointPort     ports.EndpointPort,
-	hardwarePort     ports.HardwarePort,
-	networkPort      ports.NetworkPort,
+	projectPort ports.ProjectPort,
+	endpointPort ports.EndpointPort,
+	hardwarePort ports.HardwarePort,
+	networkPort ports.NetworkPort,
 	softwareInstPort ports.SoftwareInstallationPort,
-	softwarePort     ports.SoftwarePort,
-	findingPort      ports.FindingPort,
-	vulnPort         ports.VulnerabilityPort,
-	remediationPort  ports.RemediationPort,
+	softwarePort ports.SoftwarePort,
+	findingPort ports.FindingPort,
+	vulnPort ports.VulnerabilityPort,
+	remediationPort ports.RemediationPort,
 	relationshipPort ports.RelationshipPort,
-	infraPort        ports.InfrastructurePort,
-	patchPort        ports.PatchPort,
-	dbHelper         ports.DatabaseHelper,
-	vulnScannerPort  ports.VulnerabilityAPIscanner,
+	infraPort ports.InfrastructurePort,
+	patchPort ports.PatchPort,
+	dbHelper ports.DatabaseHelper,
+	vulnScannerPort ports.VulnerabilityAPIscanner,
 ) *Orchestrator {
 	return &Orchestrator{
 		projectPort:      projectPort,
@@ -225,7 +225,7 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 			if pCopy.PatchID == 0 {
 				pCopy.PatchID = int64(rand.Int31n(1000000) + 1)
 			}
-			
+
 			if err := o.patchPort.Save(ctx, &pCopy); err != nil {
 				continue
 			}
@@ -270,16 +270,25 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 //  4. Agrega el riesgo a nivel de endpoint y clasifica el tier.
 //  5. Persiste todos los scores en Neo4j.
 func (o *Orchestrator) ComputeEndpointRisk(ctx context.Context, endpointID int64) error {
-	// 1. Contexto de findings del endpoint
+	// 1. Obtener contexto de findings activos del endpoint.
 	contexts, err := o.riskPort.GetFindingContextsByEndpoint(ctx, endpointID)
 	if err != nil {
 		return fmt.Errorf("error obteniendo contexto de findings: %w", err)
 	}
 	if len(contexts) == 0 {
-		return o.riskPort.UpdateEndpointRisk(ctx, endpointID, 0.0, "LOW")
+		installationIDs, err := o.riskPort.GetInstallationIDsByEndpoint(ctx, endpointID)
+		if err != nil {
+			return fmt.Errorf("error obteniendo instalaciones del endpoint %d: %w", endpointID, err)
+		}
+		for _, installationID := range installationIDs {
+			if _, err := o.ComputeSoftwareInstallationRisk(ctx, installationID); err != nil {
+				return err
+			}
+		}
+		return o.riskPort.UpdateEndpointRiskAndPriority(ctx, endpointID, 0.0, "LOW", 0.0, "LOW", "", "", 0.0, "", "", "", 0.0, "", 0)
 	}
 
-	// 2. Recopilar CVE IDs y obtener datos frescos de EPSS y KEV
+	// 2. Recopilar CVE IDs y obtener datos frescos de EPSS y KEV.
 	cveIDs := make([]string, 0, len(contexts))
 	for _, fc := range contexts {
 		if fc.CVEID != "" {
@@ -297,9 +306,7 @@ func (o *Orchestrator) ComputeEndpointRisk(ctx context.Context, endpointID int64
 		return fmt.Errorf("error obteniendo catálogo KEV: %w", err)
 	}
 
-	// 3. Calcular riesgo por finding
-	var findingScores []float64
-
+	// 3. Recalcular riesgo contextual por finding.
 	for _, fc := range contexts {
 		// EPSS fresco o default conservador si el CVE aún no tiene score
 		epss, found := epssScores[fc.CVEID]
@@ -346,15 +353,66 @@ func (o *Orchestrator) ComputeEndpointRisk(ctx context.Context, endpointID int64
 		); err != nil {
 			return fmt.Errorf("error actualizando scores del finding %d: %w", fc.FindingID, err)
 		}
-
-		findingScores = append(findingScores, riskScore)
 	}
 
-	// 4. Agregar riesgo del endpoint
-	endpointRisk := AggregateEndpointRisk(findingScores)
-	tier := ClassifyRiskTier(endpointRisk)
+	// 4. Recalcular riesgo por instalación con findings ya actualizados.
+	installationIDs, err := o.riskPort.GetInstallationIDsByEndpoint(ctx, endpointID)
+	if err != nil {
+		return fmt.Errorf("error obteniendo instalaciones del endpoint %d: %w", endpointID, err)
+	}
 
-	return o.riskPort.UpdateEndpointRisk(ctx, endpointID, endpointRisk, tier)
+	for _, installationID := range installationIDs {
+		if _, err := o.ComputeSoftwareInstallationRisk(ctx, installationID); err != nil {
+			return err
+		}
+	}
+
+	summaries, err := o.riskPort.GetSoftwareRiskSummariesByEndpoint(ctx, endpointID)
+	if err != nil {
+		return fmt.Errorf("error obteniendo resumen de software del endpoint %d: %w", endpointID, err)
+	}
+
+	riskScores := make([]float64, 0, len(summaries))
+	priorityScores := make([]float64, 0, len(summaries))
+	for _, summary := range summaries {
+		riskScores = append(riskScores, summary.RiskScore)
+		priorityScores = append(priorityScores, summary.PriorityScore)
+	}
+
+	endpointRisk := AggregateEndpointRisk(riskScores)
+	endpointRiskTier := ClassifyRiskTier(endpointRisk)
+
+	endpointPriority := AggregateEndpointPriority(priorityScores)
+	endpointPriorityTier := ClassifyRiskTier(endpointPriority)
+
+	technicalDriver, hasTechnicalDriver := findDriverSoftwareByRisk(summaries)
+	priorityDriver, hasPriorityDriver := findDriverSoftwareByPriority(summaries)
+	riskySoftwareCount := countRiskySoftware(summaries)
+
+	if !hasTechnicalDriver {
+		technicalDriver = domain.SoftwareRiskSummary{}
+	}
+	if !hasPriorityDriver {
+		priorityDriver = domain.SoftwareRiskSummary{}
+	}
+
+	return o.riskPort.UpdateEndpointRiskAndPriority(
+		ctx,
+		endpointID,
+		endpointRisk,
+		endpointRiskTier,
+		endpointPriority,
+		endpointPriorityTier,
+		technicalDriver.InstallationID,
+		technicalDriver.SoftwareName,
+		technicalDriver.RiskScore,
+		technicalDriver.DriverCVEID,
+		priorityDriver.InstallationID,
+		priorityDriver.SoftwareName,
+		priorityDriver.PriorityScore,
+		priorityDriver.DriverCVEID,
+		riskySoftwareCount,
+	)
 }
 
 // ComputeAllEndpointsRisk recalcula el riesgo de todos los endpoints (para el cron diario).
@@ -369,6 +427,72 @@ func (o *Orchestrator) ComputeAllEndpointsRisk(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// Helper para ComputeSoftwareInstallationRisk: encuentra el finding "driver" con mayor riesgo y devuelve su ID y CVE.
+func findDriverFinding(summaries []domain.FindingRiskSummary) (int64, string, float64) {
+	var driverID int64
+	var driverCVE string
+	driverScore := 0.0
+
+	for _, summary := range summaries {
+		if summary.RiskScore > driverScore {
+			driverID = summary.FindingID
+			driverCVE = summary.CVEID
+			driverScore = summary.RiskScore
+		}
+	}
+
+	return driverID, driverCVE, driverScore
+}
+
+// ComputeSoftwareInstallationRisk recalcula el riesgo agregado de una instalación de software
+func (o *Orchestrator) ComputeSoftwareInstallationRisk(ctx context.Context, installationID string) (float64, error) {
+	summaries, err := o.riskPort.GetFindingScoresByInstallation(ctx, installationID)
+	if err != nil {
+		return 0, fmt.Errorf("error obteniendo findings de instalación %s: %w", installationID, err)
+	}
+
+	criticalityLevel, err := o.riskPort.GetSoftwareCriticalityLevel(ctx, installationID)
+	if err != nil {
+		return 0, fmt.Errorf("error obteniendo criticality_level de instalación %s: %w", installationID, err)
+	}
+	criticalityMultiplier := CalculateSoftwareCriticalityMultiplier(criticalityLevel)
+
+	if len(summaries) == 0 {
+		if err := o.riskPort.UpdateSoftwareInstallationRisk(ctx, installationID, 0.0, "LOW", 0, ""); err != nil {
+			return 0, err
+		}
+		if err := o.riskPort.UpdateSoftwareInstallationPriority(ctx, installationID, criticalityLevel, criticalityMultiplier, 0.0, "LOW"); err != nil {
+			return 0, err
+		}
+		return 0.0, nil
+	}
+
+	riskScores := make([]float64, 0, len(summaries))
+	priorityScores := make([]float64, 0, len(summaries))
+	for _, summary := range summaries {
+		riskScores = append(riskScores, summary.RiskScore)
+		priorityScores = append(priorityScores, summary.PriorityScore)
+	}
+
+	softwareRisk := AggregateSoftwareInstallationRisk(riskScores)
+	riskTier := ClassifyRiskTier(softwareRisk)
+	driverFindingID, driverCVEID, _ := findDriverFinding(summaries)
+
+	priorityBase := AggregateRiskScores(priorityScores)
+	softwarePriority := CalculateSoftwarePriorityScore(priorityBase, criticalityMultiplier)
+	priorityTier := ClassifyRiskTier(softwarePriority)
+
+	if err := o.riskPort.UpdateSoftwareInstallationRisk(ctx, installationID, softwareRisk, riskTier, driverFindingID, driverCVEID); err != nil {
+		return 0, fmt.Errorf("error persistiendo riesgo de instalación %s: %w", installationID, err)
+	}
+
+	if err := o.riskPort.UpdateSoftwareInstallationPriority(ctx, installationID, criticalityLevel, criticalityMultiplier, softwarePriority, priorityTier); err != nil {
+		return 0, fmt.Errorf("error persistiendo prioridad de instalación %s: %w", installationID, err)
+	}
+
+	return softwareRisk, nil
 }
 
 // SyncNistDaily obtiene las vulnerabilidades modificadas en las últimas 24 horas y actualiza la BBDD.
@@ -408,4 +532,41 @@ func (o *Orchestrator) SyncNistDaily(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// findDriverSoftwareByRisk encuentra la instalación de software con mayor riesgo agregado
+func findDriverSoftwareByRisk(summaries []domain.SoftwareRiskSummary) (domain.SoftwareRiskSummary, bool) {
+	var driver domain.SoftwareRiskSummary
+	found := false
+	for _, summary := range summaries {
+		if !found || summary.RiskScore > driver.RiskScore {
+			driver = summary
+			found = true
+		}
+	}
+	return driver, found
+}
+
+// findDriverFindingByRisk encuentra el finding con mayor riesgo agregado
+func findDriverSoftwareByPriority(summaries []domain.SoftwareRiskSummary) (domain.SoftwareRiskSummary, bool) {
+	var driver domain.SoftwareRiskSummary
+	found := false
+	for _, summary := range summaries {
+		if !found || summary.PriorityScore > driver.PriorityScore {
+			driver = summary
+			found = true
+		}
+	}
+	return driver, found
+}
+
+// countRiskySoftware cuenta cuántas instalaciones de software tienen un riesgo mayor a cero
+func countRiskySoftware(summaries []domain.SoftwareRiskSummary) int {
+	count := 0
+	for _, summary := range summaries {
+		if summary.RiskScore > 0 {
+			count++
+		}
+	}
+	return count
 }

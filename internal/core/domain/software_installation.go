@@ -12,4 +12,16 @@ type SoftwareInstallation struct {
 	InstallPath    string     `json:"install_path"`
 	DetectedBy     string     `json:"detected_by"`
 	PackageManager string     `json:"package_manager"`
+
+	RiskScore       float64    `json:"risk_score"`
+	RiskTier        string     `json:"risk_tier"`
+	RiskComputedAt  *time.Time `json:"risk_computed_at"`
+	DriverFindingID int64      `json:"driver_finding_id"`
+	DriverCVEID     string     `json:"driver_cve_id"`
+
+	CriticalityLevel      string     `json:"criticality_level"`
+	CriticalityMultiplier float64    `json:"criticality_multiplier"`
+	PriorityScore         float64    `json:"priority_score"`
+	PriorityTier          string     `json:"priority_tier"`
+	PriorityComputedAt    *time.Time `json:"priority_computed_at"`
 }
