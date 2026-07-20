@@ -31,7 +31,19 @@ func (r *endpointRepo) Save(ctx context.Context, endpoint *domain.Endpoint) erro
 		    e.risk_score = $risk_score,
 		    e.risk_tier = $risk_tier,
 		    e.risk_computed_at = $risk_computed_at,
-		    e.updated_at = timestamp()
+		    e.updated_at = timestamp(),
+			e.priority_score = $priority_score,
+			e.priority_tier = $priority_tier,
+			e.priority_computed_at = $priority_computed_at,
+			e.technical_driver_installation_id = $technical_driver_installation_id,
+			e.technical_driver_software_name = $technical_driver_software_name,
+			e.technical_driver_risk_score = $technical_driver_risk_score,
+			e.technical_driver_cve_id = $technical_driver_cve_id,
+			e.priority_driver_installation_id = $priority_driver_installation_id,
+			e.priority_driver_software_name = $priority_driver_software_name,
+			e.priority_driver_priority_score = $priority_driver_priority_score,
+			e.priority_driver_cve_id = $priority_driver_cve_id,
+			e.risky_software_count = $risky_software_count
 	`
 
 	var riskComputedAt any
@@ -39,19 +51,36 @@ func (r *endpointRepo) Save(ctx context.Context, endpoint *domain.Endpoint) erro
 		riskComputedAt = *endpoint.RiskComputedAt
 	}
 
+	var priorityComputedAt any
+	if endpoint.PriorityComputedAt != nil {
+		priorityComputedAt = *endpoint.PriorityComputedAt
+	}
+
 	params := map[string]any{
-		"id":                  endpoint.EndpointID,
-		"hostname":            endpoint.Hostname,
-		"type":                endpoint.Type,
-		"status":              endpoint.Status,
-		"environment":         endpoint.Environment,
-		"internet_exposed":    endpoint.InternetExposed,
-		"confidentiality_req": endpoint.ConfidentialityReq,
-		"integrity_req":       endpoint.IntegrityReq,
-		"availability_req":    endpoint.AvailabilityReq,
-		"risk_score":          endpoint.RiskScore,
-		"risk_tier":           endpoint.RiskTier,
-		"risk_computed_at":    riskComputedAt,
+		"id":                               endpoint.EndpointID,
+		"hostname":                         endpoint.Hostname,
+		"type":                             endpoint.Type,
+		"status":                           endpoint.Status,
+		"environment":                      endpoint.Environment,
+		"internet_exposed":                 endpoint.InternetExposed,
+		"confidentiality_req":              endpoint.ConfidentialityReq,
+		"integrity_req":                    endpoint.IntegrityReq,
+		"availability_req":                 endpoint.AvailabilityReq,
+		"risk_score":                       endpoint.RiskScore,
+		"risk_tier":                        endpoint.RiskTier,
+		"risk_computed_at":                 riskComputedAt,
+		"priority_score":                   endpoint.PriorityScore,
+		"priority_tier":                    endpoint.PriorityTier,
+		"priority_computed_at":             priorityComputedAt,
+		"technical_driver_installation_id": endpoint.TechnicalDriverInstallationID,
+		"technical_driver_software_name":   endpoint.TechnicalDriverSoftwareName,
+		"technical_driver_risk_score":      endpoint.TechnicalDriverRiskScore,
+		"technical_driver_cve_id":          endpoint.TechnicalDriverCVEID,
+		"priority_driver_installation_id":  endpoint.PriorityDriverInstallationID,
+		"priority_driver_software_name":    endpoint.PriorityDriverSoftwareName,
+		"priority_driver_priority_score":   endpoint.PriorityDriverPriorityScore,
+		"priority_driver_cve_id":           endpoint.PriorityDriverCVEID,
+		"risky_software_count":             endpoint.RiskySoftwareCount,
 	}
 
 	return r.ExecuteWrite(ctx, query, params)
@@ -81,18 +110,30 @@ func (r *endpointRepo) GetByID(ctx context.Context, id int64) (*domain.Endpoint,
 	}
 
 	endpoint := &domain.Endpoint{
-		EndpointID:         getInt64(props, "id"),
-		Hostname:           getString(props, "hostname"),
-		Type:               getString(props, "type"),
-		Status:             getString(props, "status"),
-		Environment:        getString(props, "environment"),
-		InternetExposed:    getBool(props, "internet_exposed"),
-		ConfidentialityReq: getString(props, "confidentiality_req"),
-		IntegrityReq:       getString(props, "integrity_req"),
-		AvailabilityReq:    getString(props, "availability_req"),
-		RiskScore:          getFloat64(props, "risk_score"),
-		RiskTier:           getString(props, "risk_tier"),
-		RiskComputedAt:     getTimePtr(props, "risk_computed_at"),
+		EndpointID:                    getInt64(props, "id"),
+		Hostname:                      getString(props, "hostname"),
+		Type:                          getString(props, "type"),
+		Status:                        getString(props, "status"),
+		Environment:                   getString(props, "environment"),
+		InternetExposed:               getBool(props, "internet_exposed"),
+		ConfidentialityReq:            getString(props, "confidentiality_req"),
+		IntegrityReq:                  getString(props, "integrity_req"),
+		AvailabilityReq:               getString(props, "availability_req"),
+		RiskScore:                     getFloat64(props, "risk_score"),
+		RiskTier:                      getString(props, "risk_tier"),
+		RiskComputedAt:                getTimePtr(props, "risk_computed_at"),
+		PriorityScore:                 getFloat64(props, "priority_score"),
+		PriorityTier:                  getString(props, "priority_tier"),
+		PriorityComputedAt:            getTimePtr(props, "priority_computed_at"),
+		TechnicalDriverInstallationID: getString(props, "technical_driver_installation_id"),
+		TechnicalDriverSoftwareName:   getString(props, "technical_driver_software_name"),
+		TechnicalDriverRiskScore:      getFloat64(props, "technical_driver_risk_score"),
+		TechnicalDriverCVEID:          getString(props, "technical_driver_cve_id"),
+		PriorityDriverInstallationID:  getString(props, "priority_driver_installation_id"),
+		PriorityDriverSoftwareName:    getString(props, "priority_driver_software_name"),
+		PriorityDriverPriorityScore:   getFloat64(props, "priority_driver_priority_score"),
+		PriorityDriverCVEID:           getString(props, "priority_driver_cve_id"),
+		RiskySoftwareCount:            int(getInt64(props, "risky_software_count")),
 	}
 
 	return endpoint, nil

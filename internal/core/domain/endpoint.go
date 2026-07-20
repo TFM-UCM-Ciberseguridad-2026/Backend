@@ -35,4 +35,20 @@ type Endpoint struct {
 	RiskScore      float64    `json:"risk_score"`
 	RiskTier       string     `json:"risk_tier"` //Se puede quitar si no se considera necesario
 	RiskComputedAt *time.Time `json:"risk_computed_at"`
+
+	PriorityScore      float64    `json:"priority_score"`
+	PriorityTier       string     `json:"priority_tier"`
+	PriorityComputedAt *time.Time `json:"priority_computed_at"`
+
+	TechnicalDriverInstallationID string  `json:"technical_driver_installation_id"`
+	TechnicalDriverSoftwareName   string  `json:"technical_driver_software_name"`
+	TechnicalDriverRiskScore      float64 `json:"technical_driver_risk_score"`
+	TechnicalDriverCVEID          string  `json:"technical_driver_cve_id"`
+
+	PriorityDriverInstallationID string  `json:"priority_driver_installation_id"`
+	PriorityDriverSoftwareName   string  `json:"priority_driver_software_name"`
+	PriorityDriverPriorityScore  float64 `json:"priority_driver_priority_score"`
+	PriorityDriverCVEID          string  `json:"priority_driver_cve_id"`
+
+	RiskySoftwareCount int `json:"risky_software_count"`
 }

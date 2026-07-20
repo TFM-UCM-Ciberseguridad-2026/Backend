@@ -220,3 +220,26 @@ func ClassifyRiskTier(riskScore float64) string {
 		return "LOW"
 	}
 }
+
+func CalculateSoftwarePriorityScore(priorityBase, criticalityMultiplier float64) float64 {
+	return clamp(priorityBase*criticalityMultiplier, 0.0, 1.0)
+}
+
+func AggregateEndpointPriority(scores []float64) float64 {
+	return AggregateRiskScores(scores)
+}
+
+// CalculateSoftwareCriticalityMultiplier convierte LOW/STANDARD/HIGH/CRITICAL
+// en un multiplicador de prioridad de software.
+func CalculateSoftwareCriticalityMultiplier(level string) float64 {
+	switch strings.ToUpper(strings.TrimSpace(level)) {
+	case "LOW":
+		return 0.75
+	case "HIGH":
+		return 1.25
+	case "CRITICAL":
+		return 1.50
+	default:
+		return 1.00
+	}
+}

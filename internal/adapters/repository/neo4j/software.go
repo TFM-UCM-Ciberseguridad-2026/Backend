@@ -75,7 +75,12 @@ func (r *softwareInstallationRepo) Save(ctx context.Context, si *domain.Software
 			n.risk_tier = $risk_tier,
 			n.risk_computed_at = $risk_computed_at,
 			n.driver_finding_id = $driver_finding_id,
-			n.driver_cve_id = $driver_cve_id
+			n.driver_cve_id = $driver_cve_id,
+			n.criticality_level = $criticality_level,
+			n.criticality_multiplier = $criticality_multiplier,
+			n.priority_score = $priority_score,
+			n.priority_tier = $priority_tier,
+			n.priority_computed_at = $priority_computed_at
     `
 
 	var lastSeen any
@@ -90,19 +95,29 @@ func (r *softwareInstallationRepo) Save(ctx context.Context, si *domain.Software
 		riskComputedAt = *si.RiskComputedAt
 	}
 
+	var priorityComputedAt any
+	if si.PriorityComputedAt != nil {
+		priorityComputedAt = *si.PriorityComputedAt
+	}
+
 	params := map[string]any{
-		"id":                si.InstallationID,
-		"first_seen":        si.FirstSeen,
-		"last_seen":         lastSeen,
-		"status":            si.Status,
-		"install_path":      si.InstallPath,
-		"detected_by":       si.DetectedBy,
-		"package_manager":   si.PackageManager,
-		"risk_score":        si.RiskScore,
-		"risk_tier":         si.RiskTier,
-		"risk_computed_at":  riskComputedAt,
-		"driver_finding_id": si.DriverFindingID,
-		"driver_cve_id":     si.DriverCVEID,
+		"id":                     si.InstallationID,
+		"first_seen":             si.FirstSeen,
+		"last_seen":              lastSeen,
+		"status":                 si.Status,
+		"install_path":           si.InstallPath,
+		"detected_by":            si.DetectedBy,
+		"package_manager":        si.PackageManager,
+		"risk_score":             si.RiskScore,
+		"risk_tier":              si.RiskTier,
+		"risk_computed_at":       riskComputedAt,
+		"driver_finding_id":      si.DriverFindingID,
+		"driver_cve_id":          si.DriverCVEID,
+		"criticality_level":      si.CriticalityLevel,
+		"criticality_multiplier": si.CriticalityMultiplier,
+		"priority_score":         si.PriorityScore,
+		"priority_tier":          si.PriorityTier,
+		"priority_computed_at":   priorityComputedAt,
 	}
 
 	return executeWriteHelper(ctx, r.driver, query, params)
@@ -116,18 +131,23 @@ func (r *softwareInstallationRepo) GetByID(ctx context.Context, id string) (*dom
 	}
 
 	installation := &domain.SoftwareInstallation{
-		InstallationID:  getString(props, "id"),
-		Status:          getString(props, "status"),
-		InstallPath:     getString(props, "install_path"),
-		DetectedBy:      getString(props, "detected_by"),
-		PackageManager:  getString(props, "package_manager"),
-		FirstSeen:       getTime(props, "first_seen"),
-		LastSeen:        getTimePtr(props, "last_seen"),
-		RiskScore:       getFloat64(props, "risk_score"),
-		RiskTier:        getString(props, "risk_tier"),
-		RiskComputedAt:  getTimePtr(props, "risk_computed_at"),
-		DriverFindingID: getInt64(props, "driver_finding_id"),
-		DriverCVEID:     getString(props, "driver_cve_id"),
+		InstallationID:        getString(props, "id"),
+		Status:                getString(props, "status"),
+		InstallPath:           getString(props, "install_path"),
+		DetectedBy:            getString(props, "detected_by"),
+		PackageManager:        getString(props, "package_manager"),
+		FirstSeen:             getTime(props, "first_seen"),
+		LastSeen:              getTimePtr(props, "last_seen"),
+		RiskScore:             getFloat64(props, "risk_score"),
+		RiskTier:              getString(props, "risk_tier"),
+		RiskComputedAt:        getTimePtr(props, "risk_computed_at"),
+		DriverFindingID:       getInt64(props, "driver_finding_id"),
+		DriverCVEID:           getString(props, "driver_cve_id"),
+		CriticalityLevel:      getString(props, "criticality_level"),
+		CriticalityMultiplier: getFloat64(props, "criticality_multiplier"),
+		PriorityScore:         getFloat64(props, "priority_score"),
+		PriorityTier:          getString(props, "priority_tier"),
+		PriorityComputedAt:    getTimePtr(props, "priority_computed_at"),
 	}
 
 	return installation, nil

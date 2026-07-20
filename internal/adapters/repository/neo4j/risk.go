@@ -213,10 +213,11 @@ func (r *riskRepo) GetFindingScoresByInstallation(ctx context.Context, installat
         MATCH (:SoftwareInstallation {id: $installation_id})-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
         WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
         RETURN f.id AS finding_id,
-               v.cve_id AS cve_id,
-               f.risk_score AS risk_score,
-               f.status AS status
-        ORDER BY risk_score DESC
+			v.cve_id AS cve_id,
+			f.risk_score AS risk_score,
+			f.priority_score AS priority_score,
+			f.status AS status
+		ORDER BY risk_score DESC
     `
 
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
@@ -234,13 +235,15 @@ func (r *riskRepo) GetFindingScoresByInstallation(ctx context.Context, installat
 			findingID, _ := rec.Get("finding_id")
 			cveID, _ := rec.Get("cve_id")
 			riskScore, _ := rec.Get("risk_score")
+			priorityScore, _ := rec.Get("priority_score")
 			status, _ := rec.Get("status")
 
 			summaries = append(summaries, domain.FindingRiskSummary{
-				FindingID: toInt64(findingID),
-				CVEID:     toStr(cveID),
-				RiskScore: toFloat64(riskScore),
-				Status:    toStr(status),
+				FindingID:     toInt64(findingID),
+				CVEID:         toStr(cveID),
+				RiskScore:     toFloat64(riskScore),
+				PriorityScore: toFloat64(priorityScore),
+				Status:        toStr(status),
 			})
 		}
 
@@ -311,4 +314,166 @@ func (r *riskRepo) GetInstallationIDsByEndpoint(ctx context.Context, endpointID 
 		return []string{}, nil
 	}
 	return res.([]string), nil
+}
+
+// UpdateSoftwareInstallationPriority actualiza el score de prioridad y el tier en el nodo SoftwareInstallation.
+func (r *riskRepo) UpdateSoftwareInstallationPriority(ctx context.Context, installationID string, criticalityLevel string, criticalityMultiplier float64, priorityScore float64, priorityTier string) error {
+	query := `
+        MATCH (si:SoftwareInstallation {id: $installation_id})
+        SET si.criticality_level = $criticality_level,
+            si.criticality_multiplier = $criticality_multiplier,
+            si.priority_score = $priority_score,
+            si.priority_tier = $priority_tier,
+            si.priority_computed_at = $now
+    `
+
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{
+		"installation_id":        installationID,
+		"criticality_level":      criticalityLevel,
+		"criticality_multiplier": criticalityMultiplier,
+		"priority_score":         priorityScore,
+		"priority_tier":          priorityTier,
+		"now":                    time.Now().UTC(),
+	})
+}
+
+// GetSoftwareCriticalityLevel devuelve el nivel de criticidad de una instalación de software.
+func (r *riskRepo) GetSoftwareCriticalityLevel(ctx context.Context, installationID string) (string, error) {
+	query := `
+        MATCH (si:SoftwareInstallation {id: $installation_id})
+        RETURN coalesce(si.criticality_level, 'STANDARD') AS criticality_level
+    `
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"installation_id": installationID})
+		if err != nil {
+			return nil, err
+		}
+		if result.Next(ctx) {
+			value, _ := result.Record().Get("criticality_level")
+			return toStr(value), result.Err()
+		}
+		return "STANDARD", result.Err()
+	})
+	if err != nil {
+		return "", err
+	}
+	if res == nil {
+		return "STANDARD", nil
+	}
+	return res.(string), nil
+}
+
+func (r *riskRepo) GetSoftwareRiskSummariesByEndpoint(ctx context.Context, endpointID int64) ([]domain.SoftwareRiskSummary, error) {
+	query := `
+        MATCH (:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+        OPTIONAL MATCH (si)-[:INSTANCE_OF]->(s:Software)
+        WHERE NOT coalesce(si.status, 'INSTALLED') IN ['REMOVED', 'UNINSTALLED', 'DELETED']
+        RETURN si.id AS installation_id,
+               s.id AS software_id,
+               s.name AS software_name,
+               si.risk_score AS risk_score,
+               si.risk_tier AS risk_tier,
+               coalesce(si.criticality_level, 'STANDARD') AS criticality_level,
+               coalesce(si.criticality_multiplier, 1.0) AS criticality_multiplier,
+               si.priority_score AS priority_score,
+               si.priority_tier AS priority_tier,
+               si.driver_cve_id AS driver_cve_id,
+               si.status AS status
+        ORDER BY priority_score DESC
+    `
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"endpoint_id": endpointID})
+		if err != nil {
+			return nil, err
+		}
+
+		summaries := make([]domain.SoftwareRiskSummary, 0)
+		for result.Next(ctx) {
+			rec := result.Record()
+			installationID, _ := rec.Get("installation_id")
+			softwareID, _ := rec.Get("software_id")
+			softwareName, _ := rec.Get("software_name")
+			riskScore, _ := rec.Get("risk_score")
+			riskTier, _ := rec.Get("risk_tier")
+			criticalityLevel, _ := rec.Get("criticality_level")
+			criticalityMultiplier, _ := rec.Get("criticality_multiplier")
+			priorityScore, _ := rec.Get("priority_score")
+			priorityTier, _ := rec.Get("priority_tier")
+			driverCVEID, _ := rec.Get("driver_cve_id")
+			status, _ := rec.Get("status")
+
+			summaries = append(summaries, domain.SoftwareRiskSummary{
+				InstallationID:        toStr(installationID),
+				SoftwareID:            toInt64(softwareID),
+				SoftwareName:          toStr(softwareName),
+				RiskScore:             toFloat64(riskScore),
+				RiskTier:              toStr(riskTier),
+				CriticalityLevel:      toStr(criticalityLevel),
+				CriticalityMultiplier: toFloat64(criticalityMultiplier),
+				PriorityScore:         toFloat64(priorityScore),
+				PriorityTier:          toStr(priorityTier),
+				DriverCVEID:           toStr(driverCVEID),
+				Status:                toStr(status),
+			})
+		}
+
+		return summaries, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.SoftwareRiskSummary{}, nil
+	}
+	return res.([]domain.SoftwareRiskSummary), nil
+}
+
+func (r *riskRepo) UpdateEndpointRiskAndPriority(ctx context.Context, endpointID int64, riskScore float64, riskTier string, priorityScore float64, priorityTier string, technicalDriverInstallationID string, technicalDriverSoftwareName string, technicalDriverRiskScore float64, technicalDriverCVEID string, priorityDriverInstallationID string, priorityDriverSoftwareName string, priorityDriverPriorityScore float64, priorityDriverCVEID string, riskySoftwareCount int) error {
+	query := `
+		MATCH (e:Endpoint {id: $id})
+		SET e.risk_score = $risk_score,
+			e.risk_tier = $risk_tier,
+			e.risk_computed_at = $now,
+			e.priority_score = $priority_score,
+			e.priority_tier = $priority_tier,
+			e.priority_computed_at = $now,
+			e.technical_driver_installation_id = $technical_driver_installation_id,
+			e.technical_driver_software_name = $technical_driver_software_name,
+			e.technical_driver_risk_score = $technical_driver_risk_score,
+			e.technical_driver_cve_id = $technical_driver_cve_id,
+			e.priority_driver_installation_id = $priority_driver_installation_id,
+			e.priority_driver_software_name = $priority_driver_software_name,
+			e.priority_driver_priority_score = $priority_driver_priority_score,
+			e.priority_driver_cve_id = $priority_driver_cve_id,
+			e.risky_software_count = $risky_software_count
+	`
+
+	params := map[string]any{
+		"id":                               endpointID,
+		"risk_score":                       riskScore,
+		"risk_tier":                        riskTier,
+		"priority_score":                   priorityScore,
+		"priority_tier":                    priorityTier,
+		"technical_driver_installation_id": technicalDriverInstallationID,
+		"technical_driver_software_name":   technicalDriverSoftwareName,
+		"technical_driver_risk_score":      technicalDriverRiskScore,
+		"technical_driver_cve_id":          technicalDriverCVEID,
+		"priority_driver_installation_id":  priorityDriverInstallationID,
+		"priority_driver_software_name":    priorityDriverSoftwareName,
+		"priority_driver_priority_score":   priorityDriverPriorityScore,
+		"priority_driver_cve_id":           priorityDriverCVEID,
+		"risky_software_count":             riskySoftwareCount,
+		"now":                              time.Now().UTC(),
+	}
+
+	return executeWriteHelper(ctx, r.driver, query, params)
 }

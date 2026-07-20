@@ -83,7 +83,7 @@ func main() {
 	}
 	defer driver.Close(ctx)
 
-	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, _, hardwareRepo, networkRepo, _, projectRepo, dbHelper, relRepo := neo4j.NewRepository(driver)
+	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, _, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo := neo4j.NewRepository(driver)
 	infraRepo := neo4j.NewInfrastructureRepository(driver)
 	riskRepo := neo4j.NewRiskRepository(driver)
 
@@ -93,8 +93,8 @@ func main() {
 	orchestrator := service.NewOrchestrator(
 		projectRepo, endpointRepo, hardwareRepo, networkRepo,
 		softwareInstRepo, softwareRepo, findingRepo, vulnRepo,
-		remediationRepo, relRepo, infraRepo,
-		provider.NewNistAPIAdapter("https://services.nvd.nist.gov/rest/json/cves/2.0", cfg.NVD.APIKey),
+		remediationRepo, relRepo, infraRepo, patchRepo, dbHelper,
+		provider.NewNistAPIAdapter("https://services.nvd.nist.gov/rest/json/cves/2.0", cfg.NVD.APIKey, 30),
 	).WithRisk(riskRepo, epssAdapter, kevAdapter)
 
 	// ── 1. Limpiar nodos de prueba anteriores ──────────────────────────────────

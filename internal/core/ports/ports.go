@@ -170,4 +170,16 @@ type RiskPort interface {
 
 	// GetInstallationIDsByEndpoint devuelve los IDs de todas las instalaciones de software asociadas a un endpoint.
 	GetInstallationIDsByEndpoint(ctx context.Context, endpointID int64) ([]string, error)
+
+	// UpdateSoftwareInstallationPriority actualiza el score de prioridad de una instalación de software.
+	UpdateSoftwareInstallationPriority(ctx context.Context, installationID string, criticalityLevel string, criticalityMultiplier float64, priorityScore float64, priorityTier string) error
+
+	// GetSoftwareCriticalityLevel obtiene el nivel de criticidad de una instalación de software.
+	GetSoftwareCriticalityLevel(ctx context.Context, installationID string) (string, error)
+
+	// GetSoftwareRiskSummariesByEndpoint devuelve un resumen de riesgo de software para todas las instalaciones asociadas a un endpoint.
+	GetSoftwareRiskSummariesByEndpoint(ctx context.Context, endpointID int64) ([]domain.SoftwareRiskSummary, error)
+
+	// UpdateEndpointRiskAndPriority actualiza el riesgo y la prioridad de un endpoint, incluyendo los drivers técnicos y de prioridad.
+	UpdateEndpointRiskAndPriority(ctx context.Context, endpointID int64, riskScore float64, riskTier string, priorityScore float64, priorityTier string, technicalDriverInstallationID string, technicalDriverSoftwareName string, technicalDriverRiskScore float64, technicalDriverCVEID string, priorityDriverInstallationID string, priorityDriverSoftwareName string, priorityDriverPriorityScore float64, priorityDriverCVEID string, riskySoftwareCount int) error
 }

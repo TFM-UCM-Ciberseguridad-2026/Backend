@@ -248,7 +248,10 @@ func (h *OrchestratorHandler) ComputeEndpointRisk(w http.ResponseWriter, r *http
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	sendJSON(w, map[string]string{"status": "risk computed"}, http.StatusOK)
+	sendJSON(w, map[string]any{
+		"status":      "risk computed",
+		"endpoint_id": endpointID,
+	}, http.StatusOK)
 }
 
 // POST /api/risk/recalculate-all

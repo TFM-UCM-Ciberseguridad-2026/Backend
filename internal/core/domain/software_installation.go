@@ -18,4 +18,10 @@ type SoftwareInstallation struct {
 	RiskComputedAt  *time.Time `json:"risk_computed_at"`
 	DriverFindingID int64      `json:"driver_finding_id"`
 	DriverCVEID     string     `json:"driver_cve_id"`
+
+	CriticalityLevel      string     `json:"criticality_level"`
+	CriticalityMultiplier float64    `json:"criticality_multiplier"`
+	PriorityScore         float64    `json:"priority_score"`
+	PriorityTier          string     `json:"priority_tier"`
+	PriorityComputedAt    *time.Time `json:"priority_computed_at"`
 }
