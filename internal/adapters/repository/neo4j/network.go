@@ -12,13 +12,21 @@ type networkRepo struct {
 }
 
 func (r *networkRepo) Save(ctx context.Context, nw *domain.Network) error {
-	query := `MERGE (n:Network {id: $id}) SET n.nombre = $name, n.cidr = $cidr, n.gateway = $gw, n.vlan_id = $vlan`
+	query := `
+		MERGE (n:Network {id: $id})
+		SET n.nombre = $name,
+		    n.cidr = $cidr,
+		    n.gateway = $gw,
+		    n.vlan_id = $vlan,
+		    n.descripcion = $desc
+	`
 	params := map[string]any{
 		"id":   nw.NetworkID,
 		"name": nw.Nombre,
 		"cidr": nw.CIDR,
 		"gw":   nw.Gateway,
 		"vlan": nw.VLANID,
+		"desc": nw.Descripcion,
 	}
 	return executeWriteHelper(ctx, r.driver, query, params)
 }
@@ -30,11 +38,12 @@ func (r *networkRepo) GetByID(ctx context.Context, id int64) (*domain.Network, e
 		return nil, err
 	}
 	return &domain.Network{
-		NetworkID: getInt64(props, "id"),
-		Nombre:    getString(props, "nombre"),
-		CIDR:      getString(props, "cidr"),
-		Gateway:   getString(props, "gateway"),
-		VLANID:    getInt64(props, "vlan_id"),
+		NetworkID:   getInt64(props, "id"),
+		Nombre:      getString(props, "nombre"),
+		CIDR:        getString(props, "cidr"),
+		Gateway:     getString(props, "gateway"),
+		VLANID:      getInt64(props, "vlan_id"),
+		Descripcion: getString(props, "descripcion"),
 	}, nil
 }
 

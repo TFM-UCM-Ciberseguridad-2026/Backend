@@ -83,13 +83,68 @@ func (o *Orchestrator) WithRisk(riskPort ports.RiskPort, epss ports.EPSSProvider
 	return o
 }
 
+// nextNodeID genera un ID numérico auto-incremental simple para un label dado.
+// Reutiliza el mismo patrón que ya usaba el código para Patch en
+// AutoScanAndRegisterVulnerabilities, generalizado a cualquier label.
+//
+// NOTA de concurrencia: no es atómico. Si dos altas del mismo tipo llegan
+// exactamente a la vez, ambas podrían leer el mismo max(id) antes de que la
+// primera confirme su escritura, resultando en un ID duplicado. Para el
+// volumen de esta aplicación es aceptable; si en el futuro hay altas
+// concurrentes reales, esto debería migrarse a una secuencia dedicada de
+// Neo4j o a UUIDs.
+func (o *Orchestrator) nextNodeID(ctx context.Context, label string) (int64, error) {
+	query := fmt.Sprintf("MATCH (n:%s) RETURN coalesce(max(n.id), 0) AS maxId", label)
+	res, err := o.dbHelper.ExecuteRead(ctx, query, nil)
+	if err != nil {
+		return 0, err
+	}
+	if res == nil {
+		return 1, nil
+	}
+	m, ok := res.(map[string]any)
+	if !ok {
+		return 1, nil
+	}
+	if maxID, ok := m["maxId"].(int64); ok {
+		return maxID + 1, nil
+	}
+	if maxIDFloat, ok := m["maxId"].(float64); ok {
+		return int64(maxIDFloat) + 1, nil
+	}
+	return 1, nil
+}
+
+// nextInstallationID genera un identificador string único para SoftwareInstallation,
+// cuyo ID es de tipo string (no numérico) en el dominio.
+func (o *Orchestrator) nextInstallationID() string {
+	return fmt.Sprintf("inst-%d-%d", time.Now().UnixNano(), rand.Int31n(10000))
+}
+
 // CreateProject guarda el proyecto principal.
 func (o *Orchestrator) CreateProject(ctx context.Context, project *domain.Project) error {
+	// FIX: ProjectID nunca se asignaba antes de guardar. Con el zero-value (0),
+	// el MERGE del repositorio Neo4j actualizaba siempre el mismo nodo id=0
+	// en vez de crear un Project nuevo en cada alta.
+	id, err := o.nextNodeID(ctx, "Project")
+	if err != nil {
+		return fmt.Errorf("error generando ID de proyecto: %w", err)
+	}
+	project.ProjectID = id
+
 	return o.projectPort.Save(ctx, project)
 }
 
 // AddEndpointToProject guarda un nuevo endpoint y lo vincula a un proyecto.
 func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64, endpoint *domain.Endpoint) error {
+	// FIX: mismo bug — EndpointID nunca se generaba, así que cada alta
+	// "pisaba" al Endpoint anterior en vez de crear uno nuevo.
+	id, err := o.nextNodeID(ctx, "Endpoint")
+	if err != nil {
+		return fmt.Errorf("error generando ID de endpoint: %w", err)
+	}
+	endpoint.EndpointID = id
+
 	if err := o.endpointPort.Save(ctx, endpoint); err != nil {
 		return err
 	}
@@ -98,6 +153,13 @@ func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64
 
 // AssociateHardwareToEndpoint guarda componentes de hardware y los enlaza a un endpoint.
 func (o *Orchestrator) AssociateHardwareToEndpoint(ctx context.Context, endpointID int64, hardware *domain.Hardware) error {
+	// FIX: mismo bug — HardwareID nunca se generaba.
+	id, err := o.nextNodeID(ctx, "Hardware")
+	if err != nil {
+		return fmt.Errorf("error generando ID de hardware: %w", err)
+	}
+	hardware.HardwareID = id
+
 	if err := o.hardwarePort.Save(ctx, hardware); err != nil {
 		return err
 	}
@@ -106,6 +168,13 @@ func (o *Orchestrator) AssociateHardwareToEndpoint(ctx context.Context, endpoint
 
 // AssociateNetworkToEndpoint guarda un segmento de red y lo asocia a un endpoint.
 func (o *Orchestrator) AssociateNetworkToEndpoint(ctx context.Context, endpointID int64, network *domain.Network) error {
+	// FIX: mismo bug — NetworkID nunca se generaba.
+	id, err := o.nextNodeID(ctx, "Network")
+	if err != nil {
+		return fmt.Errorf("error generando ID de red: %w", err)
+	}
+	network.NetworkID = id
+
 	if err := o.networkPort.Save(ctx, network); err != nil {
 		return err
 	}
@@ -115,6 +184,16 @@ func (o *Orchestrator) AssociateNetworkToEndpoint(ctx context.Context, endpointI
 // RegisterSoftwareInstallation guarda la definición del software, la instancia instalada,
 // asocia la instancia al endpoint y el software genérico a la instancia instalada.
 func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpointID int64, software *domain.Software, installation *domain.SoftwareInstallation) error {
+	// FIX: mismo bug — SoftwareID (int64) e InstallationID (string) nunca se
+	// generaban antes de guardar.
+	swID, err := o.nextNodeID(ctx, "Software")
+	if err != nil {
+		return fmt.Errorf("error generando ID de software: %w", err)
+	}
+	software.SoftwareID = swID
+
+	installation.InstallationID = o.nextInstallationID()
+
 	if err := o.softwarePort.Save(ctx, software); err != nil {
 		return err
 	}
