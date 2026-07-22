@@ -123,27 +123,26 @@ func (o *Orchestrator) nextInstallationID() string {
 
 // CreateProject guarda el proyecto principal.
 func (o *Orchestrator) CreateProject(ctx context.Context, project *domain.Project) error {
-	// FIX: ProjectID nunca se asignaba antes de guardar. Con el zero-value (0),
-	// el MERGE del repositorio Neo4j actualizaba siempre el mismo nodo id=0
-	// en vez de crear un Project nuevo en cada alta.
-	id, err := o.nextNodeID(ctx, "Project")
-	if err != nil {
-		return fmt.Errorf("error generando ID de proyecto: %w", err)
+	if project.ProjectID == 0 {
+		id, err := o.nextNodeID(ctx, "Project")
+		if err != nil {
+			return fmt.Errorf("error generando ID de proyecto: %w", err)
+		}
+		project.ProjectID = id
 	}
-	project.ProjectID = id
 
 	return o.projectPort.Save(ctx, project)
 }
 
 // AddEndpointToProject guarda un nuevo endpoint y lo vincula a un proyecto.
 func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64, endpoint *domain.Endpoint) error {
-	// FIX: mismo bug — EndpointID nunca se generaba, así que cada alta
-	// "pisaba" al Endpoint anterior en vez de crear uno nuevo.
-	id, err := o.nextNodeID(ctx, "Endpoint")
-	if err != nil {
-		return fmt.Errorf("error generando ID de endpoint: %w", err)
+	if endpoint.EndpointID == 0 {
+		id, err := o.nextNodeID(ctx, "Endpoint")
+		if err != nil {
+			return fmt.Errorf("error generando ID de endpoint: %w", err)
+		}
+		endpoint.EndpointID = id
 	}
-	endpoint.EndpointID = id
 
 	if err := o.endpointPort.Save(ctx, endpoint); err != nil {
 		return err
@@ -153,12 +152,13 @@ func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64
 
 // AssociateHardwareToEndpoint guarda componentes de hardware y los enlaza a un endpoint.
 func (o *Orchestrator) AssociateHardwareToEndpoint(ctx context.Context, endpointID int64, hardware *domain.Hardware) error {
-	// FIX: mismo bug — HardwareID nunca se generaba.
-	id, err := o.nextNodeID(ctx, "Hardware")
-	if err != nil {
-		return fmt.Errorf("error generando ID de hardware: %w", err)
+	if hardware.HardwareID == 0 {
+		id, err := o.nextNodeID(ctx, "Hardware")
+		if err != nil {
+			return fmt.Errorf("error generando ID de hardware: %w", err)
+		}
+		hardware.HardwareID = id
 	}
-	hardware.HardwareID = id
 
 	if err := o.hardwarePort.Save(ctx, hardware); err != nil {
 		return err
@@ -168,12 +168,13 @@ func (o *Orchestrator) AssociateHardwareToEndpoint(ctx context.Context, endpoint
 
 // AssociateNetworkToEndpoint guarda un segmento de red y lo asocia a un endpoint.
 func (o *Orchestrator) AssociateNetworkToEndpoint(ctx context.Context, endpointID int64, network *domain.Network) error {
-	// FIX: mismo bug — NetworkID nunca se generaba.
-	id, err := o.nextNodeID(ctx, "Network")
-	if err != nil {
-		return fmt.Errorf("error generando ID de red: %w", err)
+	if network.NetworkID == 0 {
+		id, err := o.nextNodeID(ctx, "Network")
+		if err != nil {
+			return fmt.Errorf("error generando ID de red: %w", err)
+		}
+		network.NetworkID = id
 	}
-	network.NetworkID = id
 
 	if err := o.networkPort.Save(ctx, network); err != nil {
 		return err
@@ -184,15 +185,17 @@ func (o *Orchestrator) AssociateNetworkToEndpoint(ctx context.Context, endpointI
 // RegisterSoftwareInstallation guarda la definición del software, la instancia instalada,
 // asocia la instancia al endpoint y el software genérico a la instancia instalada.
 func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpointID int64, software *domain.Software, installation *domain.SoftwareInstallation) error {
-	// FIX: mismo bug — SoftwareID (int64) e InstallationID (string) nunca se
-	// generaban antes de guardar.
-	swID, err := o.nextNodeID(ctx, "Software")
-	if err != nil {
-		return fmt.Errorf("error generando ID de software: %w", err)
+	if software.SoftwareID == 0 {
+		swID, err := o.nextNodeID(ctx, "Software")
+		if err != nil {
+			return fmt.Errorf("error generando ID de software: %w", err)
+		}
+		software.SoftwareID = swID
 	}
-	software.SoftwareID = swID
 
-	installation.InstallationID = o.nextInstallationID()
+	if installation.InstallationID == "" {
+		installation.InstallationID = o.nextInstallationID()
+	}
 
 	if err := o.softwarePort.Save(ctx, software); err != nil {
 		return err

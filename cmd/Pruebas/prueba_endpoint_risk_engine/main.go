@@ -162,9 +162,11 @@ func main() {
 	fmt.Println("\n[2/5] Creando endpoint, software installations y findings...")
 	now := time.Now().UTC()
 
-	if err := orchestrator.CreateProject(ctx, &domain.Project{ProjectID: projectID, Nombre: "Phase 3 Endpoint Risk Test"}); err != nil {
+	project := &domain.Project{ProjectID: projectID, Nombre: "Phase 3 Endpoint Risk Test"}
+	if err := orchestrator.CreateProject(ctx, project); err != nil {
 		log.Fatalf("Error creando proyecto: %v", err)
 	}
+	createdProjectID := project.ProjectID
 
 	endpoint := &domain.Endpoint{
 		EndpointID:         endpointID,
@@ -177,10 +179,12 @@ func main() {
 		IntegrityReq:       "Medium",
 		AvailabilityReq:    "High",
 	}
-	if err := orchestrator.AddEndpointToProject(ctx, projectID, endpoint); err != nil {
+	if err := orchestrator.AddEndpointToProject(ctx, createdProjectID, endpoint); err != nil {
 		log.Fatalf("Error creando endpoint: %v", err)
 	}
+	createdEndpointID := endpoint.EndpointID
 
+	createdInstallationIDs := make(map[string]string, len(installations))
 	for _, inst := range installations {
 		software := &domain.Software{
 			SoftwareID: inst.softwareID,
@@ -196,19 +200,25 @@ func main() {
 			CriticalityLevel: inst.criticalityLevel,
 		}
 
-		if err := orchestrator.RegisterSoftwareInstallation(ctx, endpointID, software, softwareInstallation); err != nil {
+		if err := orchestrator.RegisterSoftwareInstallation(ctx, createdEndpointID, software, softwareInstallation); err != nil {
 			log.Fatalf("Error registrando instalación %s: %v", inst.installationID, err)
 		}
+		createdInstallationIDs[inst.installationID] = softwareInstallation.InstallationID
 	}
 
 	for _, item := range findings {
+		createdInstallationID := createdInstallationIDs[item.installationID]
+		if createdInstallationID == "" {
+			log.Fatalf("No existe instalación creada para %s", item.installationID)
+		}
+
 		finding := &domain.Finding{
 			FindingID:         item.findingID,
 			Status:            "OPEN",
 			FirstSeen:         now,
 			RemediationFactor: item.remediationFactor,
 		}
-		if err := orchestrator.GenerateFinding(ctx, item.installationID, finding); err != nil {
+		if err := orchestrator.GenerateFinding(ctx, createdInstallationID, finding); err != nil {
 			log.Fatalf("Error creando finding %d: %v", item.findingID, err)
 		}
 
@@ -230,12 +240,14 @@ func main() {
 	}
 
 	fmt.Println("    ✓ Infraestructura de prueba creada.")
-	fmt.Println("      Technical driver esperado: inst-devtool-risk-test")
-	fmt.Println("      Priority driver esperado : inst-db-risk-test")
+	expectedTechnicalDriverID := createdInstallationIDs["inst-devtool-risk-test"]
+	expectedPriorityDriverID := createdInstallationIDs["inst-db-risk-test"]
+	fmt.Printf("      Technical driver esperado: inst-devtool-risk-test (%s)\n", expectedTechnicalDriverID)
+	fmt.Printf("      Priority driver esperado : inst-db-risk-test (%s)\n", expectedPriorityDriverID)
 
 	fmt.Println("\n[3/5] Ejecutando ComputeEndpointRisk...")
 	start := time.Now()
-	if err := orchestrator.ComputeEndpointRisk(ctx, endpointID); err != nil {
+	if err := orchestrator.ComputeEndpointRisk(ctx, createdEndpointID); err != nil {
 		log.Fatalf("Error calculando riesgo del endpoint: %v", err)
 	}
 	fmt.Printf("    ✓ Cálculo completado en %.1fs.\n", time.Since(start).Seconds())
@@ -244,12 +256,12 @@ func main() {
 	session := driver.NewSession(ctx, neo4jdriver.SessionConfig{})
 	defer session.Close(ctx)
 
-	softwareRows, err := readSoftwareSummaries(ctx, session)
+	softwareRows, err := readSoftwareSummaries(ctx, session, createdEndpointID)
 	if err != nil {
 		log.Fatalf("Error leyendo software summaries: %v", err)
 	}
 
-	endpointRow, err := readEndpointSummary(ctx, session)
+	endpointRow, err := readEndpointSummary(ctx, session, createdEndpointID)
 	if err != nil {
 		log.Fatalf("Error leyendo endpoint summary: %v", err)
 	}
@@ -257,12 +269,12 @@ func main() {
 	printResults(softwareRows, endpointRow)
 
 	fmt.Println("\n[5/5] Validando aserciones Phase 3...")
-	assertPhase3(softwareRows, endpointRow)
+	assertPhase3(softwareRows, endpointRow, expectedTechnicalDriverID, expectedPriorityDriverID)
 
 	fmt.Println("\n✓ PRUEBA PHASE 3 COMPLETADA")
 }
 
-func readSoftwareSummaries(ctx context.Context, session neo4jdriver.SessionWithContext) ([]softwareSummary, error) {
+func readSoftwareSummaries(ctx context.Context, session neo4jdriver.SessionWithContext, endpointID int64) ([]softwareSummary, error) {
 	result, err := session.Run(ctx, `
 		MATCH (:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)-[:INSTANCE_OF]->(s:Software)
 		RETURN si.id AS installation_id,
@@ -309,7 +321,7 @@ func readSoftwareSummaries(ctx context.Context, session neo4jdriver.SessionWithC
 	return rows, result.Err()
 }
 
-func readEndpointSummary(ctx context.Context, session neo4jdriver.SessionWithContext) (endpointSummary, error) {
+func readEndpointSummary(ctx context.Context, session neo4jdriver.SessionWithContext, endpointID int64) (endpointSummary, error) {
 	result, err := session.Run(ctx, `
 		MATCH (e:Endpoint {id: $endpoint_id})
 		RETURN e.risk_score AS risk_score,
@@ -407,7 +419,7 @@ func printResults(softwareRows []softwareSummary, endpointRow endpointSummary) {
 	fmt.Printf("  Risky Software: %d\n", endpointRow.RiskySoftwareCount)
 }
 
-func assertPhase3(softwareRows []softwareSummary, endpointRow endpointSummary) {
+func assertPhase3(softwareRows []softwareSummary, endpointRow endpointSummary, expectedTechnicalDriverID string, expectedPriorityDriverID string) {
 	if len(softwareRows) != 2 {
 		log.Fatalf("ASSERT FAIL: se esperaban 2 instalaciones, recibidas %d", len(softwareRows))
 	}
@@ -435,11 +447,11 @@ func assertPhase3(softwareRows []softwareSummary, endpointRow endpointSummary) {
 	if database.PriorityScore <= devTool.PriorityScore {
 		log.Fatalf("ASSERT FAIL: database priority %.4f debe ser mayor que devtool priority %.4f", database.PriorityScore, devTool.PriorityScore)
 	}
-	if endpointRow.TechnicalDriverInstallationID != "inst-devtool-risk-test" {
-		log.Fatalf("ASSERT FAIL: technical_driver = %s, esperado inst-devtool-risk-test", endpointRow.TechnicalDriverInstallationID)
+	if endpointRow.TechnicalDriverInstallationID != expectedTechnicalDriverID {
+		log.Fatalf("ASSERT FAIL: technical_driver = %s, esperado %s", endpointRow.TechnicalDriverInstallationID, expectedTechnicalDriverID)
 	}
-	if endpointRow.PriorityDriverInstallationID != "inst-db-risk-test" {
-		log.Fatalf("ASSERT FAIL: priority_driver = %s, esperado inst-db-risk-test", endpointRow.PriorityDriverInstallationID)
+	if endpointRow.PriorityDriverInstallationID != expectedPriorityDriverID {
+		log.Fatalf("ASSERT FAIL: priority_driver = %s, esperado %s", endpointRow.PriorityDriverInstallationID, expectedPriorityDriverID)
 	}
 	if endpointRow.RiskScore < endpointRow.TechnicalDriverRiskScore {
 		log.Fatalf("ASSERT FAIL: endpoint risk %.4f debe ser >= technical driver risk %.4f", endpointRow.RiskScore, endpointRow.TechnicalDriverRiskScore)
