@@ -12,15 +12,25 @@ type hardwareRepo struct {
 }
 
 func (r *hardwareRepo) Save(ctx context.Context, h *domain.Hardware) error {
-	query := `MERGE (n:Hardware {id: $id}) SET n.model = $m, n.type = $t, n.manufacturer = $mf, n.cpu = $cpu, n.ram = $ram, n.storage = $st`
+	query := `
+		MERGE (n:Hardware {id: $id})
+		SET n.model = $m,
+		    n.type = $t,
+		    n.manufacturer = $mf,
+		    n.serial_number = $serial,
+		    n.cpu = $cpu,
+		    n.ram = $ram,
+		    n.storage = $st
+	`
 	params := map[string]any{
-		"id":  h.HardwareID,
-		"m":   h.Model,
-		"t":   h.Type,
-		"mf":  h.Manufacturer,
-		"cpu": h.CPU,
-		"ram": h.RAMGB,
-		"st":  h.StorageGB,
+		"id":     h.HardwareID,
+		"m":      h.Model,
+		"t":      h.Type,
+		"mf":     h.Manufacturer,
+		"serial": h.SerialNumber,
+		"cpu":    h.CPU,
+		"ram":    h.RAMGB,
+		"st":     h.StorageGB,
 	}
 	return executeWriteHelper(ctx, r.driver, query, params)
 }
@@ -36,6 +46,7 @@ func (r *hardwareRepo) GetByID(ctx context.Context, id int64) (*domain.Hardware,
 		Model:        getString(props, "model"),
 		Type:         getString(props, "type"),
 		Manufacturer: getString(props, "manufacturer"),
+		SerialNumber: getString(props, "serial_number"),
 		CPU:          getString(props, "cpu"),
 		RAMGB:        int(getInt64(props, "ram")),
 		StorageGB:    int(getInt64(props, "storage")),

@@ -110,9 +110,11 @@ func main() {
 	fmt.Println("\n[2/5] Creando endpoint, software installations y findings...")
 	now := time.Now().UTC()
 
-	if err := orchestrator.CreateProject(ctx, &domain.Project{ProjectID: projectID, Nombre: "Phase 2 Software Risk Test"}); err != nil {
+	project := &domain.Project{ProjectID: projectID, Nombre: "Phase 2 Software Risk Test"}
+	if err := orchestrator.CreateProject(ctx, project); err != nil {
 		log.Fatalf("Error creando proyecto: %v", err)
 	}
+	createdProjectID := project.ProjectID
 
 	endpoint := &domain.Endpoint{
 		EndpointID:         endpointID,
@@ -125,9 +127,10 @@ func main() {
 		IntegrityReq:       "Medium",
 		AvailabilityReq:    "High",
 	}
-	if err := orchestrator.AddEndpointToProject(ctx, projectID, endpoint); err != nil {
+	if err := orchestrator.AddEndpointToProject(ctx, createdProjectID, endpoint); err != nil {
 		log.Fatalf("Error creando endpoint: %v", err)
 	}
+	createdEndpointID := endpoint.EndpointID
 
 	installations := []struct {
 		softwareID     int64
@@ -140,6 +143,7 @@ func main() {
 		{8102, "inst-misc-risk-test", "custom-app", "1.0.0", "internal"},
 	}
 
+	createdInstallationIDs := make(map[string]string, len(installations))
 	for _, inst := range installations {
 		software := &domain.Software{
 			SoftwareID: inst.softwareID,
@@ -154,19 +158,25 @@ func main() {
 			Status:         "INSTALLED",
 		}
 
-		if err := orchestrator.RegisterSoftwareInstallation(ctx, endpointID, software, softwareInstallation); err != nil {
+		if err := orchestrator.RegisterSoftwareInstallation(ctx, createdEndpointID, software, softwareInstallation); err != nil {
 			log.Fatalf("Error registrando instalación %s: %v", inst.installationID, err)
 		}
+		createdInstallationIDs[inst.installationID] = softwareInstallation.InstallationID
 	}
 
 	for _, tf := range testFindings {
+		createdInstallationID := createdInstallationIDs[tf.installationID]
+		if createdInstallationID == "" {
+			log.Fatalf("No existe instalación creada para %s", tf.installationID)
+		}
+
 		finding := &domain.Finding{
 			FindingID:         tf.findingID,
 			Status:            "OPEN",
 			FirstSeen:         now,
 			RemediationFactor: tf.remediationFactor,
 		}
-		if err := orchestrator.GenerateFinding(ctx, tf.installationID, finding); err != nil {
+		if err := orchestrator.GenerateFinding(ctx, createdInstallationID, finding); err != nil {
 			log.Fatalf("Error creando finding %d: %v", tf.findingID, err)
 		}
 
@@ -193,7 +203,7 @@ func main() {
 
 	fmt.Println("\n[3/5] Ejecutando ComputeEndpointRisk...")
 	start := time.Now()
-	if err := orchestrator.ComputeEndpointRisk(ctx, endpointID); err != nil {
+	if err := orchestrator.ComputeEndpointRisk(ctx, createdEndpointID); err != nil {
 		log.Fatalf("Error calculando riesgo del endpoint: %v", err)
 	}
 	fmt.Printf("    ✓ Cálculo completado en %.1fs.\n", time.Since(start).Seconds())
@@ -202,12 +212,12 @@ func main() {
 	session := driver.NewSession(ctx, neo4jdriver.SessionConfig{})
 	defer session.Close(ctx)
 
-	softwareRows, err := readSoftwareRisks(ctx, session)
+	softwareRows, err := readSoftwareRisks(ctx, session, createdEndpointID)
 	if err != nil {
 		log.Fatalf("Error leyendo riesgos de software: %v", err)
 	}
 
-	endpointScore, endpointTier, err := readEndpointRisk(ctx, dbHelper)
+	endpointScore, endpointTier, err := readEndpointRisk(ctx, session, createdEndpointID)
 	if err != nil {
 		log.Fatalf("Error leyendo riesgo de endpoint: %v", err)
 	}
@@ -229,7 +239,7 @@ type softwareRiskRow struct {
 	RiskComputedAt  any
 }
 
-func readSoftwareRisks(ctx context.Context, session neo4jdriver.SessionWithContext) ([]softwareRiskRow, error) {
+func readSoftwareRisks(ctx context.Context, session neo4jdriver.SessionWithContext, endpointID int64) ([]softwareRiskRow, error) {
 	result, err := session.Run(ctx, `
 		MATCH (:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
 		RETURN si.id AS installation_id,
@@ -267,25 +277,23 @@ func readSoftwareRisks(ctx context.Context, session neo4jdriver.SessionWithConte
 	return rows, result.Err()
 }
 
-func readEndpointRisk(ctx context.Context, dbHelper any) (float64, string, error) {
-	type reader interface {
-		ExecuteRead(context.Context, string, map[string]any) (any, error)
-	}
-
-	result, err := dbHelper.(reader).ExecuteRead(ctx,
+func readEndpointRisk(ctx context.Context, session neo4jdriver.SessionWithContext, endpointID int64) (float64, string, error) {
+	result, err := session.Run(ctx,
 		`MATCH (e:Endpoint {id: $id}) RETURN e.risk_score AS score, e.risk_tier AS tier`,
 		map[string]any{"id": endpointID},
 	)
 	if err != nil {
 		return 0, "", err
 	}
-
-	row, ok := result.(map[string]any)
-	if !ok {
-		return 0, "", fmt.Errorf("respuesta inesperada leyendo endpoint")
+	if !result.Next(ctx) {
+		return 0, "", fmt.Errorf("endpoint %d no encontrado", endpointID)
 	}
 
-	return toF(row["score"]), toS(row["tier"]), nil
+	rec := result.Record()
+	score, _ := rec.Get("score")
+	tier, _ := rec.Get("tier")
+
+	return toF(score), toS(tier), result.Err()
 }
 
 func printResults(rows []softwareRiskRow, endpointScore float64, endpointTier string) {
