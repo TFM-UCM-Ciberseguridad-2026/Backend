@@ -28,7 +28,7 @@ func (r *networkRepo) Save(ctx context.Context, nw *domain.Network) error {
 		"vlan": nw.VLANID,
 		"desc": nw.Descripcion,
 	}
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteSaveHelper(ctx, r.driver, query, params)
 }
 
 func (r *networkRepo) Update(ctx context.Context, nw *domain.Network) error {
@@ -48,7 +48,7 @@ func (r *networkRepo) Update(ctx context.Context, nw *domain.Network) error {
 		"vlan": nw.VLANID,
 		"desc": nw.Descripcion,
 	}
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
 func (r *networkRepo) GetByID(ctx context.Context, id int64) (*domain.Network, error) {

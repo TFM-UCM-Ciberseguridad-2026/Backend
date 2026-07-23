@@ -18,7 +18,7 @@ func (r *patchRepo) Save(ctx context.Context, p *domain.Patch) error {
 		"desc": p.Description,
 		"url":  p.URL,
 	}
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteSaveHelper(ctx, r.driver, query, params)
 }
 
 func (r *patchRepo) Update(ctx context.Context, p *domain.Patch) error {
@@ -28,7 +28,7 @@ func (r *patchRepo) Update(ctx context.Context, p *domain.Patch) error {
 		"desc": p.Description,
 		"url":  p.URL,
 	}
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
 func (r *patchRepo) GetByID(ctx context.Context, id int64) (*domain.Patch, error) {

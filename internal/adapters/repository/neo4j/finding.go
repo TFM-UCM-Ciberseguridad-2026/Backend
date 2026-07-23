@@ -56,7 +56,7 @@ func (r *findingRepo) Save(ctx context.Context, f *domain.Finding) error {
 		"priority_score":     f.PriorityScore,
 		"risk_computed_at":   riskComputedAt,
 	}
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteSaveHelper(ctx, r.driver, query, params)
 }
 
 func (r *findingRepo) Update(ctx context.Context, f *domain.Finding) error {
@@ -104,7 +104,7 @@ func (r *findingRepo) Update(ctx context.Context, f *domain.Finding) error {
 		"priority_score":     f.PriorityScore,
 		"risk_computed_at":   riskComputedAt,
 	}
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
 func (r *findingRepo) GetByID(ctx context.Context, id int64) (*domain.Finding, error) {

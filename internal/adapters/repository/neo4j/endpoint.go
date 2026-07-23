@@ -83,7 +83,7 @@ func (r *endpointRepo) Save(ctx context.Context, endpoint *domain.Endpoint) erro
 		"risky_software_count":             endpoint.RiskySoftwareCount,
 	}
 
-	return r.ExecuteWrite(ctx, query, params)
+	return executeWriteSaveHelper(ctx, r.driver, query, params)
 }
 
 // Update actualiza un Endpoint existente en la base de datos de grafos Neo4j.
@@ -153,7 +153,7 @@ func (r *endpointRepo) Update(ctx context.Context, endpoint *domain.Endpoint) er
 		"risky_software_count":             endpoint.RiskySoftwareCount,
 	}
 
-	return r.ExecuteWrite(ctx, query, params)
+	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
 // GetByID recupera un Endpoint de Neo4j por su ID.

@@ -29,7 +29,7 @@ func (r *softwareRepo) Save(ctx context.Context, s *domain.Software) error {
 		"purl":    s.PURL,
 		"vendor":  s.Vendor,
 	}
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteSaveHelper(ctx, r.driver, query, params)
 }
 
 func (r *softwareRepo) Update(ctx context.Context, s *domain.Software) error {
@@ -46,7 +46,7 @@ func (r *softwareRepo) Update(ctx context.Context, s *domain.Software) error {
 		"purl":    s.PURL,
 		"vendor":  s.Vendor,
 	}
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
 func (r *softwareRepo) GetByID(ctx context.Context, id int64) (*domain.Software, error) {
@@ -137,7 +137,7 @@ func (r *softwareInstallationRepo) Save(ctx context.Context, si *domain.Software
 		"priority_computed_at":   priorityComputedAt,
 	}
 
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteSaveHelper(ctx, r.driver, query, params)
 }
 
 func (r *softwareInstallationRepo) Update(ctx context.Context, si *domain.SoftwareInstallation) error {
@@ -198,7 +198,7 @@ func (r *softwareInstallationRepo) Update(ctx context.Context, si *domain.Softwa
 		"priority_computed_at":   priorityComputedAt,
 	}
 
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
 func (r *softwareInstallationRepo) GetByID(ctx context.Context, id string) (*domain.SoftwareInstallation, error) {

@@ -33,7 +33,7 @@ func main() {
 	defer driver.Close(ctx)
 
 	// 3. Inicializar repositorios
-	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, _, hardwareRepo, networkRepo, _, projectRepo, dbHelper, relRepo := neo4j.NewRepository(driver)
+	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, _, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo := neo4j.NewRepository(driver)
 	infraRepo := neo4j.NewInfrastructureRepository(driver)
 
 	// Limpiar base de datos
@@ -42,7 +42,7 @@ func main() {
 	fmt.Println("[OK] Base de datos limpia.")
 
 	// 4. Inicializar NIST Adapter y Orchestrator
-	nistAPIAdapter := provider.NewNistAPIAdapter("https://services.nvd.nist.gov/rest/json/cves/2.0", cfg.NVD.APIKey)
+	nistAPIAdapter := provider.NewNistAPIAdapter("https://services.nvd.nist.gov/rest/json/cves/2.0", cfg.NVD.APIKey, 30)
 	orchestrator := service.NewOrchestrator(
 		projectRepo,
 		endpointRepo,
@@ -55,6 +55,8 @@ func main() {
 		remediationRepo,
 		relRepo,
 		infraRepo,
+		patchRepo,
+		dbHelper,
 		nistAPIAdapter,
 	)
 

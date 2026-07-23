@@ -39,7 +39,7 @@ func main() {
 	fmt.Println("[OK] Base de datos limpiada.")
 
 	// 2. Instanciamos el Orquestador Inyectando los Puertos
-	nistAPIAdapter := provider.NewNistAPIAdapter("https://services.nvd.nist.gov/rest/json/cves/2.0", cfg.NVD.APIKey)
+	nistAPIAdapter := provider.NewNistAPIAdapter("https://services.nvd.nist.gov/rest/json/cves/2.0", cfg.NVD.APIKey, 30)
 	orchestrator := service.NewOrchestrator(
 		projectRepo,
 		endpointRepo,
@@ -52,6 +52,8 @@ func main() {
 		remediationRepo,
 		relRepo,
 		infraRepo,
+		patchRepo,
+		dbHelper,
 		nistAPIAdapter,
 	)
 

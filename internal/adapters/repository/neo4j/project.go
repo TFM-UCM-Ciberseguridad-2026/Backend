@@ -17,7 +17,7 @@ func (r *projectRepo) Save(ctx context.Context, p *domain.Project) error {
 		"id":   p.ProjectID,
 		"name": p.Nombre,
 	}
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteSaveHelper(ctx, r.driver, query, params)
 }
 
 func (r *projectRepo) Update(ctx context.Context, p *domain.Project) error {
@@ -26,7 +26,7 @@ func (r *projectRepo) Update(ctx context.Context, p *domain.Project) error {
 		"id":   p.ProjectID,
 		"name": p.Nombre,
 	}
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
 func (r *projectRepo) GetByID(ctx context.Context, id int64) (*domain.Project, error) {

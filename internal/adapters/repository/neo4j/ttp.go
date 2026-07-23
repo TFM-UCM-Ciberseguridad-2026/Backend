@@ -31,7 +31,7 @@ func (r *ttpRepo) Save(ctx context.Context, ttp *domain.TTP) error {
 		"description": ttp.Description,
 	}
 
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteSaveHelper(ctx, r.driver, query, params)
 }
 
 func (r *ttpRepo) Update(ctx context.Context, ttp *domain.TTP) error {
@@ -49,7 +49,7 @@ func (r *ttpRepo) Update(ctx context.Context, ttp *domain.TTP) error {
 		"description": ttp.Description,
 	}
 
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
 func (r *ttpRepo) GetByID(ctx context.Context, id string) (*domain.TTP, error) {

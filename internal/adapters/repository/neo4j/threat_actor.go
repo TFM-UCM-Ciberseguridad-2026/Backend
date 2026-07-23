@@ -32,7 +32,7 @@ func (r *threatActorRepo) Save(ctx context.Context, actor *domain.ThreatActor) e
 		"aliases":     actor.Aliases,
 	}
 
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteSaveHelper(ctx, r.driver, query, params)
 }
 
 func (r *threatActorRepo) Update(ctx context.Context, actor *domain.ThreatActor) error {
@@ -50,7 +50,7 @@ func (r *threatActorRepo) Update(ctx context.Context, actor *domain.ThreatActor)
 		"aliases":     actor.Aliases,
 	}
 
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
 func (r *threatActorRepo) GetByID(ctx context.Context, id string) (*domain.ThreatActor, error) {

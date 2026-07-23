@@ -32,7 +32,7 @@ func (r *hardwareRepo) Save(ctx context.Context, h *domain.Hardware) error {
 		"ram":    h.RAMGB,
 		"st":     h.StorageGB,
 	}
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteSaveHelper(ctx, r.driver, query, params)
 }
 
 func (r *hardwareRepo) Update(ctx context.Context, h *domain.Hardware) error {
@@ -56,7 +56,7 @@ func (r *hardwareRepo) Update(ctx context.Context, h *domain.Hardware) error {
 		"ram":    h.RAMGB,
 		"st":     h.StorageGB,
 	}
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
 func (r *hardwareRepo) GetByID(ctx context.Context, id int64) (*domain.Hardware, error) {

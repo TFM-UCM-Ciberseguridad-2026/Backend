@@ -14,13 +14,13 @@ type remediationRepo struct {
 func (r *remediationRepo) Save(ctx context.Context, rem *domain.Remediation) error {
 	query := `MERGE (n:Remediation {id: $id}) ON CREATE SET n.fixed_version = $fv, n.status = $status`
 	params := map[string]any{"id": rem.RemediationID, "fv": rem.FixedVersion, "status": rem.Status}
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteSaveHelper(ctx, r.driver, query, params)
 }
 
 func (r *remediationRepo) Update(ctx context.Context, rem *domain.Remediation) error {
 	query := `MATCH (n:Remediation {id: $id}) SET n.fixed_version = $fv, n.status = $status`
 	params := map[string]any{"id": rem.RemediationID, "fv": rem.FixedVersion, "status": rem.Status}
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
 func (r *remediationRepo) GetByID(ctx context.Context, id int64) (*domain.Remediation, error) {
