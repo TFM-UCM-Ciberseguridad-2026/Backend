@@ -12,7 +12,17 @@ type patchRepo struct {
 }
 
 func (r *patchRepo) Save(ctx context.Context, p *domain.Patch) error {
-	query := `MERGE (n:Patch {id: $id}) SET n.description = $desc, n.url = $url`
+	query := `MERGE (n:Patch {id: $id}) ON CREATE SET n.description = $desc, n.url = $url`
+	params := map[string]any{
+		"id":   p.PatchID,
+		"desc": p.Description,
+		"url":  p.URL,
+	}
+	return executeWriteHelper(ctx, r.driver, query, params)
+}
+
+func (r *patchRepo) Update(ctx context.Context, p *domain.Patch) error {
+	query := `MATCH (n:Patch {id: $id}) SET n.description = $desc, n.url = $url`
 	params := map[string]any{
 		"id":   p.PatchID,
 		"desc": p.Description,

@@ -18,66 +18,77 @@ Propósito arquitectónico y teórico:
 
 type EndpointPort interface {
 	Save(ctx context.Context, endpoint *domain.Endpoint) error       // Guarda en la DB
+	Update(ctx context.Context, endpoint *domain.Endpoint) error     // Actualiza en la DB
 	GetByID(ctx context.Context, id int64) (*domain.Endpoint, error) // Te da con el id el objeto recuperado de la bd
 	DeleteByID(ctx context.Context, id int64) error                  // Borra un nodo de la BD
 }
 
 type VulnerabilityPort interface {
 	Save(ctx context.Context, vuln *domain.Vulnerability) error
+	Update(ctx context.Context, vuln *domain.Vulnerability) error
 	GetByID(ctx context.Context, cveID string) (*domain.Vulnerability, error)
 	DeleteByID(ctx context.Context, cveID string) error
 }
 
 type SoftwarePort interface {
 	Save(ctx context.Context, software *domain.Software) error
+	Update(ctx context.Context, software *domain.Software) error
 	GetByID(ctx context.Context, id int64) (*domain.Software, error)
 	DeleteByID(ctx context.Context, id int64) error
 }
 
 type FindingPort interface {
 	Save(ctx context.Context, finding *domain.Finding) error
+	Update(ctx context.Context, finding *domain.Finding) error
 	GetByID(ctx context.Context, id int64) (*domain.Finding, error)
 	DeleteByID(ctx context.Context, id int64) error
 }
 
 type RemediationPort interface {
 	Save(ctx context.Context, remediation *domain.Remediation) error
+	Update(ctx context.Context, remediation *domain.Remediation) error
 	GetByID(ctx context.Context, id int64) (*domain.Remediation, error)
 	DeleteByID(ctx context.Context, id int64) error
 }
 
 type ExploitPort interface {
 	Save(ctx context.Context, exploit *domain.Exploit) error
+	Update(ctx context.Context, exploit *domain.Exploit) error
 	GetByID(ctx context.Context, id int64) (*domain.Exploit, error)
 	DeleteByID(ctx context.Context, id int64) error
 }
 
 type HardwarePort interface {
 	Save(ctx context.Context, hardware *domain.Hardware) error
+	Update(ctx context.Context, hardware *domain.Hardware) error
 	GetByID(ctx context.Context, id int64) (*domain.Hardware, error)
 	DeleteByID(ctx context.Context, id int64) error
 }
 
 type NetworkPort interface {
 	Save(ctx context.Context, network *domain.Network) error
+	Update(ctx context.Context, network *domain.Network) error
 	GetByID(ctx context.Context, id int64) (*domain.Network, error)
 	DeleteByID(ctx context.Context, id int64) error
 }
 
 type PatchPort interface {
 	Save(ctx context.Context, patch *domain.Patch) error
+	Update(ctx context.Context, patch *domain.Patch) error
 	GetByID(ctx context.Context, id int64) (*domain.Patch, error)
 	DeleteByID(ctx context.Context, id int64) error
 }
 
 type ProjectPort interface {
 	Save(ctx context.Context, project *domain.Project) error
+	Update(ctx context.Context, project *domain.Project) error
 	GetByID(ctx context.Context, id int64) (*domain.Project, error)
 	DeleteByID(ctx context.Context, id int64) error
 }
 
 type SoftwareInstallationPort interface {
 	Save(ctx context.Context, installation *domain.SoftwareInstallation) error
+	Update(ctx context.Context, installation *domain.SoftwareInstallation) error
 	GetByID(ctx context.Context, id string) (*domain.SoftwareInstallation, error)
 	DeleteByID(ctx context.Context, id string) error
 }
@@ -119,6 +130,7 @@ type VulnerabilityAPIscanner interface {
 
 type TTPPort interface {
 	Save(ctx context.Context, ttp *domain.TTP) error
+	Update(ctx context.Context, ttp *domain.TTP) error
 	GetByID(ctx context.Context, id string) (*domain.TTP, error)
 	DeleteByID(ctx context.Context, id string) error
 	RelateToVulnerability(ctx context.Context, cveID string, ttpID string) error
@@ -126,6 +138,7 @@ type TTPPort interface {
 
 type ThreatActorPort interface {
 	Save(ctx context.Context, actor *domain.ThreatActor) error
+	Update(ctx context.Context, actor *domain.ThreatActor) error
 	GetByID(ctx context.Context, id string) (*domain.ThreatActor, error)
 	DeleteByID(ctx context.Context, id string) error
 	RelateToTTP(ctx context.Context, actorID string, ttpID string) error

@@ -19,6 +19,24 @@ func NewTTPRepository(driver neo4j.DriverWithContext) *ttpRepo {
 func (r *ttpRepo) Save(ctx context.Context, ttp *domain.TTP) error {
 	query := `
 		MERGE (t:TTP {ttp_id: $ttp_id})
+		ON CREATE SET t.name = $name,
+		    t.tactic = $tactic,
+		    t.description = $description,
+		    t.updated_at = timestamp()
+	`
+	params := map[string]any{
+		"ttp_id":      ttp.TTPID,
+		"name":        ttp.Name,
+		"tactic":      ttp.Tactic,
+		"description": ttp.Description,
+	}
+
+	return executeWriteHelper(ctx, r.driver, query, params)
+}
+
+func (r *ttpRepo) Update(ctx context.Context, ttp *domain.TTP) error {
+	query := `
+		MATCH (t:TTP {ttp_id: $ttp_id})
 		SET t.name = $name,
 		    t.tactic = $tactic,
 		    t.description = $description,

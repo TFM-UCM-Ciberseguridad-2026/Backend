@@ -18,6 +18,23 @@ type softwareRepo struct {
 func (r *softwareRepo) Save(ctx context.Context, s *domain.Software) error {
 	query := `
 		MERGE (n:Software {id: $id})
+		ON CREATE SET n.name = $name, n.version = $version, n.type = $type, n.cpe = $cpe, n.purl = $purl, n.vendor = $vendor
+	`
+	params := map[string]any{
+		"id":      s.SoftwareID,
+		"name":    s.Name,
+		"version": s.Version,
+		"type":    s.Type,
+		"cpe":     s.CPE,
+		"purl":    s.PURL,
+		"vendor":  s.Vendor,
+	}
+	return executeWriteHelper(ctx, r.driver, query, params)
+}
+
+func (r *softwareRepo) Update(ctx context.Context, s *domain.Software) error {
+	query := `
+		MATCH (n:Software {id: $id})
 		SET n.name = $name, n.version = $version, n.type = $type, n.cpe = $cpe, n.purl = $purl, n.vendor = $vendor
 	`
 	params := map[string]any{
@@ -65,6 +82,67 @@ type softwareInstallationRepo struct {
 func (r *softwareInstallationRepo) Save(ctx context.Context, si *domain.SoftwareInstallation) error {
 	query := `
         MERGE (n:SoftwareInstallation {id: $id})
+        ON CREATE SET n.first_seen = $first_seen,
+            n.last_seen = $last_seen,
+            n.status = $status,
+            n.install_path = $install_path,
+            n.detected_by = $detected_by,
+            n.package_manager = $package_manager,
+			n.risk_score = $risk_score,
+			n.risk_tier = $risk_tier,
+			n.risk_computed_at = $risk_computed_at,
+			n.driver_finding_id = $driver_finding_id,
+			n.driver_cve_id = $driver_cve_id,
+			n.criticality_level = $criticality_level,
+			n.criticality_multiplier = $criticality_multiplier,
+			n.priority_score = $priority_score,
+			n.priority_tier = $priority_tier,
+			n.priority_computed_at = $priority_computed_at
+    `
+
+	var lastSeen any
+	if si.LastSeen != nil {
+		lastSeen = *si.LastSeen
+	} else {
+		lastSeen = nil
+	}
+
+	var riskComputedAt any
+	if si.RiskComputedAt != nil {
+		riskComputedAt = *si.RiskComputedAt
+	}
+
+	var priorityComputedAt any
+	if si.PriorityComputedAt != nil {
+		priorityComputedAt = *si.PriorityComputedAt
+	}
+
+	params := map[string]any{
+		"id":                     si.InstallationID,
+		"first_seen":             si.FirstSeen,
+		"last_seen":              lastSeen,
+		"status":                 si.Status,
+		"install_path":           si.InstallPath,
+		"detected_by":            si.DetectedBy,
+		"package_manager":        si.PackageManager,
+		"risk_score":             si.RiskScore,
+		"risk_tier":              si.RiskTier,
+		"risk_computed_at":       riskComputedAt,
+		"driver_finding_id":      si.DriverFindingID,
+		"driver_cve_id":          si.DriverCVEID,
+		"criticality_level":      si.CriticalityLevel,
+		"criticality_multiplier": si.CriticalityMultiplier,
+		"priority_score":         si.PriorityScore,
+		"priority_tier":          si.PriorityTier,
+		"priority_computed_at":   priorityComputedAt,
+	}
+
+	return executeWriteHelper(ctx, r.driver, query, params)
+}
+
+func (r *softwareInstallationRepo) Update(ctx context.Context, si *domain.SoftwareInstallation) error {
+	query := `
+        MATCH (n:SoftwareInstallation {id: $id})
         SET n.first_seen = $first_seen,
             n.last_seen = $last_seen,
             n.status = $status,

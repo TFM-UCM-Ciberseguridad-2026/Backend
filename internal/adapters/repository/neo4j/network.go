@@ -14,6 +14,26 @@ type networkRepo struct {
 func (r *networkRepo) Save(ctx context.Context, nw *domain.Network) error {
 	query := `
 		MERGE (n:Network {id: $id})
+		ON CREATE SET n.nombre = $name,
+		    n.cidr = $cidr,
+		    n.gateway = $gw,
+		    n.vlan_id = $vlan,
+		    n.descripcion = $desc
+	`
+	params := map[string]any{
+		"id":   nw.NetworkID,
+		"name": nw.Nombre,
+		"cidr": nw.CIDR,
+		"gw":   nw.Gateway,
+		"vlan": nw.VLANID,
+		"desc": nw.Descripcion,
+	}
+	return executeWriteHelper(ctx, r.driver, query, params)
+}
+
+func (r *networkRepo) Update(ctx context.Context, nw *domain.Network) error {
+	query := `
+		MATCH (n:Network {id: $id})
 		SET n.nombre = $name,
 		    n.cidr = $cidr,
 		    n.gateway = $gw,

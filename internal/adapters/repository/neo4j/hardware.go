@@ -14,6 +14,30 @@ type hardwareRepo struct {
 func (r *hardwareRepo) Save(ctx context.Context, h *domain.Hardware) error {
 	query := `
 		MERGE (n:Hardware {id: $id})
+		ON CREATE SET n.model = $m,
+		    n.type = $t,
+		    n.manufacturer = $mf,
+		    n.serial_number = $serial,
+		    n.cpu = $cpu,
+		    n.ram = $ram,
+		    n.storage = $st
+	`
+	params := map[string]any{
+		"id":     h.HardwareID,
+		"m":      h.Model,
+		"t":      h.Type,
+		"mf":     h.Manufacturer,
+		"serial": h.SerialNumber,
+		"cpu":    h.CPU,
+		"ram":    h.RAMGB,
+		"st":     h.StorageGB,
+	}
+	return executeWriteHelper(ctx, r.driver, query, params)
+}
+
+func (r *hardwareRepo) Update(ctx context.Context, h *domain.Hardware) error {
+	query := `
+		MATCH (n:Hardware {id: $id})
 		SET n.model = $m,
 		    n.type = $t,
 		    n.manufacturer = $mf,

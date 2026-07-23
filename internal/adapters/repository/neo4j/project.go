@@ -12,7 +12,16 @@ type projectRepo struct {
 }
 
 func (r *projectRepo) Save(ctx context.Context, p *domain.Project) error {
-	query := `MERGE (n:Project {id: $id}) SET n.nombre = $name`
+	query := `MERGE (n:Project {id: $id}) ON CREATE SET n.nombre = $name`
+	params := map[string]any{
+		"id":   p.ProjectID,
+		"name": p.Nombre,
+	}
+	return executeWriteHelper(ctx, r.driver, query, params)
+}
+
+func (r *projectRepo) Update(ctx context.Context, p *domain.Project) error {
+	query := `MATCH (n:Project {id: $id}) SET n.nombre = $name`
 	params := map[string]any{
 		"id":   p.ProjectID,
 		"name": p.Nombre,
