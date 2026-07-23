@@ -212,6 +212,12 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 
 // GenerateFinding registra un hallazgo de vulnerabilidad (Finding) a una instalación específica.
 func (o *Orchestrator) GenerateFinding(ctx context.Context, installationID string, finding *domain.Finding) error {
+	if finding.FindingID == 0 {
+		id, err := o.nextNodeID(ctx, "Finding")
+		if err == nil {
+			finding.FindingID = id
+		}
+	}
 	if err := o.findingPort.Save(ctx, finding); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
@@ -221,6 +227,12 @@ func (o *Orchestrator) GenerateFinding(ctx context.Context, installationID strin
 // AssociateVulnerabilitiesAndRemediations guarda la vulnerabilidad (CVE), el parche o mitigación,
 // y relaciona ambas partes al finding detectado.
 func (o *Orchestrator) AssociateVulnerabilitiesAndRemediations(ctx context.Context, findingID int64, vuln *domain.Vulnerability, rem *domain.Remediation) error {
+	if rem.RemediationID == 0 {
+		id, err := o.nextNodeID(ctx, "Remediation")
+		if err == nil {
+			rem.RemediationID = id
+		}
+	}
 	if err := o.vulnPort.Save(ctx, vuln); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
@@ -295,17 +307,10 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		for _, p := range vCopy.Patches {
 			pCopy := p
 			// Auto-increment simple id for patch
-			idRes, err := o.dbHelper.ExecuteRead(ctx, "MATCH (p:Patch) RETURN coalesce(max(p.id), 0) AS maxId", nil)
-			if err == nil && idRes != nil {
-				if maxIdMap, ok := idRes.(map[string]any); ok {
-					if maxId, ok := maxIdMap["maxId"].(int64); ok {
-						pCopy.PatchID = maxId + 1
-					} else if maxIdFloat, ok := maxIdMap["maxId"].(float64); ok {
-						pCopy.PatchID = int64(maxIdFloat) + 1
-					}
-				}
-			}
-			if pCopy.PatchID == 0 {
+			id, err := o.nextNodeID(ctx, "Patch")
+			if err == nil {
+				pCopy.PatchID = id
+			} else {
 				pCopy.PatchID = int64(rand.Int31n(1000000) + 1)
 			}
 
@@ -318,7 +323,10 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 
 		// Crear un Hallazgo (Finding) para conectar la instalación del software con el CVE detectado
 		now := time.Now().UTC()
-		findingID := int64(rand.Int31n(1000000) + 1)
+		findingID, err := o.nextNodeID(ctx, "Finding")
+		if err != nil {
+			findingID = int64(rand.Int31n(1000000) + 1)
+		}
 		finding := &domain.Finding{ //TODO: retocar los valores por defectoooo TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
 			FindingID:         findingID,
 			Status:            "OPEN",
@@ -596,17 +604,10 @@ func (o *Orchestrator) SyncNistDaily(ctx context.Context) error {
 
 		for _, p := range vCopy.Patches {
 			pCopy := p
-			idRes, err := o.dbHelper.ExecuteRead(ctx, "MATCH (p:Patch) RETURN coalesce(max(p.id), 0) AS maxId", nil)
-			if err == nil && idRes != nil {
-				if maxIdMap, ok := idRes.(map[string]any); ok {
-					if maxId, ok := maxIdMap["maxId"].(int64); ok {
-						pCopy.PatchID = maxId + 1
-					} else if maxIdFloat, ok := maxIdMap["maxId"].(float64); ok {
-						pCopy.PatchID = int64(maxIdFloat) + 1
-					}
-				}
-			}
-			if pCopy.PatchID == 0 {
+			id, err := o.nextNodeID(ctx, "Patch")
+			if err == nil {
+				pCopy.PatchID = id
+			} else {
 				pCopy.PatchID = int64(rand.Int31n(1000000) + 1)
 			}
 			if err := o.patchPort.Save(ctx, &pCopy); err == nil {
