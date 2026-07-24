@@ -243,3 +243,13 @@ func CalculateSoftwareCriticalityMultiplier(level string) float64 {
 		return 1.00
 	}
 }
+
+// AggregateInfrastructureRisk combina los scores de riesgo de todos los endpoints asociados a un proyecto
+func AggregateInfrastructureRisk(scores []float64) float64 {
+	return AggregateRiskScores(scores)
+}
+
+// AggregateInfrastructurePriority combina los scores de prioridad de todos los endpoints asociados a un proyecto
+func AggregateInfrastructurePriority(scores []float64) float64 {
+	return AggregateRiskScores(scores)
+}

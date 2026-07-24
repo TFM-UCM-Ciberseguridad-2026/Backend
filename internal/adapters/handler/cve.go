@@ -284,3 +284,35 @@ func (h *OrchestratorHandler) ComputeSoftwareInstallationRisk(w http.ResponseWri
 		"risk_score": riskScore,
 	}, http.StatusOK)
 }
+
+// POST /api/projects/{id}/compute-risk
+// Recalcula el riesgo agregado de un proyecto completo, basado en todos sus endpoints y findings asociados.
+func (h *OrchestratorHandler) ComputeProjectRisk(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	projectID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		sendError(w, "Invalid project ID", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.orchestrator.ComputeProjectRisk(r.Context(), projectID); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]any{
+		"status":     "project risk computed",
+		"project_id": projectID,
+	}, http.StatusOK)
+}
+
+// POST /api/risk/recalculate-all-projects
+// Recalcula el riesgo de todos los proyectos. Pensado para el cron diario o trigger manual.
+func (h *OrchestratorHandler) ComputeAllProjectsRisk(w http.ResponseWriter, r *http.Request) {
+	if err := h.orchestrator.ComputeAllProjectsRisk(r.Context()); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]string{"status": "all project risks recomputed"}, http.StatusOK)
+}

@@ -195,4 +195,16 @@ type RiskPort interface {
 
 	// UpdateEndpointRiskAndPriority actualiza el riesgo y la prioridad de un endpoint, incluyendo los drivers técnicos y de prioridad.
 	UpdateEndpointRiskAndPriority(ctx context.Context, endpointID int64, riskScore float64, riskTier string, priorityScore float64, priorityTier string, technicalDriverInstallationID string, technicalDriverSoftwareName string, technicalDriverRiskScore float64, technicalDriverCVEID string, priorityDriverInstallationID string, priorityDriverSoftwareName string, priorityDriverPriorityScore float64, priorityDriverCVEID string, riskySoftwareCount int) error
+
+	// GetEndpointIDsByProject devuelve los IDs de todos los endpoints asociados a un proyecto.
+	GetEndpointIDsByProject(ctx context.Context, projectID int64) ([]int64, error)
+
+	// GetEndpointRiskSummariesByProject devuelve un resumen de riesgo de todos los endpoints asociados a un proyecto.
+	GetEndpointRiskSummariesByProject(ctx context.Context, projectID int64) ([]domain.EndpointRiskSummary, error)
+
+	// UpdateProjectRiskAndPriority actualiza el riesgo y la prioridad de un proyecto, incluyendo los drivers técnicos y de prioridad.
+	UpdateProjectRiskAndPriority(ctx context.Context, projectID int64, riskScore float64, riskTier string, priorityScore float64, priorityTier string, technicalDriverEndpointID int64, technicalDriverEndpointHostname string, technicalDriverRiskScore float64, technicalDriverSoftwareName string, technicalDriverCVEID string, priorityDriverEndpointID int64, priorityDriverEndpointHostname string, priorityDriverPriorityScore float64, priorityDriverSoftwareName string, priorityDriverCVEID string, riskyEndpointCount int) error
+
+	// GetAllProjectIDs devuelve los IDs de todos los proyectos para el recálculo diario.
+	GetAllProjectIDs(ctx context.Context) ([]int64, error)
 }

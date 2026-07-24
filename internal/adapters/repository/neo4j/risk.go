@@ -477,3 +477,199 @@ func (r *riskRepo) UpdateEndpointRiskAndPriority(ctx context.Context, endpointID
 
 	return executeWriteHelper(ctx, r.driver, query, params)
 }
+
+// GetEndpointIDsByProject devuelve los IDs de todos los endpoints asociados a un proyecto.
+func (r *riskRepo) GetEndpointIDsByProject(ctx context.Context, projectID int64) ([]int64, error) {
+	query := `
+        MATCH (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e:Endpoint)
+        WHERE NOT coalesce(e.status, 'ACTIVE') IN ['REMOVED', 'DECOMMISSIONED', 'DELETED']
+        RETURN e.id AS endpoint_id
+        ORDER BY endpoint_id
+    `
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"project_id": projectID})
+		if err != nil {
+			return nil, err
+		}
+
+		ids := make([]int64, 0)
+		for result.Next(ctx) {
+			endpointID, _ := result.Record().Get("endpoint_id")
+			ids = append(ids, toInt64(endpointID))
+		}
+
+		return ids, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []int64{}, nil
+	}
+	return res.([]int64), nil
+}
+
+// GetEndpointRiskSummariesByProject devuelve los resúmenes de riesgo de todos los endpoints asociados a un proyecto.
+func (r *riskRepo) GetEndpointRiskSummariesByProject(ctx context.Context, projectID int64) ([]domain.EndpointRiskSummary, error) {
+	query := `
+        MATCH (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e:Endpoint)
+        WHERE NOT coalesce(e.status, 'ACTIVE') IN ['REMOVED', 'DECOMMISSIONED', 'DELETED']
+        RETURN e.id AS endpoint_id,
+               e.hostname AS hostname,
+               e.status AS status,
+               e.risk_score AS risk_score,
+               e.risk_tier AS risk_tier,
+               e.priority_score AS priority_score,
+               e.priority_tier AS priority_tier,
+               e.technical_driver_installation_id AS technical_driver_installation_id,
+               e.technical_driver_software_name AS technical_driver_software_name,
+               e.technical_driver_risk_score AS technical_driver_risk_score,
+               e.technical_driver_cve_id AS technical_driver_cve_id,
+               e.priority_driver_installation_id AS priority_driver_installation_id,
+               e.priority_driver_software_name AS priority_driver_software_name,
+               e.priority_driver_priority_score AS priority_driver_priority_score,
+               e.priority_driver_cve_id AS priority_driver_cve_id,
+               e.risky_software_count AS risky_software_count
+        ORDER BY priority_score DESC
+    `
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"project_id": projectID})
+		if err != nil {
+			return nil, err
+		}
+
+		summaries := make([]domain.EndpointRiskSummary, 0)
+		for result.Next(ctx) {
+			rec := result.Record()
+			endpointID, _ := rec.Get("endpoint_id")
+			hostname, _ := rec.Get("hostname")
+			status, _ := rec.Get("status")
+			riskScore, _ := rec.Get("risk_score")
+			riskTier, _ := rec.Get("risk_tier")
+			priorityScore, _ := rec.Get("priority_score")
+			priorityTier, _ := rec.Get("priority_tier")
+			technicalDriverInstallationID, _ := rec.Get("technical_driver_installation_id")
+			technicalDriverSoftwareName, _ := rec.Get("technical_driver_software_name")
+			technicalDriverRiskScore, _ := rec.Get("technical_driver_risk_score")
+			technicalDriverCVEID, _ := rec.Get("technical_driver_cve_id")
+			priorityDriverInstallationID, _ := rec.Get("priority_driver_installation_id")
+			priorityDriverSoftwareName, _ := rec.Get("priority_driver_software_name")
+			priorityDriverPriorityScore, _ := rec.Get("priority_driver_priority_score")
+			priorityDriverCVEID, _ := rec.Get("priority_driver_cve_id")
+			riskySoftwareCount, _ := rec.Get("risky_software_count")
+
+			summaries = append(summaries, domain.EndpointRiskSummary{
+				EndpointID:                    toInt64(endpointID),
+				Hostname:                      toStr(hostname),
+				Status:                        toStr(status),
+				RiskScore:                     toFloat64(riskScore),
+				RiskTier:                      toStr(riskTier),
+				PriorityScore:                 toFloat64(priorityScore),
+				PriorityTier:                  toStr(priorityTier),
+				TechnicalDriverInstallationID: toStr(technicalDriverInstallationID),
+				TechnicalDriverSoftwareName:   toStr(technicalDriverSoftwareName),
+				TechnicalDriverRiskScore:      toFloat64(technicalDriverRiskScore),
+				TechnicalDriverCVEID:          toStr(technicalDriverCVEID),
+				PriorityDriverInstallationID:  toStr(priorityDriverInstallationID),
+				PriorityDriverSoftwareName:    toStr(priorityDriverSoftwareName),
+				PriorityDriverPriorityScore:   toFloat64(priorityDriverPriorityScore),
+				PriorityDriverCVEID:           toStr(priorityDriverCVEID),
+				RiskySoftwareCount:            int(toInt64(riskySoftwareCount)),
+			})
+		}
+
+		return summaries, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.EndpointRiskSummary{}, nil
+	}
+	return res.([]domain.EndpointRiskSummary), nil
+}
+
+// UpdateProjectRiskAndPriority actualiza los scores de riesgo y prioridad, así como los drivers, en el nodo Project.
+func (r *riskRepo) UpdateProjectRiskAndPriority(ctx context.Context, projectID int64, riskScore float64, riskTier string, priorityScore float64, priorityTier string, technicalDriverEndpointID int64, technicalDriverEndpointHostname string, technicalDriverRiskScore float64, technicalDriverSoftwareName string, technicalDriverCVEID string, priorityDriverEndpointID int64, priorityDriverEndpointHostname string, priorityDriverPriorityScore float64, priorityDriverSoftwareName string, priorityDriverCVEID string, riskyEndpointCount int) error {
+	query := `
+        MATCH (p:Project {id: $id})
+        SET p.risk_score = $risk_score,
+            p.risk_tier = $risk_tier,
+            p.risk_computed_at = $now,
+            p.priority_score = $priority_score,
+            p.priority_tier = $priority_tier,
+            p.priority_computed_at = $now,
+            p.technical_driver_endpoint_id = $technical_driver_endpoint_id,
+            p.technical_driver_endpoint_hostname = $technical_driver_endpoint_hostname,
+            p.technical_driver_risk_score = $technical_driver_risk_score,
+            p.technical_driver_software_name = $technical_driver_software_name,
+            p.technical_driver_cve_id = $technical_driver_cve_id,
+            p.priority_driver_endpoint_id = $priority_driver_endpoint_id,
+            p.priority_driver_endpoint_hostname = $priority_driver_endpoint_hostname,
+            p.priority_driver_priority_score = $priority_driver_priority_score,
+            p.priority_driver_software_name = $priority_driver_software_name,
+            p.priority_driver_cve_id = $priority_driver_cve_id,
+            p.risky_endpoint_count = $risky_endpoint_count
+    `
+
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{
+		"id":                                 projectID,
+		"risk_score":                         riskScore,
+		"risk_tier":                          riskTier,
+		"priority_score":                     priorityScore,
+		"priority_tier":                      priorityTier,
+		"technical_driver_endpoint_id":       technicalDriverEndpointID,
+		"technical_driver_endpoint_hostname": technicalDriverEndpointHostname,
+		"technical_driver_risk_score":        technicalDriverRiskScore,
+		"technical_driver_software_name":     technicalDriverSoftwareName,
+		"technical_driver_cve_id":            technicalDriverCVEID,
+		"priority_driver_endpoint_id":        priorityDriverEndpointID,
+		"priority_driver_endpoint_hostname":  priorityDriverEndpointHostname,
+		"priority_driver_priority_score":     priorityDriverPriorityScore,
+		"priority_driver_software_name":      priorityDriverSoftwareName,
+		"priority_driver_cve_id":             priorityDriverCVEID,
+		"risky_endpoint_count":               riskyEndpointCount,
+		"now":                                time.Now().UTC(),
+	})
+}
+
+// / GetAllProjectIDs devuelve los IDs de todos los proyectos para el recálculo diario masivo.
+func (r *riskRepo) GetAllProjectIDs(ctx context.Context) ([]int64, error) {
+	query := `MATCH (p:Project) RETURN p.id AS id ORDER BY id`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		ids := make([]int64, 0)
+		for result.Next(ctx) {
+			id, _ := result.Record().Get("id")
+			ids = append(ids, toInt64(id))
+		}
+
+		return ids, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []int64{}, nil
+	}
+	return res.([]int64), nil
+}
