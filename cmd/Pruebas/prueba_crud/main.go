@@ -30,9 +30,9 @@ func main() {
 
 	// Inicializar los puertos
 	_, vulnRepo, _, _, _, _, _, _, _, _, _, dbHelper, _ := neo4j.NewRepository(driver)
-	nistScanner := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey)
+	nistScanner := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey, 30)
 
-	fmt.Println("Conexión a Neo4j establecida.")
+	fmt.Println("Conexión a Neo4j establecida.", 30)
 	_ = dbHelper.ExecuteWrite(ctx, "MATCH (n) DETACH DELETE n", nil)
 	fmt.Println("Base de datos limpiada.")
 

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"errors"
 	"math/rand"
 	"time"
 
@@ -144,7 +145,7 @@ func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64
 		endpoint.EndpointID = id
 	}
 
-	if err := o.endpointPort.Save(ctx, endpoint); err != nil {
+	if err := o.endpointPort.Save(ctx, endpoint); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
 	return o.relationshipPort.LinkProjectToEndpoint(ctx, projectID, endpoint.EndpointID)
@@ -160,7 +161,7 @@ func (o *Orchestrator) AssociateHardwareToEndpoint(ctx context.Context, endpoint
 		hardware.HardwareID = id
 	}
 
-	if err := o.hardwarePort.Save(ctx, hardware); err != nil {
+	if err := o.hardwarePort.Save(ctx, hardware); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
 	return o.relationshipPort.LinkEndpointToHardware(ctx, endpointID, hardware.HardwareID)
@@ -176,7 +177,7 @@ func (o *Orchestrator) AssociateNetworkToEndpoint(ctx context.Context, endpointI
 		network.NetworkID = id
 	}
 
-	if err := o.networkPort.Save(ctx, network); err != nil {
+	if err := o.networkPort.Save(ctx, network); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
 	return o.relationshipPort.LinkEndpointToNetwork(ctx, endpointID, network.NetworkID)
@@ -197,10 +198,10 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 		installation.InstallationID = o.nextInstallationID()
 	}
 
-	if err := o.softwarePort.Save(ctx, software); err != nil {
+	if err := o.softwarePort.Save(ctx, software); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
-	if err := o.softwareInstPort.Save(ctx, installation); err != nil {
+	if err := o.softwareInstPort.Save(ctx, installation); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
 	if err := o.relationshipPort.LinkEndpointToInstallation(ctx, endpointID, installation.InstallationID); err != nil {
@@ -211,7 +212,13 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 
 // GenerateFinding registra un hallazgo de vulnerabilidad (Finding) a una instalación específica.
 func (o *Orchestrator) GenerateFinding(ctx context.Context, installationID string, finding *domain.Finding) error {
-	if err := o.findingPort.Save(ctx, finding); err != nil {
+	if finding.FindingID == 0 {
+		id, err := o.nextNodeID(ctx, "Finding")
+		if err == nil {
+			finding.FindingID = id
+		}
+	}
+	if err := o.findingPort.Save(ctx, finding); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
 	return o.relationshipPort.LinkInstallationToFinding(ctx, installationID, finding.FindingID)
@@ -220,10 +227,16 @@ func (o *Orchestrator) GenerateFinding(ctx context.Context, installationID strin
 // AssociateVulnerabilitiesAndRemediations guarda la vulnerabilidad (CVE), el parche o mitigación,
 // y relaciona ambas partes al finding detectado.
 func (o *Orchestrator) AssociateVulnerabilitiesAndRemediations(ctx context.Context, findingID int64, vuln *domain.Vulnerability, rem *domain.Remediation) error {
-	if err := o.vulnPort.Save(ctx, vuln); err != nil {
+	if rem.RemediationID == 0 {
+		id, err := o.nextNodeID(ctx, "Remediation")
+		if err == nil {
+			rem.RemediationID = id
+		}
+	}
+	if err := o.vulnPort.Save(ctx, vuln); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
-	if err := o.remediationPort.Save(ctx, rem); err != nil {
+	if err := o.remediationPort.Save(ctx, rem); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
 	if err := o.relationshipPort.LinkFindingToVulnerability(ctx, findingID, vuln.CVEID); err != nil {
@@ -272,7 +285,7 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		cpe = domain.GenerateCPE23(sw.Type, sw.Vendor, sw.Name, sw.Version)
 		sw.CPE = cpe
 		// Actualizar el software con el nuevo CPE generado
-		if err := o.softwarePort.Save(ctx, sw); err != nil {
+		if err := o.softwarePort.Save(ctx, sw); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 			return fmt.Errorf("error guardando software con CPE generado: %w", err)
 		}
 	}
@@ -286,7 +299,7 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 	// 4. Registrar vulnerabilidades y enlazarlas como hallazgos (Findings)
 	for _, v := range vulns {
 		vCopy := v
-		if err := o.vulnPort.Save(ctx, &vCopy); err != nil {
+		if err := o.vulnPort.Save(ctx, &vCopy); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 			return fmt.Errorf("error al guardar la vulnerabilidad %s: %w", vCopy.CVEID, err)
 		}
 
@@ -294,21 +307,14 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		for _, p := range vCopy.Patches {
 			pCopy := p
 			// Auto-increment simple id for patch
-			idRes, err := o.dbHelper.ExecuteRead(ctx, "MATCH (p:Patch) RETURN coalesce(max(p.id), 0) AS maxId", nil)
-			if err == nil && idRes != nil {
-				if maxIdMap, ok := idRes.(map[string]any); ok {
-					if maxId, ok := maxIdMap["maxId"].(int64); ok {
-						pCopy.PatchID = maxId + 1
-					} else if maxIdFloat, ok := maxIdMap["maxId"].(float64); ok {
-						pCopy.PatchID = int64(maxIdFloat) + 1
-					}
-				}
-			}
-			if pCopy.PatchID == 0 {
+			id, err := o.nextNodeID(ctx, "Patch")
+			if err == nil {
+				pCopy.PatchID = id
+			} else {
 				pCopy.PatchID = int64(rand.Int31n(1000000) + 1)
 			}
 
-			if err := o.patchPort.Save(ctx, &pCopy); err != nil {
+			if err := o.patchPort.Save(ctx, &pCopy); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 				continue
 			}
 			// Vincular parche a la vulnerabilidad
@@ -317,7 +323,10 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 
 		// Crear un Hallazgo (Finding) para conectar la instalación del software con el CVE detectado
 		now := time.Now().UTC()
-		findingID := int64(rand.Int31n(1000000) + 1)
+		findingID, err := o.nextNodeID(ctx, "Finding")
+		if err != nil {
+			findingID = int64(rand.Int31n(1000000) + 1)
+		}
 		finding := &domain.Finding{ //TODO: retocar los valores por defectoooo TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
 			FindingID:         findingID,
 			Status:            "OPEN",
@@ -328,7 +337,7 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 			RiskScore:         vCopy.BaseScore * 0.5,
 		}
 
-		if err := o.findingPort.Save(ctx, finding); err != nil {
+		if err := o.findingPort.Save(ctx, finding); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 			return fmt.Errorf("error al guardar el hallazgo para la vulnerabilidad %s: %w", vCopy.CVEID, err)
 		}
 
@@ -589,23 +598,16 @@ func (o *Orchestrator) SyncNistDaily(ctx context.Context) error {
 
 	for _, v := range vulns {
 		vCopy := v
-		if err := o.vulnPort.Save(ctx, &vCopy); err != nil {
+		if err := o.vulnPort.Save(ctx, &vCopy); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 			continue // Loguear o continuar si una falla
 		}
 
 		for _, p := range vCopy.Patches {
 			pCopy := p
-			idRes, err := o.dbHelper.ExecuteRead(ctx, "MATCH (p:Patch) RETURN coalesce(max(p.id), 0) AS maxId", nil)
-			if err == nil && idRes != nil {
-				if maxIdMap, ok := idRes.(map[string]any); ok {
-					if maxId, ok := maxIdMap["maxId"].(int64); ok {
-						pCopy.PatchID = maxId + 1
-					} else if maxIdFloat, ok := maxIdMap["maxId"].(float64); ok {
-						pCopy.PatchID = int64(maxIdFloat) + 1
-					}
-				}
-			}
-			if pCopy.PatchID == 0 {
+			id, err := o.nextNodeID(ctx, "Patch")
+			if err == nil {
+				pCopy.PatchID = id
+			} else {
 				pCopy.PatchID = int64(rand.Int31n(1000000) + 1)
 			}
 			if err := o.patchPort.Save(ctx, &pCopy); err == nil {

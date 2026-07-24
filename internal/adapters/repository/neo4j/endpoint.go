@@ -16,10 +16,80 @@ type endpointRepo struct {
 // IMPLEMENTACIÓN DE EndpointPort
 // ==========================================
 
-// Save persiste un Endpoint en la base de datos de grafos Neo4j.
+// Save persiste un Endpoint en la base de datos de grafos Neo4j (solo creación).
 func (r *endpointRepo) Save(ctx context.Context, endpoint *domain.Endpoint) error {
 	query := `
 		MERGE (e:Endpoint {id: $id})
+		ON CREATE SET e.hostname = $hostname,
+		    e.type = $type,
+		    e.status = $status,
+		    e.environment = $environment,
+		    e.internet_exposed = $internet_exposed,
+		    e.confidentiality_req = $confidentiality_req,
+		    e.integrity_req = $integrity_req,
+		    e.availability_req = $availability_req,
+		    e.risk_score = $risk_score,
+		    e.risk_tier = $risk_tier,
+		    e.risk_computed_at = $risk_computed_at,
+		    e.updated_at = timestamp(),
+			e.priority_score = $priority_score,
+			e.priority_tier = $priority_tier,
+			e.priority_computed_at = $priority_computed_at,
+			e.technical_driver_installation_id = $technical_driver_installation_id,
+			e.technical_driver_software_name = $technical_driver_software_name,
+			e.technical_driver_risk_score = $technical_driver_risk_score,
+			e.technical_driver_cve_id = $technical_driver_cve_id,
+			e.priority_driver_installation_id = $priority_driver_installation_id,
+			e.priority_driver_software_name = $priority_driver_software_name,
+			e.priority_driver_priority_score = $priority_driver_priority_score,
+			e.priority_driver_cve_id = $priority_driver_cve_id,
+			e.risky_software_count = $risky_software_count
+	`
+
+	var riskComputedAt any
+	if endpoint.RiskComputedAt != nil {
+		riskComputedAt = *endpoint.RiskComputedAt
+	}
+
+	var priorityComputedAt any
+	if endpoint.PriorityComputedAt != nil {
+		priorityComputedAt = *endpoint.PriorityComputedAt
+	}
+
+	params := map[string]any{
+		"id":                               endpoint.EndpointID,
+		"hostname":                         endpoint.Hostname,
+		"type":                             endpoint.Type,
+		"status":                           endpoint.Status,
+		"environment":                      endpoint.Environment,
+		"internet_exposed":                 endpoint.InternetExposed,
+		"confidentiality_req":              endpoint.ConfidentialityReq,
+		"integrity_req":                    endpoint.IntegrityReq,
+		"availability_req":                 endpoint.AvailabilityReq,
+		"risk_score":                       endpoint.RiskScore,
+		"risk_tier":                        endpoint.RiskTier,
+		"risk_computed_at":                 riskComputedAt,
+		"priority_score":                   endpoint.PriorityScore,
+		"priority_tier":                    endpoint.PriorityTier,
+		"priority_computed_at":             priorityComputedAt,
+		"technical_driver_installation_id": endpoint.TechnicalDriverInstallationID,
+		"technical_driver_software_name":   endpoint.TechnicalDriverSoftwareName,
+		"technical_driver_risk_score":      endpoint.TechnicalDriverRiskScore,
+		"technical_driver_cve_id":          endpoint.TechnicalDriverCVEID,
+		"priority_driver_installation_id":  endpoint.PriorityDriverInstallationID,
+		"priority_driver_software_name":    endpoint.PriorityDriverSoftwareName,
+		"priority_driver_priority_score":   endpoint.PriorityDriverPriorityScore,
+		"priority_driver_cve_id":           endpoint.PriorityDriverCVEID,
+		"risky_software_count":             endpoint.RiskySoftwareCount,
+	}
+
+	return executeWriteSaveHelper(ctx, r.driver, query, params)
+}
+
+// Update actualiza un Endpoint existente en la base de datos de grafos Neo4j.
+func (r *endpointRepo) Update(ctx context.Context, endpoint *domain.Endpoint) error {
+	query := `
+		MATCH (e:Endpoint {id: $id})
 		SET e.hostname = $hostname,
 		    e.type = $type,
 		    e.status = $status,
@@ -83,7 +153,7 @@ func (r *endpointRepo) Save(ctx context.Context, endpoint *domain.Endpoint) erro
 		"risky_software_count":             endpoint.RiskySoftwareCount,
 	}
 
-	return r.ExecuteWrite(ctx, query, params)
+	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
 // GetByID recupera un Endpoint de Neo4j por su ID.

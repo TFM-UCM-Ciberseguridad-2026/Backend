@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
@@ -14,6 +15,45 @@ func executeWriteHelper(ctx context.Context, driver neo4j.DriverWithContext, que
 	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		_, err := tx.Run(ctx, query, params)
 		return nil, err
+	})
+	return err
+}
+
+// executeWriteSaveHelper ejecuta una consulta Cypher de creación y devuelve error si el nodo ya existía.
+func executeWriteSaveHelper(ctx context.Context, driver neo4j.DriverWithContext, query string, params map[string]any) error {
+	session := driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		res, err := tx.Run(ctx, query, params)
+		if err != nil {
+			return nil, err
+		}
+		summary, err := res.Consume(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if summary.Counters().NodesCreated() == 0 {
+			return nil, domain.ErrNodeAlreadyExists
+		}
+		return nil, nil
+	})
+	return err
+}
+
+// executeWriteUpdateHelper ejecuta una consulta Cypher de actualización y devuelve error si el nodo no existe.
+func executeWriteUpdateHelper(ctx context.Context, driver neo4j.DriverWithContext, query string, params map[string]any) error {
+	session := driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		// Añadimos RETURN 1 para forzar que res.Next() sea true si hizo match con algún nodo.
+		res, err := tx.Run(ctx, query+"\nRETURN 1", params)
+		if err != nil {
+			return nil, err
+		}
+		if !res.Next(ctx) {
+			return nil, domain.ErrNodeNotFound
+		}
+		return nil, nil
 	})
 	return err
 }

@@ -40,8 +40,8 @@ func main() {
 	fmt.Println("Base de datos limpiada para la prueba.")
 
 	// 3. Inicializar Proveedor (NIST NVD)
-	nistScanner := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey)
-	fmt.Printf("Conectando a NIST NVD (%s)...\n", cfg.NVD.BaseURL)
+	nistScanner := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey, 30)
+	fmt.Printf("Conectando a NIST NVD (%s, 30)...\n", cfg.NVD.BaseURL)
 
 	// 4. Fetch de Vulnerabilidades
 	limit := 5

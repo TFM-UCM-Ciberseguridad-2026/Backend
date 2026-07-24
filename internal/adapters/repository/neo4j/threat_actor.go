@@ -20,6 +20,24 @@ func NewThreatActorRepository(driver neo4j.DriverWithContext) *threatActorRepo {
 func (r *threatActorRepo) Save(ctx context.Context, actor *domain.ThreatActor) error {
 	query := `
 		MERGE (a:ThreatActor {actor_id: $actor_id})
+		ON CREATE SET a.name = $name,
+		    a.description = $description,
+		    a.aliases = $aliases,
+		    a.updated_at = timestamp()
+	`
+	params := map[string]any{
+		"actor_id":    actor.ActorID,
+		"name":        actor.Name,
+		"description": actor.Description,
+		"aliases":     actor.Aliases,
+	}
+
+	return executeWriteSaveHelper(ctx, r.driver, query, params)
+}
+
+func (r *threatActorRepo) Update(ctx context.Context, actor *domain.ThreatActor) error {
+	query := `
+		MATCH (a:ThreatActor {actor_id: $actor_id})
 		SET a.name = $name,
 		    a.description = $description,
 		    a.aliases = $aliases,
@@ -32,7 +50,7 @@ func (r *threatActorRepo) Save(ctx context.Context, actor *domain.ThreatActor) e
 		"aliases":     actor.Aliases,
 	}
 
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
 func (r *threatActorRepo) GetByID(ctx context.Context, id string) (*domain.ThreatActor, error) {

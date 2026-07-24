@@ -14,6 +14,54 @@ type findingRepo struct {
 func (r *findingRepo) Save(ctx context.Context, f *domain.Finding) error {
 	query := `
 		MERGE (n:Finding {id: $id})
+		ON CREATE SET n.status = $status,
+		    n.first_seen = $first_seen,
+		    n.last_seen = $last_seen,
+		    n.resolved_at = $resolved_at,
+		    n.impact_score = $impact_score,
+		    n.likelihood = $likelihood,
+			n.exposure_factor = $exposure_factor,
+		    n.remediation_factor = $remediation_factor,
+		    n.risk_score = $risk_score,
+			n.asset_criticality = $asset_criticality,
+			n.urgency_boost = $urgency_boost,
+		    n.priority_score = $priority_score,
+		    n.risk_computed_at = $risk_computed_at
+	`
+
+	var lastSeen, resolvedAt, riskComputedAt any
+	if f.LastSeen != nil {
+		lastSeen = *f.LastSeen
+	}
+	if f.ResolvedAt != nil {
+		resolvedAt = *f.ResolvedAt
+	}
+	if f.RiskComputedAt != nil {
+		riskComputedAt = *f.RiskComputedAt
+	}
+
+	params := map[string]any{
+		"id":                 f.FindingID,
+		"status":             f.Status,
+		"first_seen":         f.FirstSeen,
+		"last_seen":          lastSeen,
+		"resolved_at":        resolvedAt,
+		"impact_score":       f.ImpactScore,
+		"likelihood":         f.Likelihood,
+		"exposure_factor":    f.ExposureFactor,
+		"remediation_factor": f.RemediationFactor,
+		"risk_score":         f.RiskScore,
+		"asset_criticality":  f.AssetCriticality,
+		"urgency_boost":      f.UrgencyBoost,
+		"priority_score":     f.PriorityScore,
+		"risk_computed_at":   riskComputedAt,
+	}
+	return executeWriteSaveHelper(ctx, r.driver, query, params)
+}
+
+func (r *findingRepo) Update(ctx context.Context, f *domain.Finding) error {
+	query := `
+		MATCH (n:Finding {id: $id})
 		SET n.status = $status,
 		    n.first_seen = $first_seen,
 		    n.last_seen = $last_seen,
@@ -56,7 +104,7 @@ func (r *findingRepo) Save(ctx context.Context, f *domain.Finding) error {
 		"priority_score":     f.PriorityScore,
 		"risk_computed_at":   riskComputedAt,
 	}
-	return executeWriteHelper(ctx, r.driver, query, params)
+	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
 func (r *findingRepo) GetByID(ctx context.Context, id int64) (*domain.Finding, error) {
