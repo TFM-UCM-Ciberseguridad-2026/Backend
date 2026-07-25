@@ -156,7 +156,15 @@ func main() {
 	for _, id := range cleanIDs {
 		_ = dbHelper.ExecuteWrite(ctx, "MATCH (n {id: $id}) DETACH DELETE n", map[string]any{"id": id})
 	}
-	_ = dbHelper.ExecuteWrite(ctx, `MATCH (n) WHERE n.id IN ["inst-devtool-risk-test", "inst-db-risk-test"] DETACH DELETE n`, nil)
+	_ = dbHelper.ExecuteWrite(ctx, `
+		MATCH (n)
+		WHERE n.id IN ["inst-devtool-risk-test", "inst-db-risk-test"]
+			OR n.cve_id IN ["CVE-2023-12345", "CVE-2023-12346"]
+			OR n.hostname = "endpoint-phase3-risk-test"
+			OR n.nombre = "Phase 3 Endpoint Risk Test"
+		DETACH DELETE n
+	`, nil)
+
 	fmt.Println("    ✓ Limpieza completada.")
 
 	fmt.Println("\n[2/5] Creando endpoint, software installations y findings...")

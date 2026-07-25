@@ -25,3 +25,29 @@ type SoftwareRiskSummary struct {
 	DriverCVEID           string
 	Status                string
 }
+
+// EndpointRiskSummary representa el resumen mínimo necesario para agregar riesgo
+// de un endpoint en un proyecto.
+type EndpointRiskSummary struct {
+	EndpointID int64
+	Hostname   string
+	Status     string
+
+	RiskScore float64
+	RiskTier  string
+
+	PriorityScore float64
+	PriorityTier  string
+
+	TechnicalDriverInstallationID string
+	TechnicalDriverSoftwareName   string
+	TechnicalDriverRiskScore      float64
+	TechnicalDriverCVEID          string
+
+	PriorityDriverInstallationID string
+	PriorityDriverSoftwareName   string
+	PriorityDriverPriorityScore  float64
+	PriorityDriverCVEID          string
+
+	RiskySoftwareCount int
+}

@@ -60,5 +60,11 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* POST /api/risk/recalculate-all: Recalcula el riesgo de todos los endpoints (trigger manual o cron). */
 	mux.HandleFunc("POST /api/risk/recalculate-all", h.ComputeAllRisks)
 
+	// POST /api/projects/{id}/compute-risk: Recalcula el riesgo agregado de un proyecto completo, basado en todos sus endpoints y findings asociados.
+	mux.HandleFunc("POST /api/projects/{id}/compute-risk", h.ComputeProjectRisk)
+
+	// POST /api/risk/recalculate-all-projects: Recalcula el riesgo de todos los proyectos (trigger manual o cron).
+	mux.HandleFunc("POST /api/risk/recalculate-all-projects", h.ComputeAllProjectsRisk)
+
 	return mux
 }

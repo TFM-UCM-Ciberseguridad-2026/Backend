@@ -2,8 +2,8 @@ package service
 
 import (
 	"context"
-	"fmt"
 	"errors"
+	"fmt"
 	"math/rand"
 	"time"
 
@@ -653,4 +653,140 @@ func countRiskySoftware(summaries []domain.SoftwareRiskSummary) int {
 		}
 	}
 	return count
+}
+
+// findDriverEndpointByRisk encuentra el endpoint con mayor riesgo agregado
+func findDriverEndpointByRisk(summaries []domain.EndpointRiskSummary) (domain.EndpointRiskSummary, bool) {
+	var driver domain.EndpointRiskSummary
+	found := false
+	for _, summary := range summaries {
+		if !found || summary.RiskScore > driver.RiskScore {
+			driver = summary
+			found = true
+		}
+	}
+	return driver, found
+}
+
+// findDriverEndpointByPriority encuentra el endpoint con mayor prioridad de parcheo
+func findDriverEndpointByPriority(summaries []domain.EndpointRiskSummary) (domain.EndpointRiskSummary, bool) {
+	var driver domain.EndpointRiskSummary
+	found := false
+	for _, summary := range summaries {
+		if !found || summary.PriorityScore > driver.PriorityScore {
+			driver = summary
+			found = true
+		}
+	}
+	return driver, found
+}
+
+// countRiskyEndpoints cuenta cuántos endpoints tienen un riesgo mayor a cero
+func countRiskyEndpoints(summaries []domain.EndpointRiskSummary) int {
+	count := 0
+	for _, summary := range summaries {
+		if summary.RiskScore > 0 {
+			count++
+		}
+	}
+	return count
+}
+
+// ComputeProjectRisk recalcula el riesgo agregado de un proyecto completo, basado en todos sus endpoints y findings asociados.
+func (o *Orchestrator) ComputeProjectRisk(ctx context.Context, projectID int64) error {
+	endpointIDs, err := o.riskPort.GetEndpointIDsByProject(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("error obteniendo endpoints del proyecto %d: %w", projectID, err)
+	}
+
+	for _, endpointID := range endpointIDs {
+		if err := o.ComputeEndpointRisk(ctx, endpointID); err != nil {
+			return fmt.Errorf("error recalculando endpoint %d del proyecto %d: %w", endpointID, projectID, err)
+		}
+	}
+
+	summaries, err := o.riskPort.GetEndpointRiskSummariesByProject(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("error obteniendo resumen de endpoints del proyecto %d: %w", projectID, err)
+	}
+
+	if len(summaries) == 0 {
+		return o.riskPort.UpdateProjectRiskAndPriority(
+			ctx,
+			projectID,
+			0.0,
+			"LOW",
+			0.0,
+			"LOW",
+			0,
+			"",
+			0.0,
+			"",
+			"",
+			0,
+			"",
+			0.0,
+			"",
+			"",
+			0,
+		)
+	}
+
+	riskScores := make([]float64, 0, len(summaries))
+	priorityScores := make([]float64, 0, len(summaries))
+	for _, summary := range summaries {
+		riskScores = append(riskScores, summary.RiskScore)
+		priorityScores = append(priorityScores, summary.PriorityScore)
+	}
+
+	projectRisk := AggregateInfrastructureRisk(riskScores)
+	projectRiskTier := ClassifyRiskTier(projectRisk)
+
+	projectPriority := AggregateInfrastructurePriority(priorityScores)
+	projectPriorityTier := ClassifyRiskTier(projectPriority)
+
+	technicalDriver, hasTechnicalDriver := findDriverEndpointByRisk(summaries)
+	priorityDriver, hasPriorityDriver := findDriverEndpointByPriority(summaries)
+	if !hasTechnicalDriver {
+		technicalDriver = domain.EndpointRiskSummary{}
+	}
+	if !hasPriorityDriver {
+		priorityDriver = domain.EndpointRiskSummary{}
+	}
+
+	return o.riskPort.UpdateProjectRiskAndPriority(
+		ctx,
+		projectID,
+		projectRisk,
+		projectRiskTier,
+		projectPriority,
+		projectPriorityTier,
+		technicalDriver.EndpointID,
+		technicalDriver.Hostname,
+		technicalDriver.RiskScore,
+		technicalDriver.TechnicalDriverSoftwareName,
+		technicalDriver.TechnicalDriverCVEID,
+		priorityDriver.EndpointID,
+		priorityDriver.Hostname,
+		priorityDriver.PriorityScore,
+		priorityDriver.PriorityDriverSoftwareName,
+		priorityDriver.PriorityDriverCVEID,
+		countRiskyEndpoints(summaries),
+	)
+}
+
+// ComputeAllProjectsRisk recorre todos los proyectos y recalcula su riesgo agregado.
+func (o *Orchestrator) ComputeAllProjectsRisk(ctx context.Context) error {
+	projectIDs, err := o.riskPort.GetAllProjectIDs(ctx)
+	if err != nil {
+		return fmt.Errorf("error obteniendo proyectos: %w", err)
+	}
+
+	for _, projectID := range projectIDs {
+		if err := o.ComputeProjectRisk(ctx, projectID); err != nil {
+			return fmt.Errorf("error recalculando riesgo del proyecto %d: %w", projectID, err)
+		}
+	}
+
+	return nil
 }
