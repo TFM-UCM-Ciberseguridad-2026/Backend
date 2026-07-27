@@ -48,6 +48,10 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* GET /api/infrastructure/top-apts: Obtiene los actores de amenazas (APTs) que afectan la infraestructura auditada. */
 	mux.HandleFunc("GET /api/infrastructure/top-apts", h.GetTopAPTs)
 
+	/* GET /api/infrastructure/exploitation-paths: Obtiene las rutas de explotación calculadas en la infraestructura. */
+	mux.HandleFunc("GET /api/infrastructure/exploitation-paths", h.GetExploitationPaths)
+
+
 	/* POST /api/installations/{id}/scan-vulns: Automatiza el escaneo y registro de vulnerabilidades por CPE/versión contra la API del NIST. */
 	mux.HandleFunc("POST /api/installations/{id}/scan-vulns", h.ScanSoftwareVulnerabilities)
 
