@@ -33,6 +33,7 @@ type Orchestrator struct {
 	remediationPort  ports.RemediationPort
 	relationshipPort ports.RelationshipPort
 	infraPort        ports.InfrastructurePort
+	containerPort    ports.ContainerPort
 	patchPort        ports.PatchPort
 	dbHelper         ports.DatabaseHelper
 	vulnScannerPort  ports.VulnerabilityAPIscanner
@@ -53,6 +54,7 @@ func NewOrchestrator(
 	remediationPort ports.RemediationPort,
 	relationshipPort ports.RelationshipPort,
 	infraPort ports.InfrastructurePort,
+	containerPort ports.ContainerPort,
 	patchPort ports.PatchPort,
 	dbHelper ports.DatabaseHelper,
 	vulnScannerPort ports.VulnerabilityAPIscanner,
@@ -69,6 +71,7 @@ func NewOrchestrator(
 		remediationPort:  remediationPort,
 		relationshipPort: relationshipPort,
 		infraPort:        infraPort,
+		containerPort:    containerPort,
 		patchPort:        patchPort,
 		dbHelper:         dbHelper,
 		vulnScannerPort:  vulnScannerPort,
@@ -794,4 +797,15 @@ func (o *Orchestrator) ComputeAllProjectsRisk(ctx context.Context) error {
 // GenerateExploitationPaths devuelve las rutas de explotación calculadas desde el motor de grafos.
 func (o *Orchestrator) GenerateExploitationPaths(ctx context.Context) ([]domain.ExploitationPath, error) {
 	return o.infraPort.GetExploitationPaths(ctx)
+}
+
+// SaveContainerImage registra una imagen de contenedor en Neo4j.
+func (o *Orchestrator) SaveContainerImage(ctx context.Context, image *domain.ContainerImage) error {
+	return o.containerPort.SaveContainerImage(ctx, image)
+}
+
+// SaveContainer registra una instancia de contenedor en ejecución en Neo4j,
+// asociándolo al Endpoint host y a la imagen base si existe.
+func (o *Orchestrator) SaveContainer(ctx context.Context, container *domain.Container) error {
+	return o.containerPort.SaveContainer(ctx, container)
 }

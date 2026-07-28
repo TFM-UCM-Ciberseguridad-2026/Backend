@@ -29,7 +29,7 @@ func main() {
 	}
 	defer driver.Close(ctx)
 
-	endpointRepo, _, _, _, _, _, _, _, _, _, _, dbHelper, _ := neo4j.NewRepository(driver)
+	endpointRepo, _, _, _, _, _, _, _, _, _, _, dbHelper, _ , _ := neo4j.NewRepository(driver)
 
 	fmt.Println("[*] Limpiando base de datos para la prueba...")
 	_ = dbHelper.ExecuteWrite(ctx, "MATCH (n) DETACH DELETE n", nil)

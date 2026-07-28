@@ -29,7 +29,7 @@ func main() {
 	defer driver.Close(ctx)
 
 	// Inicializar los puertos
-	_, vulnRepo, _, _, _, _, _, _, _, _, _, dbHelper, _ := neo4j.NewRepository(driver)
+	_, vulnRepo, _, _, _, _, _, _, _, _, _, dbHelper, _ , _ := neo4j.NewRepository(driver)
 	nistScanner := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey, 30)
 
 	fmt.Println("Conexión a Neo4j establecida.", 30)

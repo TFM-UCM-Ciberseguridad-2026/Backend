@@ -31,7 +31,7 @@ func main() {
 	defer driver.Close(ctx)
 
 	// 1. Instanciamos los repositorios
-	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, exploitRepo, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo := neo4j.NewRepository(driver)
+	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, exploitRepo, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo , _ := neo4j.NewRepository(driver)
 	infraRepo := neo4j.NewInfrastructureRepository(driver)
 
 	// Limpiamos base de datos
@@ -52,6 +52,7 @@ func main() {
 		remediationRepo,
 		relRepo,
 		infraRepo,
+		nil, // containerRepo
 		patchRepo,
 		dbHelper,
 		nistAPIAdapter,
