@@ -879,3 +879,8 @@ func (o *Orchestrator) ComputeAllProjectsRisk(ctx context.Context) error {
 
 	return nil
 }
+
+// GenerateExploitationPaths devuelve las rutas de explotación calculadas desde el motor de grafos.
+func (o *Orchestrator) GenerateExploitationPaths(ctx context.Context) ([]domain.ExploitationPath, error) {
+	return o.infraPort.GetExploitationPaths(ctx)
+}

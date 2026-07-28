@@ -206,6 +206,17 @@ func (h *OrchestratorHandler) GetTopAPTs(w http.ResponseWriter, r *http.Request)
 	sendJSON(w, results, http.StatusOK)
 }
 
+// GET /api/infrastructure/exploitation-paths
+func (h *OrchestratorHandler) GetExploitationPaths(w http.ResponseWriter, r *http.Request) {
+	paths, err := h.orchestrator.GenerateExploitationPaths(r.Context())
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, paths, http.StatusOK)
+}
+
+
 /*
 ScanSoftwareVulnerabilities maneja la solicitud HTTP POST para ejecutar el escaneo y registro automático de vulnerabilidades.
 Ruta: POST /api/installations/{id}/scan-vulns?software_id={software_id}

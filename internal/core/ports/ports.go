@@ -158,6 +158,7 @@ type ThreatActorPort interface {
 type InfrastructurePort interface {
 	GetGraphData(ctx context.Context) (*domain.GraphData, error)
 	GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int) ([]domain.APTThreatResult, error)
+	GetExploitationPaths(ctx context.Context) ([]domain.ExploitationPath, error)
 }
 
 // EPSSProvider obtiene scores de probabilidad de explotación desde la API FIRST/EPSS.
