@@ -45,6 +45,8 @@ type FindingPort interface {
 }
 
 type RemediationPort interface {
+	UpdateFixedVersionByCVE(ctx context.Context, cveID string, fixedVersion string) (int, error)
+
 	Save(ctx context.Context, remediation *domain.Remediation) error
 	Update(ctx context.Context, remediation *domain.Remediation) error
 	GetByID(ctx context.Context, id int64) (*domain.Remediation, error)
@@ -77,6 +79,14 @@ type PatchPort interface {
 	Update(ctx context.Context, patch *domain.Patch) error
 	GetByID(ctx context.Context, id int64) (*domain.Patch, error)
 	DeleteByID(ctx context.Context, id int64) error
+
+	// GetByURL recupera un parche por su URL (identificador natural del parche publicado
+	// por el fabricante). Permite deduplicar en lugar de crear un nodo nuevo en cada
+	// escaneo. Devuelve (nil, nil) si no existe.
+	GetByURL(ctx context.Context, url string) (*domain.Patch, error)
+
+	// GetByVulnerability devuelve todos los parches que corrigen un CVE concreto.
+	GetByVulnerability(ctx context.Context, cveID string) ([]domain.Patch, error)
 }
 
 type ProjectPort interface {
@@ -158,6 +168,16 @@ type EPSSProvider interface {
 // KEVProvider obtiene el catálogo CISA Known Exploited Vulnerabilities.
 type KEVProvider interface {
 	FetchKEV(ctx context.Context) (map[string]bool, error)
+}
+
+// PatchProvider obtiene información de remediación (parches publicados y versiones
+// corregidas) de un CVE desde una fuente externa.
+//
+// Las fuentes no son universales: OSV cubre ecosistemas open source y MSRC cubre
+// Microsoft. Cuando la fuente no conoce el CVE, la implementación devuelve (nil, nil)
+// en lugar de un error: no encontrarlo es un resultado válido, no un fallo.
+type PatchProvider interface {
+	FetchPatchInfo(ctx context.Context, cveID string) (*domain.PatchIntelligence, error)
 }
 
 // RiskPort agrupa las queries Neo4j específicas del motor de riesgo.

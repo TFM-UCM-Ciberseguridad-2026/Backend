@@ -316,3 +316,61 @@ func (h *OrchestratorHandler) ComputeAllProjectsRisk(w http.ResponseWriter, r *h
 
 	sendJSON(w, map[string]string{"status": "all project risks recomputed"}, http.StatusOK)
 }
+
+// GET /api/vulnerabilities/{cve}/patches
+// Devuelve los parches oficiales disponibles para un CVE concreto.
+func (h *OrchestratorHandler) GetPatchesForVulnerability(w http.ResponseWriter, r *http.Request) {
+	cveID := r.PathValue("cve")
+	if cveID == "" {
+		sendError(w, "Invalid CVE ID", http.StatusBadRequest)
+		return
+	}
+
+	patches, err := h.orchestrator.GetPatchesForVulnerability(r.Context(), cveID)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]any{
+		"cve_id":  cveID,
+		"count":   len(patches),
+		"patches": patches,
+	}, http.StatusOK)
+}
+
+// POST /api/vulnerabilities/{cve}/patches/refresh
+// Consulta la fuente externa de parches (OSV), registra los que encuentre y propaga la
+// versión corregida a las remediaciones del CVE.
+func (h *OrchestratorHandler) RefreshPatchesForVulnerability(w http.ResponseWriter, r *http.Request) {
+	cveID := r.PathValue("cve")
+	if cveID == "" {
+		sendError(w, "Invalid CVE ID", http.StatusBadRequest)
+		return
+	}
+
+	info, err := h.orchestrator.EnrichPatchesFromProvider(r.Context(), cveID)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// La fuente no cubre este CVE: no es un error, simplemente no aporta datos.
+	if info == nil {
+		sendJSON(w, map[string]any{
+			"cve_id": cveID,
+			"status": "sin datos en la fuente externa",
+			"found":  false,
+		}, http.StatusOK)
+		return
+	}
+
+	sendJSON(w, map[string]any{
+		"cve_id":         cveID,
+		"status":         "parches actualizados",
+		"found":          true,
+		"source":         info.Source,
+		"patches":        info.Patches,
+		"fixed_versions": info.FixedVersions,
+	}, http.StatusOK)
+}
