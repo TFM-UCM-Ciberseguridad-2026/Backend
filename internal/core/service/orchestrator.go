@@ -682,6 +682,15 @@ func (o *Orchestrator) EnrichPatchesFromProvider(ctx context.Context, cveID stri
 		if err := o.RegisterPatchesForVulnerability(ctx, cveID, info.Patches); err != nil {
 			return nil, fmt.Errorf("error registrando los parches de %s: %w", cveID, err)
 		}
+
+		// Releemos del grafo para devolver los parches tal y como han quedado
+		// persistidos, con su PatchID asignado. Los que vienen del provider lo tienen
+		// a 0 y devolverlos así daría una respuesta engañosa.
+		persisted, err := o.patchPort.GetByVulnerability(ctx, cveID)
+		if err != nil {
+			return nil, fmt.Errorf("error releyendo los parches de %s: %w", cveID, err)
+		}
+		info.Patches = persisted
 	}
 
 	if len(info.FixedVersions) > 0 {

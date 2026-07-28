@@ -130,8 +130,11 @@ func (a *OSVAdapter) FetchPatchInfo(ctx context.Context, cveID string) (*domain.
 				continue
 			}
 
+			// Deduplicamos al fusionar: dos avisos del mismo CVE (p. ej. GHSA y PYSEC)
+			// suelen reportar la misma versión corregida, y cada llamada a toDomain
+			// arrastra su propio control de duplicados.
 			aliasInfo := a.toDomain(cveID, *aliasDTO)
-			info.FixedVersions = append(info.FixedVersions, aliasInfo.FixedVersions...)
+			info.FixedVersions = append(info.FixedVersions, dedupeFixedVersions(info.FixedVersions, aliasInfo.FixedVersions)...)
 			info.Patches = append(info.Patches, dedupePatchesByURL(info.Patches, aliasInfo.Patches)...)
 		}
 	}
@@ -193,7 +196,9 @@ func (a *OSVAdapter) toDomain(cveID string, dto osvVulnerabilityDTO) *domain.Pat
 					Package:   affected.Package.Name,
 					Version:   event.Fixed,
 				}
-				key := fixed.String()
+				// La clave incluye el ecosistema: un mismo paquete@versión puede existir
+				// en ecosistemas distintos y no son la misma corrección.
+				key := fixed.Ecosystem + "|" + fixed.Package + "|" + fixed.Version
 				if seenVersions[key] {
 					continue
 				}
@@ -227,6 +232,29 @@ func (a *OSVAdapter) toDomain(cveID string, dto osvVulnerabilityDTO) *domain.Pat
 		Published:     published,
 		Source:        "OSV",
 	}
+}
+
+// dedupeFixedVersions devuelve las versiones de candidates que no están ya en existing,
+// comparando por ecosistema, paquete y versión.
+func dedupeFixedVersions(existing, candidates []domain.FixedVersion) []domain.FixedVersion {
+	key := func(f domain.FixedVersion) string {
+		return f.Ecosystem + "|" + f.Package + "|" + f.Version
+	}
+
+	seen := make(map[string]bool, len(existing))
+	for _, f := range existing {
+		seen[key(f)] = true
+	}
+
+	result := make([]domain.FixedVersion, 0, len(candidates))
+	for _, f := range candidates {
+		if seen[key(f)] {
+			continue
+		}
+		seen[key(f)] = true
+		result = append(result, f)
+	}
+	return result
 }
 
 // dedupePatchesByURL devuelve los parches de candidates cuya URL no está ya en existing.
