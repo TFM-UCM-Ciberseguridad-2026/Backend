@@ -151,6 +151,14 @@ type InfrastructurePort interface {
 	GetExploitationPaths(ctx context.Context) ([]domain.ExploitationPath, error)
 }
 
+// ContainerPort define las operaciones para gestionar imágenes y contenedores.
+type ContainerPort interface {
+	SaveContainerImage(ctx context.Context, image *domain.ContainerImage) error
+	GetContainerImage(ctx context.Context, imageID string) (*domain.ContainerImage, error)
+	SaveContainer(ctx context.Context, container *domain.Container) error
+	GetContainer(ctx context.Context, containerID string) (*domain.Container, error)
+}
+
 // EPSSProvider obtiene scores de probabilidad de explotación desde la API FIRST/EPSS.
 type EPSSProvider interface {
 	FetchEPSS(ctx context.Context, cveIDs []string) (map[string]float64, error)

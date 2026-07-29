@@ -31,7 +31,7 @@ func main() {
 	// Instanciamos los repositorios
 	ttpRepo := neo4j.NewTTPRepository(driver)
 	actorRepo := neo4j.NewThreatActorRepository(driver)
-	_, vulnRepo, _, _, _, _, _, _, _, _, _, dbHelper, _ := neo4j.NewRepository(driver)
+	_, vulnRepo, _, _, _, _, _, _, _, _, _, dbHelper, _ , _ := neo4j.NewRepository(driver)
 
 	// Limpiamos la base de datos para la prueba
 	fmt.Println("Limpiando base de datos...")

@@ -26,7 +26,7 @@ func main() {
 	defer driver.Close(ctx)
 
 	// Instanciamos sólo para obtener el DatabaseHelper
-	_, _, _, _, _, _, _, _, _, _, _, dbHelper, _ := neo4j.NewRepository(driver)
+	_, _, _, _, _, _, _, _, _, _, _, dbHelper, _ , _ := neo4j.NewRepository(driver)
 
 	// 1. Limpieza de base de datos
 	err = dbHelper.ExecuteWrite(ctx, "MATCH (n) DETACH DELETE n", nil)

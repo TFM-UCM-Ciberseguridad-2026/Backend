@@ -34,7 +34,7 @@ func main() {
 	fmt.Println("Conexión a Neo4j establecida con éxito.")
 
 	// Instanciamos los 11 repositorios específicos
-	endpointRepo, vulnRepo, softwareRepo, installationRepo, findingRepo, remediationRepo, exploitRepo, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo := neo4j.NewRepository(driver)
+	endpointRepo, vulnRepo, softwareRepo, installationRepo, findingRepo, remediationRepo, exploitRepo, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo , _ := neo4j.NewRepository(driver)
 	_ = dbHelper
 
 	// Limpiamos la base de datos para la prueba limpia

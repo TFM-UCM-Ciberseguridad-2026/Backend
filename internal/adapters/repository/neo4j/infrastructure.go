@@ -231,13 +231,18 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 		MATCH path = (e1:Endpoint)-[:CONNECTED_TO*]-(eTarget:Endpoint)
 		WHERE e1.internet_exposed = true
 		  AND e1.id <> eTarget.id
-		  // Asegurar que todos los nodos son Network o Endpoints explotables remotamente
+		  // Asegurar que todos los nodos son Network o Endpoints explotables remotamente (host o container)
 		  AND all(n IN nodes(path) WHERE 
 		    (n:Network) OR 
-		    (n:Endpoint AND EXISTS {
-		      MATCH (n)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(v:Vulnerability)
-		      WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
-		    })
+		    (n:Endpoint AND (
+		      EXISTS {
+		        MATCH (n)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(v:Vulnerability)
+		        WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
+		      } OR EXISTS {
+		        MATCH (n)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(v:Vulnerability)
+		        WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
+		      }
+		    ))
 		  )
 		// Extraer sólo los endpoints del path manteniendo el orden
 		WITH path, e1, eTarget, [n IN nodes(path) WHERE n:Endpoint] AS endpoints
@@ -246,18 +251,40 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 		UNWIND indexed AS ie
 		WITH path, e1, indexed, ie, ie.endpoint AS ep
 		
-		// Obtener la vulnerabilidad de red para saltar a este endpoint
-		MATCH (ep)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-		WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
-		WITH path, e1, indexed, ie, ep, si, f, v ORDER BY f.risk_score DESC
+		// Obtener la vulnerabilidad de red para saltar a este endpoint (puede estar en el host o en un contenedor)
+		CALL {
+			WITH ep
+			MATCH (ep)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+			WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
+			RETURN si, f, v, false AS is_container, null AS container
+			UNION
+			WITH ep
+			MATCH (ep)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+			WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
+			RETURN si, f, v, true AS is_container, c AS container
+		}
+		WITH path, e1, indexed, ie, ep, si, f, v, is_container, container ORDER BY f.risk_score DESC
+		
 		// Seleccionar la peor vulnerabilidad de red
-		WITH path, e1, indexed, ie, ep, collect({si: si, f: f, v: v})[0] AS bestNet
+		WITH path, e1, indexed, ie, ep, collect({si: si, f: f, v: v, is_container: is_container, container: container})[0] AS bestNet
 		
 		// Comprobar si hay una vulnerabilidad local para escalar privilegios
-		OPTIONAL MATCH (ep)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(vLocal:Vulnerability)
-		WHERE vLocal.cvss_vector CONTAINS 'AV:L' AND vLocal.cvss_vector CONTAINS 'C:H' AND vLocal.cvss_vector CONTAINS 'I:H'
+		WITH path, e1, indexed, ie, ep, bestNet,
+		  EXISTS {
+		    MATCH (ep)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(vLocal:Vulnerability)
+		    WHERE vLocal.cvss_vector CONTAINS 'AV:L' AND vLocal.cvss_vector CONTAINS 'C:H' AND vLocal.cvss_vector CONTAINS 'I:H'
+		  } AS hasHostLPE,
+		  EXISTS {
+		    MATCH (ep)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(vContLocal:Vulnerability)
+		    WHERE (vContLocal.cvss_vector CONTAINS 'AV:L' AND vContLocal.cvss_vector CONTAINS 'C:H' AND vContLocal.cvss_vector CONTAINS 'I:H') 
+		       OR toLower(vContLocal.description) CONTAINS 'escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation'
+		  } AS hasContLPE
 		
-		WITH path, e1, indexed, ie, ep, bestNet, count(vLocal) > 0 AS hasLPE
+		WITH path, e1, indexed, ie, ep, bestNet, 
+		  CASE 
+		    WHEN bestNet.is_container THEN hasContLPE
+		    ELSE (hasHostLPE OR hasContLPE)
+		  END AS hasLPE
 		ORDER BY ie.index ASC
 		
 		// Reagrupar los pasos de esta ruta
@@ -267,6 +294,8 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 		    software: bestNet.si,
 		    finding: bestNet.f,
 		    vuln: bestNet.v,
+		    is_container: bestNet.is_container,
+		    container: bestNet.container,
 		    hasLPE: hasLPE
 		}) AS steps
 		
@@ -350,6 +379,14 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 				findingProps := getNodeProps(stepMap["finding"])
 				vulnProps := getNodeProps(stepMap["vuln"])
 				hasLPE := getBool(stepMap["hasLPE"])
+				isContainer := getBool(stepMap["is_container"])
+
+				var containerID, containerName string
+				if isContainer {
+					containerProps := getNodeProps(stepMap["container"])
+					containerID = getString(containerProps["id"])
+					containerName = getString(containerProps["name"])
+				}
 
 				hostname := getString(endpointProps["hostname"])
 				cvss := getString(vulnProps["cvss_vector"])
@@ -364,9 +401,12 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 				// Lógica de RootObtained
 				rootObtained := hasLPE
 				// Si la propia vuln de red da control total (ej: todo High)
-				// Podríamos checkear si cvss contiene C:H, I:H, A:H
 				if cvss != "" && strings.Contains(cvss, "C:H") && strings.Contains(cvss, "I:H") && strings.Contains(cvss, "A:H") {
-					rootObtained = true
+					// Si vulneramos un contenedor con AV:N y es C:H,I:H,A:H -> conseguimos root en el contenedor, NO en el host
+					// Solo conseguimos root en el host si NO es container, o si es container pero el C:H impacta al host (lo cual cubrimos con hasLPE)
+					if !isContainer {
+						rootObtained = true
+					}
 				}
 
 				ep.Steps = append(ep.Steps, domain.AttackStep{
@@ -374,8 +414,11 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 					SourceEndpoint:   prevEndpoint,
 					TargetEndpoint:   hostname,
 					TargetEndpointID: getInt(endpointProps["id"]),
+					IsContainer:      isContainer,
+					ContainerID:      containerID,
+					ContainerName:    containerName,
 					Vulnerability:    getString(vulnProps["cve_id"]),
-					SoftwareAffected: getString(softwareProps["id"]),
+					SoftwareAffected: getString(softwareProps["install_path"]),
 					RiskScore:        risk,
 					RCE:              isRCE,
 					RootObtained:     rootObtained,

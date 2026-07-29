@@ -34,7 +34,7 @@ func main() {
 	defer driver.Close(ctx)
 	fmt.Println("Conexión a Neo4j establecida con éxito.")
 
-	endpointRepo, vulnRepo, softwareRepo, installationRepo, findingRepo, remediationRepo, exploitRepo, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo := neo4j.NewRepository(driver)
+	endpointRepo, vulnRepo, softwareRepo, installationRepo, findingRepo, remediationRepo, exploitRepo, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo , _ := neo4j.NewRepository(driver)
 
 	fmt.Println("Limpiando base de datos...")
 	if err := dbHelper.ExecuteWrite(ctx, "MATCH (n) DETACH DELETE n", nil); err != nil {

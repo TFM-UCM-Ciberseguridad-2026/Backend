@@ -21,6 +21,7 @@ func NewRepository(driver neo4j.DriverWithContext) (
 	ports.ProjectPort,
 	ports.DatabaseHelper,
 	ports.RelationshipPort,
+	ports.ContainerPort,
 ) {
 	return &endpointRepo{driver: driver},
 		&vulnerabilityRepo{driver: driver},
@@ -34,5 +35,6 @@ func NewRepository(driver neo4j.DriverWithContext) (
 		&patchRepo{driver: driver},
 		&projectRepo{driver: driver},
 		&endpointRepo{driver: driver}, // DatabaseHelper
-		&relationshipRepo{driver: driver} // RelationshipPort
+		&relationshipRepo{driver: driver}, // RelationshipPort
+		&containerRepo{driver: driver} // ContainerPort
 }
