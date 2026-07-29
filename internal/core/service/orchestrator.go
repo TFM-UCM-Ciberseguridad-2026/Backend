@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -40,6 +41,7 @@ type Orchestrator struct {
 	riskPort         ports.RiskPort
 	epssProvider     ports.EPSSProvider
 	kevProvider      ports.KEVProvider
+	patchProvider    ports.PatchProvider
 }
 
 func NewOrchestrator(
@@ -84,6 +86,14 @@ func (o *Orchestrator) WithRisk(riskPort ports.RiskPort, epss ports.EPSSProvider
 	o.riskPort = riskPort
 	o.epssProvider = epss
 	o.kevProvider = kev
+	return o
+}
+
+// WithPatchProvider inyecta la fuente externa de información de parches y devuelve el
+// mismo orquestador. Igual que WithRisk, se añade como decorador para no alterar la firma
+// de NewOrchestrator y no romper el código que ya la usa.
+func (o *Orchestrator) WithPatchProvider(patchProvider ports.PatchProvider) *Orchestrator {
+	o.patchProvider = patchProvider
 	return o
 }
 
@@ -307,22 +317,7 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		}
 
 		// Guardar los parches si los hay y vincularlos a la vulnerabilidad
-		for _, p := range vCopy.Patches {
-			pCopy := p
-			// Auto-increment simple id for patch
-			id, err := o.nextNodeID(ctx, "Patch")
-			if err == nil {
-				pCopy.PatchID = id
-			} else {
-				pCopy.PatchID = int64(rand.Int31n(1000000) + 1)
-			}
-
-			if err := o.patchPort.Save(ctx, &pCopy); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
-				continue
-			}
-			// Vincular parche a la vulnerabilidad
-			_ = o.relationshipPort.LinkPatchToVulnerability(ctx, pCopy.PatchID, vCopy.CVEID)
-		}
+		_ = o.RegisterPatchesForVulnerability(ctx, vCopy.CVEID, vCopy.Patches)
 
 		// Crear un Hallazgo (Finding) para conectar la instalación del software con el CVE detectado
 		now := time.Now().UTC()
@@ -605,20 +600,114 @@ func (o *Orchestrator) SyncNistDaily(ctx context.Context) error {
 			continue // Loguear o continuar si una falla
 		}
 
-		for _, p := range vCopy.Patches {
-			pCopy := p
-			id, err := o.nextNodeID(ctx, "Patch")
-			if err == nil {
-				pCopy.PatchID = id
-			} else {
-				pCopy.PatchID = int64(rand.Int31n(1000000) + 1)
-			}
-			if err := o.patchPort.Save(ctx, &pCopy); err == nil {
-				_ = o.relationshipPort.LinkPatchToVulnerability(ctx, pCopy.PatchID, vCopy.CVEID)
-			}
-		}
+		_ = o.RegisterPatchesForVulnerability(ctx, vCopy.CVEID, vCopy.Patches)
 	}
 	return nil
+}
+
+// RegisterPatchesForVulnerability guarda los parches de un CVE y los vincula mediante
+// (Patch)-[:FIXES]->(Vulnerability).
+//
+// Deduplica por URL: la URL publicada por el fabricante es el identificador natural del
+// parche, mientras que el PatchID es un secuencial interno. Sin esta comprobación cada
+// escaneo crearía un nodo Patch nuevo para el mismo parche, ya que nextNodeID devuelve
+// siempre un ID distinto y el MERGE del repositorio va contra el id.
+//
+// Los errores individuales no abortan el proceso: un parche que falle no debe impedir el
+// registro del resto ni el del propio finding.
+func (o *Orchestrator) RegisterPatchesForVulnerability(ctx context.Context, cveID string, patches []domain.Patch) error {
+	if cveID == "" {
+		return fmt.Errorf("cve_id vacío")
+	}
+
+	for _, p := range patches {
+		pCopy := p
+
+		if pCopy.URL != "" {
+			existing, err := o.patchPort.GetByURL(ctx, pCopy.URL)
+			if err == nil && existing != nil {
+				// El parche ya está en el grafo: reutilizamos su nodo y solo garantizamos el enlace.
+				_ = o.relationshipPort.LinkPatchToVulnerability(ctx, existing.PatchID, cveID)
+				continue
+			}
+		}
+
+		id, err := o.nextNodeID(ctx, "Patch")
+		if err != nil {
+			continue
+		}
+		pCopy.PatchID = id
+
+		if err := o.patchPort.Save(ctx, &pCopy); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+			continue
+		}
+		_ = o.relationshipPort.LinkPatchToVulnerability(ctx, pCopy.PatchID, cveID)
+	}
+
+	return nil
+}
+
+// GetPatchesForVulnerability recupera los parches disponibles para un CVE concreto.
+func (o *Orchestrator) GetPatchesForVulnerability(ctx context.Context, cveID string) ([]domain.Patch, error) {
+	if cveID == "" {
+		return nil, fmt.Errorf("cve_id vacío")
+	}
+	return o.patchPort.GetByVulnerability(ctx, cveID)
+}
+
+// EnrichPatchesFromProvider consulta la fuente externa de parches para un CVE, registra
+// los parches encontrados y propaga la versión corregida a sus remediaciones.
+//
+// Devuelve (nil, nil) cuando la fuente no cubre el CVE: OSV solo agrega ecosistemas open
+// source, así que un CVE de software propietario no tiene por qué estar. No es un error.
+//
+// Cuando el CVE se corrige en varias versiones (ramas mantenidas en paralelo, como
+// Log4Shell en 2.3.1 / 2.12.2 / 2.15.0) se persisten todas separadas por coma: sin conocer
+// la rama del software instalado no podemos elegir una, y descartar el resto perdería
+// información necesaria para calcular el salto de versión.
+func (o *Orchestrator) EnrichPatchesFromProvider(ctx context.Context, cveID string) (*domain.PatchIntelligence, error) {
+	if cveID == "" {
+		return nil, fmt.Errorf("cve_id vacío")
+	}
+	if o.patchProvider == nil {
+		return nil, fmt.Errorf("no hay ningún PatchProvider configurado")
+	}
+
+	info, err := o.patchProvider.FetchPatchInfo(ctx, cveID)
+	if err != nil {
+		return nil, fmt.Errorf("error consultando la fuente de parches para %s: %w", cveID, err)
+	}
+	if info == nil {
+		return nil, nil
+	}
+
+	if len(info.Patches) > 0 {
+		if err := o.RegisterPatchesForVulnerability(ctx, cveID, info.Patches); err != nil {
+			return nil, fmt.Errorf("error registrando los parches de %s: %w", cveID, err)
+		}
+
+		// Releemos del grafo para devolver los parches tal y como han quedado
+		// persistidos, con su PatchID asignado. Los que vienen del provider lo tienen
+		// a 0 y devolverlos así daría una respuesta engañosa.
+		persisted, err := o.patchPort.GetByVulnerability(ctx, cveID)
+		if err != nil {
+			return nil, fmt.Errorf("error releyendo los parches de %s: %w", cveID, err)
+		}
+		info.Patches = persisted
+	}
+
+	if len(info.FixedVersions) > 0 {
+		formatted := make([]string, 0, len(info.FixedVersions))
+		for _, fv := range info.FixedVersions {
+			formatted = append(formatted, fv.String())
+		}
+		fixedVersion := strings.Join(formatted, ", ")
+		if _, err := o.remediationPort.UpdateFixedVersionByCVE(ctx, cveID, fixedVersion); err != nil {
+			return nil, fmt.Errorf("error propagando la versión corregida de %s: %w", cveID, err)
+		}
+	}
+
+	return info, nil
 }
 
 // findDriverSoftwareByRisk encuentra la instalación de software con mayor riesgo agregado

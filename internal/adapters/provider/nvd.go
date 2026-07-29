@@ -306,6 +306,9 @@ func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 	}
 
 	// 5. Extraer Parches (URLs con el tag "Patch")
+	// ReleaseDate se deja nulo a propósito: el NVD no publica fecha por referencia
+	// (NistReferenceDTO solo expone url y tags), y usar la fecha del CVE falsearía
+	// la fecha real de publicación del parche. Se rellena al declarar el parche aplicado.
 	var patches []domain.Patch
 	for _, ref := range cve.References {
 		for _, tag := range ref.Tags {

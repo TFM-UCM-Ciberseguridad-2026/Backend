@@ -23,13 +23,16 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 		MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
 		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE f.status <> 'RESOLVED'
-		OPTIONAL MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)-[:USES_PATCH]->(p:Patch)
 		RETURN
 		    f.id                    AS finding_id,
 		    f.status                AS finding_status,
 		    f.remediation_factor    AS remediation_factor,
 		    f.exposure_factor       AS exposure_factor,
-		    p IS NOT NULL           AS has_patch,
+		    (
+		        EXISTS { (f)-[:HAS_REMEDIATION]->(:Remediation)-[:USES_PATCH]->(:Patch) }
+		        OR
+		        EXISTS { (:Patch)-[:FIXES]->(v) }
+		    )                       AS has_patch,
 		    v.cve_id                AS cve_id,
 		    v.cvss_vector           AS cvss_vector,
 		    v.base_score            AS cached_base_score,

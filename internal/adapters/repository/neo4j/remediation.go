@@ -40,3 +40,41 @@ func (r *remediationRepo) DeleteByID(ctx context.Context, id int64) error {
 	query := `MATCH (n:Remediation {id: $id}) DETACH DELETE n`
 	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
 }
+
+// UpdateFixedVersionByCVE fija la versión corregida en todas las remediaciones asociadas
+// a findings del CVE indicado, recorriendo
+// (Vulnerability)<-[:OF_VULNERABILITY]-(Finding)-[:HAS_REMEDIATION]->(Remediation).
+// Devuelve el número de remediaciones actualizadas.
+func (r *remediationRepo) UpdateFixedVersionByCVE(ctx context.Context, cveID string, fixedVersion string) (int, error) {
+	query := `
+		MATCH (:Vulnerability {cve_id: $cve_id})<-[:OF_VULNERABILITY]-(:Finding)-[:HAS_REMEDIATION]->(rem:Remediation)
+		SET rem.fixed_version = $fixed_version
+		RETURN count(rem) AS updated
+	`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{
+			"cve_id":        cveID,
+			"fixed_version": fixedVersion,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if result.Next(ctx) {
+			updated, _ := result.Record().Get("updated")
+			return toInt64(updated), result.Err()
+		}
+		return int64(0), result.Err()
+	})
+
+	if err != nil {
+		return 0, err
+	}
+	if res == nil {
+		return 0, nil
+	}
+	return int(res.(int64)), nil
+}
