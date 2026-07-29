@@ -40,6 +40,7 @@ type Orchestrator struct {
 	riskPort         ports.RiskPort
 	epssProvider     ports.EPSSProvider
 	kevProvider      ports.KEVProvider
+	scoutPort        ports.ContainerScannerPort
 }
 
 func NewOrchestrator(
@@ -84,6 +85,12 @@ func (o *Orchestrator) WithRisk(riskPort ports.RiskPort, epss ports.EPSSProvider
 	o.riskPort = riskPort
 	o.epssProvider = epss
 	o.kevProvider = kev
+	return o
+}
+
+// WithScout inyecta el escáner de contenedores.
+func (o *Orchestrator) WithScout(scoutPort ports.ContainerScannerPort) *Orchestrator {
+	o.scoutPort = scoutPort
 	return o
 }
 
@@ -808,4 +815,71 @@ func (o *Orchestrator) SaveContainerImage(ctx context.Context, image *domain.Con
 // asociándolo al Endpoint host y a la imagen base si existe.
 func (o *Orchestrator) SaveContainer(ctx context.Context, container *domain.Container) error {
 	return o.containerPort.SaveContainer(ctx, container)
+}
+
+// ScanAndSaveContainerImage escanea una imagen de contenedor usando el ScoutAdapter
+// y guarda los resultados (Vulnerabilidades) en la BD, enlazándolos a la imagen.
+func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName string, imageID string) error {
+	if o.scoutPort == nil {
+		return errors.New("scoutPort is not initialized")
+	}
+	
+	// 1. Llamar a Docker Scout
+	vulns, err := o.scoutPort.ScanImage(ctx, imageName)
+	if err != nil {
+		return fmt.Errorf("error escaneando imagen %s: %w", imageName, err)
+	}
+
+	// 2. Guardar las vulnerabilidades y enlazarlas a la imagen
+	for _, v := range vulns {
+		// Guardar Vulnerabilidad
+		err = o.vulnPort.Save(ctx, &v)
+		if err != nil {
+			// Podría fallar si ya existe, idealmente debería haber un Update o ignorar error de duplicado.
+			// Para esta PoC ignoramos si ya existe.
+		}
+
+		// Enlazar a la imagen
+		err = o.containerPort.LinkVulnerabilityToImage(ctx, imageID, v.CVEID)
+		if err != nil {
+			return fmt.Errorf("error enlazando CVE %s a imagen %s: %w", v.CVEID, imageID, err)
+		}
+	}
+
+	return nil
+}
+
+// SyncScoutDaily obtiene todas las imágenes de contenedores registradas
+// y ejecuta un escaneo automatizado contra Docker Scout.
+func (o *Orchestrator) SyncScoutDaily(ctx context.Context) error {
+	if o.scoutPort == nil {
+		return errors.New("scoutPort is not initialized, cannot run SyncScoutDaily")
+	}
+	
+	images, err := o.containerPort.GetAllContainerImages(ctx)
+	if err != nil {
+		return fmt.Errorf("error obteniendo imagenes de contenedor: %w", err)
+	}
+
+	var errs []error
+	for _, img := range images {
+		// Para Scout el nombre es el Tag si es que está disponible, o simplemente name
+		// Por ejemplo: nginx:latest
+		imageName := img.Name
+		if img.Tag != "" && img.Tag != "latest" {
+			imageName = fmt.Sprintf("%s:%s", img.Name, img.Tag)
+		}
+		
+		fmt.Printf("[Scout Sync] Escaneando imagen: %s (ID: %s)\n", imageName, img.ImageID)
+		err := o.ScanAndSaveContainerImage(ctx, imageName, img.ImageID)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("fallo al escanear %s: %v", imageName, err))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("SyncScoutDaily completado con %d errores: %v", len(errs), errs)
+	}
+
+	return nil
 }

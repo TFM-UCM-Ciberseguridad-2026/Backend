@@ -155,8 +155,15 @@ type InfrastructurePort interface {
 type ContainerPort interface {
 	SaveContainerImage(ctx context.Context, image *domain.ContainerImage) error
 	GetContainerImage(ctx context.Context, imageID string) (*domain.ContainerImage, error)
+	GetAllContainerImages(ctx context.Context) ([]domain.ContainerImage, error)
 	SaveContainer(ctx context.Context, container *domain.Container) error
 	GetContainer(ctx context.Context, containerID string) (*domain.Container, error)
+	LinkVulnerabilityToImage(ctx context.Context, imageID string, cveID string) error
+}
+
+// ContainerScannerPort define las operaciones para escanear imágenes de contenedores en busca de vulnerabilidades (ej. Docker Scout).
+type ContainerScannerPort interface {
+	ScanImage(ctx context.Context, imageName string) ([]domain.Vulnerability, error)
 }
 
 // EPSSProvider obtiene scores de probabilidad de explotación desde la API FIRST/EPSS.

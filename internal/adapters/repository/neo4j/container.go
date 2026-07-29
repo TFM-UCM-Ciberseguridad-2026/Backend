@@ -88,6 +88,56 @@ func (r *containerRepo) GetContainerImage(ctx context.Context, imageID string) (
 	return res.(*domain.ContainerImage), nil
 }
 
+// GetAllContainerImages devuelve todas las imágenes registradas
+func (r *containerRepo) GetAllContainerImages(ctx context.Context) ([]domain.ContainerImage, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	getString := func(props map[string]any, key string) string {
+		if val, ok := props[key]; ok {
+			if s, ok := val.(string); ok {
+				return s
+			}
+		}
+		return ""
+	}
+
+	query := `
+		MATCH (i:ContainerImage)
+		RETURN i
+	`
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, nil)
+		if err != nil {
+			return nil, err
+		}
+		
+		var images []domain.ContainerImage
+		for result.Next(ctx) {
+			record := result.Record()
+			node, _ := record.Get("i")
+			iNode := node.(neo4j.Node)
+			props := iNode.GetProperties()
+
+			images = append(images, domain.ContainerImage{
+				ImageID: getString(props, "id"),
+				Name:    getString(props, "name"),
+				Tag:     getString(props, "tag"),
+				Digest:  getString(props, "digest"),
+			})
+		}
+		return images, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.ContainerImage{}, nil
+	}
+	return res.([]domain.ContainerImage), nil
+}
+
 func (r *containerRepo) SaveContainer(ctx context.Context, container *domain.Container) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
@@ -182,4 +232,25 @@ func (r *containerRepo) GetContainer(ctx context.Context, containerID string) (*
 		return nil, fmt.Errorf("container not found")
 	}
 	return res.(*domain.Container), nil
+}
+
+// LinkVulnerabilityToImage enlaza una imagen de contenedor con un CVE (descubierto por ejemplo por Docker Scout)
+func (r *containerRepo) LinkVulnerabilityToImage(ctx context.Context, imageID string, cveID string) error {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (ci:ContainerImage {id: $image_id})
+		MATCH (v:Vulnerability {cve_id: $cve_id})
+		MERGE (ci)-[:HAS_VULNERABILITY]->(v)
+	`
+	params := map[string]any{
+		"image_id": imageID,
+		"cve_id":   cveID,
+	}
+
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		return tx.Run(ctx, query, params)
+	})
+	return err
 }

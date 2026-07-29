@@ -56,6 +56,7 @@ func main() {
 	nistAPIAdapter := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey, cfg.NVD.TimeoutSeconds)
 	epssAdapter := provider.NewEPSSAdapter()
 	kevAdapter := provider.NewKEVAdapter()
+	scoutAdapter := provider.NewScoutAdapter()
 	orchestrator := service.NewOrchestrator(
 		projectRepo,
 		endpointRepo,
@@ -72,7 +73,7 @@ func main() {
 		patchRepo,
 		dbHelper,
 		nistAPIAdapter,
-	).WithRisk(riskRepo, epssAdapter, kevAdapter)
+	).WithRisk(riskRepo, epssAdapter, kevAdapter).WithScout(scoutAdapter)
 
 	// 5. Inicialización de los Controladores HTTP (Adaptadores Inbound)
 	h := handler.NewOrchestratorHandler(orchestrator)
@@ -93,6 +94,19 @@ func main() {
 			log.Println("Sincronización diaria NIST completada con éxito.")
 		}
 	})
+	
+	// Añadimos el escaneo de contenedores diario
+	s.Every(1).Day().At("03:00").Do(func() {
+		fmt.Println("Ejecutando tarea diaria: Escaneo de imágenes con Docker Scout...")
+		cronCtx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		defer cancel()
+		if err := orchestrator.SyncScoutDaily(cronCtx); err != nil {
+			log.Printf("Error en escaneo diario Docker Scout: %v", err)
+		} else {
+			log.Println("Escaneo diario Docker Scout completado con éxito.")
+		}
+	})
+	
 	s.StartAsync()
 
 	// 6. Levantar Servidor Web (con Graceful Shutdown)
