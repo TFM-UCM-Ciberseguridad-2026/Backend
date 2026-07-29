@@ -70,5 +70,11 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	// POST /api/risk/recalculate-all-projects: Recalcula el riesgo de todos los proyectos (trigger manual o cron).
 	mux.HandleFunc("POST /api/risk/recalculate-all-projects", h.ComputeAllProjectsRisk)
 
+	/* GET /api/vulnerabilities/{cve}/patches: Recupera los parches oficiales disponibles para un CVE. */
+	mux.HandleFunc("GET /api/vulnerabilities/{cve}/patches", h.GetPatchesForVulnerability)
+
+	/* POST /api/vulnerabilities/{cve}/patches/refresh: Consulta la fuente externa (OSV) y actualiza parches y versión corregida. */
+	mux.HandleFunc("POST /api/vulnerabilities/{cve}/patches/refresh", h.RefreshPatchesForVulnerability)
+
 	return mux
 }

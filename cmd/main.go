@@ -57,6 +57,7 @@ func main() {
 	epssAdapter := provider.NewEPSSAdapter()
 	kevAdapter := provider.NewKEVAdapter()
 	scoutAdapter := provider.NewScoutAdapter()
+	osvAdapter := provider.NewOSVAdapter()
 	orchestrator := service.NewOrchestrator(
 		projectRepo,
 		endpointRepo,
@@ -73,7 +74,7 @@ func main() {
 		patchRepo,
 		dbHelper,
 		nistAPIAdapter,
-	).WithRisk(riskRepo, epssAdapter, kevAdapter).WithScout(scoutAdapter)
+	).WithRisk(riskRepo, epssAdapter, kevAdapter).WithScout(scoutAdapter).WithPatchProvider(osvAdapter)
 
 	// 5. Inicialización de los Controladores HTTP (Adaptadores Inbound)
 	h := handler.NewOrchestratorHandler(orchestrator)
