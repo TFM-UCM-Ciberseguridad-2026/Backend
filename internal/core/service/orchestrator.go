@@ -12,6 +12,8 @@ import (
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/ports"
 )
 
+const autoScanVulnerabilityLimit = 100
+
 /*
 Este archivo contiene el Servicio de Aplicación (Application Service) u Orquestador de Casos de Uso.
 
@@ -284,7 +286,7 @@ AutoScanAndRegisterVulnerabilities implementa el caso de uso central para automa
  5. Crea un Hallazgo (Finding) con puntaje de riesgo inicializado y genera los enlaces relacionales de infraestructura:
     SoftwareInstallation -> [:HAS_FINDING] -> Finding -> [:OF_VULNERABILITY] -> Vulnerability.
 */
-func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, installationID string, softwareID int64) error {
+func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, installationID string, softwareID int64, limits ...int) error {
 	// 1. Obtener la entidad de software
 	sw, err := o.softwarePort.GetByID(ctx, softwareID)
 	if err != nil {
@@ -307,6 +309,13 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 	vulns, err := o.vulnScannerPort.FetchByCPE(ctx, cpe)
 	if err != nil {
 		return fmt.Errorf("error consultando la API de vulnerabilidades para el CPE %s: %w", cpe, err)
+	}
+	limit := autoScanVulnerabilityLimit
+	if len(limits) > 0 && limits[0] > 0 && limits[0] < limit {
+		limit = limits[0]
+	}
+	if len(vulns) > limit {
+		vulns = vulns[:limit]
 	}
 
 	// 4. Registrar vulnerabilidades y enlazarlas como hallazgos (Findings)
