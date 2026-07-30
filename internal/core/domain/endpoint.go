@@ -15,11 +15,30 @@ es de Red: Define la pertenencia y ubicación de los endpoints en subredes espec
 
 // Endpoint representa la entidad de dominio de un equipo en la red (nodo Endpoint en Neo4j).
 
+// Tipos normalizados de equipos (Endpoint roles)
+const (
+	EndpointTypeServer           = "Server"
+	EndpointTypeWorkstation      = "Workstation"
+	EndpointTypeDomainController = "Domain Controller"
+	EndpointTypeFirewall         = "Firewall"
+	EndpointTypeRouter           = "Router"
+)
+
+// IsValidEndpointType comprueba si una cadena corresponde a un tipo válido de equipo.
+func IsValidEndpointType(t string) bool {
+	switch t {
+	case EndpointTypeServer, EndpointTypeWorkstation, EndpointTypeDomainController, EndpointTypeFirewall, EndpointTypeRouter:
+		return true
+	default:
+		return false
+	}
+}
+
 // TODO: Faltan campos respecto al nist, ademas se pueden subdividir en structs mas pequeñas para que sea mas legible
 type Endpoint struct {
 	EndpointID      int64  `json:"endpoint_id"`
 	Hostname        string `json:"hostname"`
-	Type            string `json:"tipo"` // Tipo de activo/endpoint siguiendo la nomenclatura CPE: 'a' (aplicación/servicio), 'o' (sistema operativo) o 'h' (hardware/dispositivo)
+	Type            string `json:"tipo"` // Tipo/Rol del equipo en la red ('Server', 'Workstation', 'Domain Controller', 'Firewall', 'Router')
 	Status          string `json:"status"`
 	InternetExposed bool   `json:"internet_exposed"`
 	Environment     string `json:"environment"`

@@ -50,7 +50,7 @@ func main() {
 	}
 
 	// 2. Endpoint
-	ep := &domain.Endpoint{EndpointID: 1, Hostname: "srv-db", Type: "Linux", InternetExposed: false}
+	ep := &domain.Endpoint{EndpointID: 1, Hostname: "srv-db", Type: "Server", InternetExposed: false}
 	if err := endpointRepo.Save(ctx, ep); err != nil { 
 		log.Fatalf("Error guardando Endpoint: %v", err)
 	}

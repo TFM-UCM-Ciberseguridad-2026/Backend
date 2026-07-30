@@ -201,6 +201,10 @@ func (o *Orchestrator) AssociateNetworkToEndpoint(ctx context.Context, endpointI
 // RegisterSoftwareInstallation guarda la definición del software, la instancia instalada,
 // asocia la instancia al endpoint y el software genérico a la instancia instalada.
 func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpointID int64, software *domain.Software, installation *domain.SoftwareInstallation) error {
+	if strings.TrimSpace(software.Vendor) == "" {
+		return fmt.Errorf("el fabricante (vendor) es obligatorio para registrar el software y consultar vulnerabilidades en NIST")
+	}
+
 	if software.SoftwareID == 0 {
 		swID, err := o.nextNodeID(ctx, "Software")
 		if err != nil {
@@ -211,6 +215,10 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 
 	if installation.InstallationID == "" {
 		installation.InstallationID = o.nextInstallationID()
+	}
+
+	if strings.TrimSpace(software.CPE) == "" || software.CPE == "N/A" {
+		software.CPE = domain.GenerateCPE23(software.Type, software.Vendor, software.Name, software.Version)
 	}
 
 	if err := o.softwarePort.Save(ctx, software); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {

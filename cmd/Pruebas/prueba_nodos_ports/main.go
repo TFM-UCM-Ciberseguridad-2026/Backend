@@ -40,7 +40,7 @@ func main() {
 	fmt.Println("\n=== INYECTANDO 10 ENTIDADES DE DOMINIO ===")
 
 	// 1. Endpoint
-	ep := &domain.Endpoint{EndpointID: 1, Hostname: "srv-db", Type: "Linux", InternetExposed: false}
+	ep := &domain.Endpoint{EndpointID: 1, Hostname: "srv-db", Type: "Server", InternetExposed: false}
 	_ = endpointRepo.Save(ctx, ep)
 
 	// 2. Vulnerability

@@ -16,7 +16,7 @@ type Software struct {
 	SoftwareID  int64      `json:"software_id"`
 	Name        string     `json:"name"`
 	Version     string     `json:"version"`
-	Type        string     `json:"type"`
+	Type        string     `json:"type"` // Tipo de recurso según la convención CPE 2.3: 'a' (aplicación/servicio), 'o' (sistema operativo), 'h' (hardware/firmware)
 	CPE         string     `json:"cpe"`
 	PURL        string     `json:"purl"`
 	ReleaseDate *time.Time `json:"release_date"`

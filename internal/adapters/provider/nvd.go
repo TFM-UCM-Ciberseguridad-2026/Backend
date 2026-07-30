@@ -138,6 +138,9 @@ func (a *NistAPIAdapter) FetchVulnerabilities(ctx context.Context, limit int, of
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			return []domain.Vulnerability{}, nil
+		}
 		return nil, fmt.Errorf("api nist devolvió status code inválido: %d", resp.StatusCode)
 	}
 
@@ -182,6 +185,10 @@ func (a *NistAPIAdapter) FetchByCPE(ctx context.Context, cpe string) ([]domain.V
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			// NIST NVD v2.0 devuelve HTTP 404 cuando el CPE no existe en su base de datos o no coincide con ninguna vulnerabilidad.
+			return []domain.Vulnerability{}, nil
+		}
 		return nil, fmt.Errorf("api nist devolvió status code inválido por CPE: %d", resp.StatusCode)
 	}
 
@@ -225,6 +232,9 @@ func (a *NistAPIAdapter) FetchByDate(ctx context.Context, startDate, endDate tim
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			return []domain.Vulnerability{}, nil
+		}
 		return nil, fmt.Errorf("api nist devolvió status code inválido por fecha: %d", resp.StatusCode)
 	}
 
