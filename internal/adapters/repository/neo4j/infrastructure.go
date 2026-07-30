@@ -316,6 +316,12 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 		    hasLPE: hasLPE
 		}) AS steps
 		
+		// Validar que el pivotaje sea posible: si un nodo intermedio es un contenedor, DEBE tener un escape (LPE) para poder saltar al siguiente nodo de la ruta.
+		// (No evaluamos el último paso porque es el destino final y no necesita pivotar más allá).
+		WHERE size(steps) < 2 OR all(i IN range(0, size(steps)-2) WHERE 
+		    (NOT steps[i].is_container) OR (steps[i].hasLPE)
+		)
+
 		RETURN e1.id AS entry_id, steps
 	`
 

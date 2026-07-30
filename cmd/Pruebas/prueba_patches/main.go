@@ -81,14 +81,14 @@ func main() {
 	defer driver.Close(ctx)
 
 	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo,
-		_, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo := neo4j.NewRepository(driver)
+		_, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo, containerRepo := neo4j.NewRepository(driver)
 	infraRepo := neo4j.NewInfrastructureRepository(driver)
 	riskRepo := neo4j.NewRiskRepository(driver)
 
 	orchestrator := service.NewOrchestrator(
 		projectRepo, endpointRepo, hardwareRepo, networkRepo,
 		softwareInstRepo, softwareRepo, findingRepo, vulnRepo,
-		remediationRepo, relRepo, infraRepo, patchRepo, dbHelper,
+		remediationRepo, relRepo, infraRepo, containerRepo, patchRepo, dbHelper,
 		provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey, cfg.NVD.TimeoutSeconds),
 	).WithRisk(riskRepo, provider.NewEPSSAdapter(), provider.NewKEVAdapter()).
 		WithPatchProvider(provider.NewOSVAdapter())

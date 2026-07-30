@@ -109,6 +109,7 @@ type RelationshipPort interface {
 	LinkEndpointToHardware(ctx context.Context, endpointID int64, hardwareID int64) error
 	LinkEndpointToNetwork(ctx context.Context, endpointID int64, networkID int64) error
 	LinkEndpointToInstallation(ctx context.Context, endpointID int64, installationID string) error
+	LinkContainerToInstallation(ctx context.Context, containerID string, installationID string) error
 	LinkInstallationToSoftware(ctx context.Context, installationID string, softwareID int64) error
 	LinkInstallationToFinding(ctx context.Context, installationID string, findingID int64) error
 	LinkFindingToVulnerability(ctx context.Context, findingID int64, cveID string) error

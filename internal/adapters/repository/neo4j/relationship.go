@@ -62,6 +62,19 @@ func (r *relationshipRepo) LinkEndpointToInstallation(ctx context.Context, endpo
 	return executeWriteHelper(ctx, r.driver, query, params)
 }
 
+func (r *relationshipRepo) LinkContainerToInstallation(ctx context.Context, containerID string, installationID string) error {
+	query := `
+		MATCH (c:Container {id: $containerID})
+		MATCH (si:SoftwareInstallation {id: $installationID})
+		MERGE (c)-[:HAS_INSTALLATION]->(si)
+	`
+	params := map[string]any{
+		"containerID":    containerID,
+		"installationID": installationID,
+	}
+	return executeWriteHelper(ctx, r.driver, query, params)
+}
+
 func (r *relationshipRepo) LinkInstallationToSoftware(ctx context.Context, installationID string, softwareID int64) error {
 	query := `
 		MATCH (si:SoftwareInstallation {id: $installationID})
