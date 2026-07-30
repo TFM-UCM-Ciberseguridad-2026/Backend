@@ -109,6 +109,7 @@ type RelationshipPort interface {
 	LinkEndpointToHardware(ctx context.Context, endpointID int64, hardwareID int64) error
 	LinkEndpointToNetwork(ctx context.Context, endpointID int64, networkID int64) error
 	LinkEndpointToInstallation(ctx context.Context, endpointID int64, installationID string) error
+	LinkContainerToInstallation(ctx context.Context, containerID string, installationID string) error
 	LinkInstallationToSoftware(ctx context.Context, installationID string, softwareID int64) error
 	LinkInstallationToFinding(ctx context.Context, installationID string, findingID int64) error
 	LinkFindingToVulnerability(ctx context.Context, findingID int64, cveID string) error
@@ -165,8 +166,15 @@ type InfrastructurePort interface {
 type ContainerPort interface {
 	SaveContainerImage(ctx context.Context, image *domain.ContainerImage) error
 	GetContainerImage(ctx context.Context, imageID string) (*domain.ContainerImage, error)
+	GetAllContainerImages(ctx context.Context) ([]domain.ContainerImage, error)
 	SaveContainer(ctx context.Context, container *domain.Container) error
 	GetContainer(ctx context.Context, containerID string) (*domain.Container, error)
+	LinkVulnerabilityToImage(ctx context.Context, imageID string, cveID string) error
+}
+
+// ContainerScannerPort define las operaciones para escanear imágenes de contenedores en busca de vulnerabilidades (ej. Docker Scout).
+type ContainerScannerPort interface {
+	ScanImage(ctx context.Context, imageName string) ([]domain.Vulnerability, error)
 }
 
 // EPSSProvider obtiene scores de probabilidad de explotación desde la API FIRST/EPSS.

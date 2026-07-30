@@ -241,6 +241,9 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 		      } OR EXISTS {
 		        MATCH (n)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(v:Vulnerability)
 		        WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
+		      } OR EXISTS {
+		        MATCH (n)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+		        WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
 		      }
 		    ))
 		  )
@@ -262,6 +265,12 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 			MATCH (ep)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 			WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
 			RETURN si, f, v, true AS is_container, c AS container
+			UNION
+			WITH ep
+			MATCH (ep)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+			WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
+			// Como Scout no crea nodos Finding, simulamos uno con score basado en CVSS
+			RETURN null AS si, {risk_score: 9.8} AS f, v, true AS is_container, c AS container
 		}
 		WITH path, e1, indexed, ie, ep, si, f, v, is_container, container ORDER BY f.risk_score DESC
 		
@@ -278,12 +287,20 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 		    MATCH (ep)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(vContLocal:Vulnerability)
 		    WHERE (vContLocal.cvss_vector CONTAINS 'AV:L' AND vContLocal.cvss_vector CONTAINS 'C:H' AND vContLocal.cvss_vector CONTAINS 'I:H') 
 		       OR toLower(vContLocal.description) CONTAINS 'escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation'
-		  } AS hasContLPE
+		  } AS hasContLPE,
+		  EXISTS {
+		    MATCH (ep)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_VULNERABILITY]->(vContLocal:Vulnerability)
+		    WHERE (vContLocal.cvss_vector CONTAINS 'AV:L' AND vContLocal.cvss_vector CONTAINS 'C:H' AND vContLocal.cvss_vector CONTAINS 'I:H')
+		       OR toLower(vContLocal.description) CONTAINS 'escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation'
+		  } AS hasImageContLPE
 		
+		WITH path, e1, indexed, ie, ep, bestNet, hasHostLPE, hasContLPE, hasImageContLPE
+		
+		// Un atacante es root si obtiene un LPE en el host o si el container tiene escape (hasContLPE o hasImageContLPE)
 		WITH path, e1, indexed, ie, ep, bestNet, 
 		  CASE 
-		    WHEN bestNet.is_container THEN hasContLPE
-		    ELSE (hasHostLPE OR hasContLPE)
+		    WHEN bestNet.is_container THEN (hasContLPE OR hasImageContLPE)
+		    ELSE (hasHostLPE OR hasContLPE OR hasImageContLPE)
 		  END AS hasLPE
 		ORDER BY ie.index ASC
 		
@@ -299,6 +316,12 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 		    hasLPE: hasLPE
 		}) AS steps
 		
+		// Validar que el pivotaje sea posible: si un nodo intermedio es un contenedor, DEBE tener un escape (LPE) para poder saltar al siguiente nodo de la ruta.
+		// (No evaluamos el último paso porque es el destino final y no necesita pivotar más allá).
+		WHERE size(steps) < 2 OR all(i IN range(0, size(steps)-2) WHERE 
+		    (NOT steps[i].is_container) OR (steps[i].hasLPE)
+		)
+
 		RETURN e1.id AS entry_id, steps
 	`
 
