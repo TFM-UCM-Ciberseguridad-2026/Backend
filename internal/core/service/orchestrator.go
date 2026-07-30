@@ -276,6 +276,14 @@ func (o *Orchestrator) GetInfrastructure(ctx context.Context) (*domain.GraphData
 	return graph, nil
 }
 
+// ImportInfrastructure importa dinámicamente un conjunto de nodos y relaciones al grafo.
+func (o *Orchestrator) ImportInfrastructure(ctx context.Context, data *domain.GraphData) error {
+	if data == nil {
+		return fmt.Errorf("los datos de infraestructura a importar son nulos")
+	}
+	return o.infraPort.ImportGraphData(ctx, data)
+}
+
 // GetTopAPTs obtiene la lista rankeada de Actores de Amenaza (APT) que más TTPs comparten
 // con las vulnerabilidades detectadas en la infraestructura del usuario.
 func (o *Orchestrator) GetTopAPTs(ctx context.Context) ([]domain.APTThreatResult, error) {

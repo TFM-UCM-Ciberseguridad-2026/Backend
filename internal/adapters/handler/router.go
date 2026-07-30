@@ -45,6 +45,9 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* GET /api/infrastructure: Obtiene el grafo de infraestructura y relaciones. */
 	mux.HandleFunc("GET /api/infrastructure", h.GetInfrastructure)
 
+	/* POST /api/infrastructure/import: Importa la declaración de infraestructura desde un JSON. */
+	mux.HandleFunc("POST /api/infrastructure/import", h.ImportInfrastructure)
+
 	/* GET /api/infrastructure/top-apts: Obtiene los actores de amenazas (APTs) que afectan la infraestructura auditada. */
 	mux.HandleFunc("GET /api/infrastructure/top-apts", h.GetTopAPTs)
 

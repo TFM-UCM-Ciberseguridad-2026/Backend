@@ -470,3 +470,105 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 	return res.([]domain.ExploitationPath), nil
 }
 
+// ImportGraphData procesa e ingesta dinámicamente un conjunto de nodos y relaciones en la base de datos Neo4j.
+func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.GraphData) error {
+	if data == nil || len(data.Nodes) == 0 {
+		return nil
+	}
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		// 1. Ingestar nodos
+		for _, node := range data.Nodes {
+			if len(node.Labels) == 0 {
+				continue
+			}
+
+			// Determinar etiqueta primaria y construir la cláusula Cypher
+			primaryLabel := node.Labels[0]
+			for _, l := range node.Labels {
+				if l != "BaseNode" && l != "Persistable" {
+					primaryLabel = l
+					break
+				}
+			}
+
+			props := node.Properties
+			if props == nil {
+				props = make(map[string]interface{})
+			}
+
+			// Asegurar que existe una clave ID única
+			var matchKey string
+			var matchVal interface{}
+
+			if idVal, exists := props["id"]; exists && idVal != nil {
+				matchKey = "id"
+				matchVal = idVal
+			} else if cveVal, exists := props["cve_id"]; exists && cveVal != nil {
+				matchKey = "cve_id"
+				matchVal = cveVal
+			} else if ttpVal, exists := props["ttp_id"]; exists && ttpVal != nil {
+				matchKey = "ttp_id"
+				matchVal = ttpVal
+			} else {
+				matchKey = "id"
+				matchVal = node.ID
+				props["id"] = node.ID
+			}
+
+			// Construir query MERGE dinámico
+			query := fmt.Sprintf(`
+				MERGE (n:%s {%s: $matchVal})
+				SET n += $properties
+			`, primaryLabel, matchKey)
+
+			_, err := tx.Run(ctx, query, map[string]interface{}{
+				"matchVal":   matchVal,
+				"properties": props,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("error al importar nodo %s (%v): %w", primaryLabel, matchVal, err)
+			}
+		}
+
+		// 2. Ingestar relaciones
+		for _, rel := range data.Relationships {
+			if rel.Type == "" || rel.Source == "" || rel.Target == "" {
+				continue
+			}
+
+			relProps := rel.Properties
+			if relProps == nil {
+				relProps = make(map[string]interface{})
+			}
+
+			// Buscar los nodos origen y destino por elementId o propiedad id
+			query := fmt.Sprintf(`
+				MATCH (s), (t)
+				WHERE (elementId(s) = $source OR s.id = $source OR s.cve_id = $source OR s.ttp_id = $source)
+				  AND (elementId(t) = $target OR t.id = $target OR t.cve_id = $target OR t.ttp_id = $target)
+				MERGE (s)-[r:%s]->(t)
+				SET r += $properties
+			`, rel.Type)
+
+			_, err := tx.Run(ctx, query, map[string]interface{}{
+				"source":     rel.Source,
+				"target":     rel.Target,
+				"properties": relProps,
+			})
+			if err != nil {
+				// Log non-fatal relation failure or return
+				fmt.Printf("Aviso: no se pudo relacionar %s -[%s]-> %s: %v\n", rel.Source, rel.Type, rel.Target, err)
+			}
+		}
+
+		return nil, nil
+	})
+
+	return err
+}
+
+

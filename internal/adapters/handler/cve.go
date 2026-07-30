@@ -196,6 +196,22 @@ func (h *OrchestratorHandler) GetInfrastructure(w http.ResponseWriter, r *http.R
 	sendJSON(w, graph, http.StatusOK)
 }
 
+// POST /api/infrastructure/import
+func (h *OrchestratorHandler) ImportInfrastructure(w http.ResponseWriter, r *http.Request) {
+	var payload domain.GraphData
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := h.orchestrator.ImportInfrastructure(r.Context(), &payload); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]string{"status": "success", "message": "Infraestructura importada con éxito"}, http.StatusCreated)
+}
+
 // GET /api/infrastructure/top-apts
 func (h *OrchestratorHandler) GetTopAPTs(w http.ResponseWriter, r *http.Request) {
 	results, err := h.orchestrator.GetTopAPTs(r.Context())
