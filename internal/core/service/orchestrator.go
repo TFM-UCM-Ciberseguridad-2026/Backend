@@ -662,6 +662,125 @@ func (o *Orchestrator) GetPatchesForVulnerability(ctx context.Context, cveID str
 	return o.patchPort.GetByVulnerability(ctx, cveID)
 }
 
+// DeclarePatchApplied registra que un parche se ha aplicado sobre una instalación y
+// propaga el efecto a los findings de esa instalación afectados por el CVE.
+//
+// El nivel de remediación determina el factor que multiplica el riesgo:
+//   - OFFICIAL_FIX   → factor 0.00, los findings pasan a PATCHED y salen de la agregación
+//   - TEMPORARY_FIX  → factor 0.30, los findings siguen abiertos con riesgo reducido
+//   - WORKAROUND     → factor 0.50, idem
+//   - UNAVAILABLE    → factor 1.00, revierte una declaración previa
+//
+// Solo el parche oficial cierra el finding: una mitigación reduce el riesgo pero el
+// software vulnerable sigue instalado y la mitigación puede revertirse o no cubrir todos
+// los vectores.
+//
+// No recalcula el riesgo del endpoint: esta operación fija las entradas del cálculo
+// (factor y estado) y el recálculo se dispara con ComputeEndpointRisk, que es lo que ya
+// hace el cron. Devuelve la declaración persistida y los findings afectados.
+func (o *Orchestrator) DeclarePatchApplied(
+	ctx context.Context,
+	installationID string,
+	cveID string,
+	patchID int64,
+	level domain.RemediationLevel,
+	appliedAt time.Time,
+	appliedBy string,
+	notes string,
+) (*domain.AppliedPatch, []int64, error) {
+	if installationID == "" {
+		return nil, nil, fmt.Errorf("installation_id vacío")
+	}
+	if cveID == "" {
+		return nil, nil, fmt.Errorf("cve_id vacío")
+	}
+	if !level.IsValid() {
+		return nil, nil, fmt.Errorf("nivel de remediación no reconocido: %q", level)
+	}
+	if appliedAt.IsZero() {
+		appliedAt = time.Now().UTC()
+	}
+
+	// Si no se indica el parche, se resuelve a partir del CVE. Cuando hay varios
+	// registrados no podemos elegir por el usuario: pedimos que lo concrete.
+	if patchID == 0 {
+		patches, err := o.patchPort.GetByVulnerability(ctx, cveID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("error recuperando los parches de %s: %w", cveID, err)
+		}
+		switch len(patches) {
+		case 0:
+			return nil, nil, fmt.Errorf("no hay ningún parche registrado para %s: regístralo primero", cveID)
+		case 1:
+			patchID = patches[0].PatchID
+		default:
+			return nil, nil, fmt.Errorf("hay %d parches registrados para %s: indica patch_id", len(patches), cveID)
+		}
+	}
+
+	remediationFactor := RemediationFactorForLevel(level)
+
+	application := &domain.AppliedPatch{
+		PatchID:           patchID,
+		InstallationID:    installationID,
+		CVEID:             cveID,
+		AppliedAt:         appliedAt.UTC(),
+		AppliedBy:         appliedBy,
+		RemediationLevel:  level,
+		RemediationFactor: remediationFactor,
+		Notes:             notes,
+	}
+
+	if err := o.patchPort.SaveApplication(ctx, application); err != nil {
+		if errors.Is(err, domain.ErrNodeNotFound) {
+			return nil, nil, fmt.Errorf("no existe el parche %d o la instalación %q", patchID, installationID)
+		}
+		return nil, nil, fmt.Errorf("error declarando el parche aplicado: %w", err)
+	}
+
+	// Un parche oficial cierra el finding; una mitigación lo deja abierto con menos riesgo.
+	status := "OPEN"
+	if level.FullyRemediates() {
+		status = "PATCHED"
+	}
+
+	affected, err := o.findingPort.ApplyRemediationByInstallationAndCVE(
+		ctx, installationID, cveID, remediationFactor, status,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error propagando la remediación a los findings: %w", err)
+	}
+
+	// Sincronizar el nodo Remediation con la declaración. La arista APPLIED_TO es la
+	// fuente de verdad del histórico, pero Remediation.status/applied_at es lo que
+	// consulta quien mira la remediación de un finding, así que deben coincidir.
+	//
+	// Al revertir (UNAVAILABLE) se limpia la fecha: la remediación vuelve a estar
+	// pendiente y conservar un applied_at antiguo daría a entender lo contrario.
+	var remediationAppliedAt *time.Time
+	if level != domain.RemediationLevelUnavailable {
+		applied := application.AppliedAt
+		remediationAppliedAt = &applied
+	}
+
+	if _, err := o.remediationPort.ApplyByInstallationAndCVE(
+		ctx, installationID, cveID, level.RemediationStatus(), remediationAppliedAt,
+	); err != nil {
+		return nil, nil, fmt.Errorf("error sincronizando las remediaciones: %w", err)
+	}
+
+	return application, affected, nil
+}
+
+// GetAppliedPatchHistory devuelve el histórico de parches aplicados sobre una instalación,
+// del más reciente al más antiguo.
+func (o *Orchestrator) GetAppliedPatchHistory(ctx context.Context, installationID string) ([]domain.AppliedPatch, error) {
+	if installationID == "" {
+		return nil, fmt.Errorf("installation_id vacío")
+	}
+	return o.patchPort.GetApplicationsByInstallation(ctx, installationID)
+}
+
 // EnrichPatchesFromProvider consulta la fuente externa de parches para un CVE, registra
 // los parches encontrados y propaga la versión corregida a sus remediaciones.
 //

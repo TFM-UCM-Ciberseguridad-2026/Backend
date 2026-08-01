@@ -22,7 +22,10 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 	query := `
 		MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
 		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-		WHERE f.status <> 'RESOLVED'
+		// Misma lista de estados cerrados que GetFindingScoresByInstallation. Antes esta
+		// consulta solo excluía RESOLVED, de modo que un finding PATCHED entraba en el
+		// cálculo pero luego desaparecía de la agregación.
+		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
 		RETURN
 		    f.id                    AS finding_id,
 		    f.status                AS finding_status,

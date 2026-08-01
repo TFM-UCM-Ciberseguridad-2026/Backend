@@ -76,5 +76,11 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* POST /api/vulnerabilities/{cve}/patches/refresh: Consulta la fuente externa (OSV) y actualiza parches y versión corregida. */
 	mux.HandleFunc("POST /api/vulnerabilities/{cve}/patches/refresh", h.RefreshPatchesForVulnerability)
 
+	/* POST /api/installations/{id}/applied-patches: Declara un parche como aplicado sobre la instalación y propaga el efecto al riesgo. */
+	mux.HandleFunc("POST /api/installations/{id}/applied-patches", h.DeclarePatchApplied)
+
+	/* GET /api/installations/{id}/applied-patches: Histórico de parches aplicados sobre la instalación. */
+	mux.HandleFunc("GET /api/installations/{id}/applied-patches", h.GetAppliedPatchHistory)
+
 	return mux
 }
