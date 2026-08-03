@@ -138,6 +138,9 @@ func (a *NistAPIAdapter) FetchVulnerabilities(ctx context.Context, limit int, of
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			return []domain.Vulnerability{}, nil
+		}
 		return nil, fmt.Errorf("api nist devolvió status code inválido: %d", resp.StatusCode)
 	}
 
@@ -164,7 +167,7 @@ FetchByCPE consulta la API REST oficial de NIST NVD v2.0 usando un CPE (Common P
 */
 func (a *NistAPIAdapter) FetchByCPE(ctx context.Context, cpe string) ([]domain.Vulnerability, error) {
 	escapedCPE := url.QueryEscape(cpe)
-	reqURL := fmt.Sprintf("%s?cpeName=%s", a.baseURL, escapedCPE)
+	reqURL := fmt.Sprintf("%s?cpeName=%s&resultsPerPage=100", a.baseURL, escapedCPE)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
@@ -182,6 +185,10 @@ func (a *NistAPIAdapter) FetchByCPE(ctx context.Context, cpe string) ([]domain.V
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			// NIST NVD v2.0 devuelve HTTP 404 cuando el CPE no existe en su base de datos o no coincide con ninguna vulnerabilidad.
+			return []domain.Vulnerability{}, nil
+		}
 		return nil, fmt.Errorf("api nist devolvió status code inválido por CPE: %d", resp.StatusCode)
 	}
 
@@ -206,7 +213,7 @@ func (a *NistAPIAdapter) FetchByDate(ctx context.Context, startDate, endDate tim
 	// Formato ISO 8601: 2021-08-04T13:00:00.000
 	startStr := startDate.UTC().Format("2006-01-02T15:04:05.000")
 	endStr := endDate.UTC().Format("2006-01-02T15:04:05.000")
-	
+
 	reqURL := fmt.Sprintf("%s?lastModStartDate=%s&lastModEndDate=%s", a.baseURL, url.QueryEscape(startStr), url.QueryEscape(endStr))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
@@ -225,6 +232,9 @@ func (a *NistAPIAdapter) FetchByDate(ctx context.Context, startDate, endDate tim
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			return []domain.Vulnerability{}, nil
+		}
 		return nil, fmt.Errorf("api nist devolvió status code inválido por fecha: %d", resp.StatusCode)
 	}
 

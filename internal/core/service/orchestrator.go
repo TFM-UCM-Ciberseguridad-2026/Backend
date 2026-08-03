@@ -12,6 +12,8 @@ import (
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/ports"
 )
 
+const autoScanVulnerabilityLimit = 100
+
 /*
 Este archivo contiene el Servicio de Aplicación (Application Service) u Orquestador de Casos de Uso.
 
@@ -206,6 +208,10 @@ func (o *Orchestrator) AssociateNetworkToEndpoint(ctx context.Context, endpointI
 // RegisterSoftwareInstallation guarda la definición del software, la instancia instalada,
 // asocia la instancia al endpoint y el software genérico a la instancia instalada.
 func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpointID int64, software *domain.Software, installation *domain.SoftwareInstallation) error {
+	if strings.TrimSpace(software.Vendor) == "" {
+		return fmt.Errorf("el fabricante (vendor) es obligatorio para registrar el software y consultar vulnerabilidades en NIST")
+	}
+
 	if software.SoftwareID == 0 {
 		swID, err := o.nextNodeID(ctx, "Software")
 		if err != nil {
@@ -216,6 +222,10 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 
 	if installation.InstallationID == "" {
 		installation.InstallationID = o.nextInstallationID()
+	}
+
+	if strings.TrimSpace(software.CPE) == "" || software.CPE == "N/A" {
+		software.CPE = domain.GenerateCPE23(software.Type, software.Vendor, software.Name, software.Version)
 	}
 
 	if err := o.softwarePort.Save(ctx, software); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
@@ -291,7 +301,7 @@ AutoScanAndRegisterVulnerabilities implementa el caso de uso central para automa
  5. Crea un Hallazgo (Finding) con puntaje de riesgo inicializado y genera los enlaces relacionales de infraestructura:
     SoftwareInstallation -> [:HAS_FINDING] -> Finding -> [:OF_VULNERABILITY] -> Vulnerability.
 */
-func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, installationID string, softwareID int64) error {
+func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, installationID string, softwareID int64, limits ...int) error {
 	// 1. Obtener la entidad de software
 	sw, err := o.softwarePort.GetByID(ctx, softwareID)
 	if err != nil {
@@ -314,6 +324,13 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 	vulns, err := o.vulnScannerPort.FetchByCPE(ctx, cpe)
 	if err != nil {
 		return fmt.Errorf("error consultando la API de vulnerabilidades para el CPE %s: %w", cpe, err)
+	}
+	limit := autoScanVulnerabilityLimit
+	if len(limits) > 0 && limits[0] > 0 && limits[0] < limit {
+		limit = limits[0]
+	}
+	if len(vulns) > limit {
+		vulns = vulns[:limit]
 	}
 
 	// 4. Registrar vulnerabilidades y enlazarlas como hallazgos (Findings)

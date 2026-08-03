@@ -42,10 +42,27 @@ func GenerateCPE23(part, vendor, product, version string) string {
 	return fmt.Sprintf("cpe:2.3:%s:%s:%s:%s:*:*:*:*:*:*:*", cpePart, cleanVendor, cleanProduct, cleanVersion)
 }
 
+/*
+cleanCPEToken limpia y sanea cada componente del CPE:
+- Convierte a minúsculas y elimina espacios iniciales/finales.
+- Reemplaza dos puntos (:) por guiones bajos para no alterar la estructura de 13 campos delimitados por ':' del estándar CPE 2.3.
+- Reemplaza espacios, barras (/) y barras invertidas (\) por guiones bajos.
+- Elimina caracteres de control o consulta HTTP (?, #, &, ", ').
+- Si la cadena queda vacía, asigna el comodín '*'.
+*/
 func cleanCPEToken(token string) string {
 	t := strings.TrimSpace(token)
 	t = strings.ToLower(t)
+	t = strings.ReplaceAll(t, ":", "_")
 	t = strings.ReplaceAll(t, " ", "_")
+	t = strings.ReplaceAll(t, "/", "_")
+	t = strings.ReplaceAll(t, "\\", "_")
+	t = strings.ReplaceAll(t, "?", "")
+	t = strings.ReplaceAll(t, "#", "")
+	t = strings.ReplaceAll(t, "&", "")
+	t = strings.ReplaceAll(t, "\"", "")
+	t = strings.ReplaceAll(t, "'", "")
+
 	if t == "" {
 		return "*"
 	}

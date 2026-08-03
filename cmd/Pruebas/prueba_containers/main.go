@@ -109,7 +109,8 @@ func main() {
 	fmt.Println("[INFO]    - Último salto del atacante.")
 	fmt.Println("[INFO]")
 	fmt.Println("[INFO] 4. 'Secure-Vault' (Aislado y seguro, no debe aparecer).")
-	fmt.Println("[INFO] -----------------------------------------------------------\n")
+	fmt.Println("[INFO] -----------------------------------------------------------")
+	fmt.Println()
 
 	fmt.Println("[*] ==============================================================")
 	fmt.Println("[*] FASE 1: Calculando Paths Iniciales (Sin Container Escapes)")

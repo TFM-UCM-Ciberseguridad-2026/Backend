@@ -216,7 +216,6 @@ func (h *OrchestratorHandler) GetExploitationPaths(w http.ResponseWriter, r *htt
 	sendJSON(w, paths, http.StatusOK)
 }
 
-
 /*
 ScanSoftwareVulnerabilities maneja la solicitud HTTP POST para ejecutar el escaneo y registro automático de vulnerabilidades.
 Ruta: POST /api/installations/{id}/scan-vulns?software_id={software_id}
@@ -236,8 +235,19 @@ func (h *OrchestratorHandler) ScanSoftwareVulnerabilities(w http.ResponseWriter,
 		sendError(w, "Invalid software_id", http.StatusBadRequest)
 		return
 	}
+	limit := 100
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		parsedLimit, err := strconv.Atoi(limitStr)
+		if err != nil || parsedLimit <= 0 {
+			sendError(w, "Invalid limit", http.StatusBadRequest)
+			return
+		}
+		if parsedLimit < limit {
+			limit = parsedLimit
+		}
+	}
 
-	if err := h.orchestrator.AutoScanAndRegisterVulnerabilities(r.Context(), instID, swID); err != nil {
+	if err := h.orchestrator.AutoScanAndRegisterVulnerabilities(r.Context(), instID, swID, limit); err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
