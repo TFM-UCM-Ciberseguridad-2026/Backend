@@ -470,6 +470,29 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 	return res.([]domain.ExploitationPath), nil
 }
 
+type nodeMatchTarget struct {
+	Label    string
+	MatchKey string
+	MatchVal interface{}
+}
+
+func normalizeProperties(props map[string]interface{}) map[string]interface{} {
+	if props == nil {
+		return make(map[string]interface{})
+	}
+	cleaned := make(map[string]interface{}, len(props))
+	for k, v := range props {
+		if floatVal, ok := v.(float64); ok {
+			if floatVal == float64(int64(floatVal)) {
+				cleaned[k] = int64(floatVal)
+				continue
+			}
+		}
+		cleaned[k] = v
+	}
+	return cleaned
+}
+
 // ImportGraphData procesa e ingesta dinámicamente un conjunto de nodos y relaciones en la base de datos Neo4j.
 func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.GraphData) error {
 	if data == nil || len(data.Nodes) == 0 {
@@ -480,6 +503,8 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 	defer session.Close(ctx)
 
 	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		nodeLookup := make(map[string]nodeMatchTarget)
+
 		// 1. Ingestar nodos
 		for _, node := range data.Nodes {
 			if len(node.Labels) == 0 {
@@ -495,10 +520,7 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 				}
 			}
 
-			props := node.Properties
-			if props == nil {
-				props = make(map[string]interface{})
-			}
+			props := normalizeProperties(node.Properties)
 
 			// Asegurar que existe una clave ID única
 			var matchKey string
@@ -519,11 +541,17 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 				props["id"] = node.ID
 			}
 
-			// Construir query MERGE dinámico
+			// Construir query MERGE dinámico y aplicar todas las etiquetas del nodo
+			var labelStr strings.Builder
+			for _, l := range node.Labels {
+				labelStr.WriteString(":")
+				labelStr.WriteString(l)
+			}
+
 			query := fmt.Sprintf(`
 				MERGE (n:%s {%s: $matchVal})
-				SET n += $properties
-			`, primaryLabel, matchKey)
+				SET n%s, n += $properties
+			`, primaryLabel, matchKey, labelStr.String())
 
 			_, err := tx.Run(ctx, query, map[string]interface{}{
 				"matchVal":   matchVal,
@@ -531,6 +559,20 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 			})
 			if err != nil {
 				return nil, fmt.Errorf("error al importar nodo %s (%v): %w", primaryLabel, matchVal, err)
+			}
+
+			// Registrar en nodeLookup para la posterior vinculación de relaciones
+			targetInfo := nodeMatchTarget{
+				Label:    primaryLabel,
+				MatchKey: matchKey,
+				MatchVal: matchVal,
+			}
+			if node.ID != "" {
+				nodeLookup[node.ID] = targetInfo
+			}
+			matchValStr := fmt.Sprint(matchVal)
+			if matchValStr != "" {
+				nodeLookup[matchValStr] = targetInfo
 			}
 		}
 
@@ -540,28 +582,45 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 				continue
 			}
 
-			relProps := rel.Properties
-			if relProps == nil {
-				relProps = make(map[string]interface{})
-			}
+			relProps := normalizeProperties(rel.Properties)
 
-			// Buscar los nodos origen y destino por elementId o propiedad id
-			query := fmt.Sprintf(`
-				MATCH (s), (t)
-				WHERE (elementId(s) = $source OR s.id = $source OR s.cve_id = $source OR s.ttp_id = $source)
-				  AND (elementId(t) = $target OR t.id = $target OR t.cve_id = $target OR t.ttp_id = $target)
-				MERGE (s)-[r:%s]->(t)
-				SET r += $properties
-			`, rel.Type)
+			sourceInfo, sourceOk := nodeLookup[rel.Source]
+			targetInfo, targetOk := nodeLookup[rel.Target]
 
-			_, err := tx.Run(ctx, query, map[string]interface{}{
-				"source":     rel.Source,
-				"target":     rel.Target,
-				"properties": relProps,
-			})
-			if err != nil {
-				// Log non-fatal relation failure or return
-				fmt.Printf("Aviso: no se pudo relacionar %s -[%s]-> %s: %v\n", rel.Source, rel.Type, rel.Target, err)
+			if sourceOk && targetOk {
+				query := fmt.Sprintf(`
+					MATCH (s:%s {%s: $sourceVal})
+					MATCH (t:%s {%s: $targetVal})
+					MERGE (s)-[r:%s]->(t)
+					SET r += $properties
+				`, sourceInfo.Label, sourceInfo.MatchKey, targetInfo.Label, targetInfo.MatchKey, rel.Type)
+
+				_, err := tx.Run(ctx, query, map[string]interface{}{
+					"sourceVal":  sourceInfo.MatchVal,
+					"targetVal":  targetInfo.MatchVal,
+					"properties": relProps,
+				})
+				if err != nil {
+					fmt.Printf("Aviso: no se pudo relacionar %s -[%s]-> %s: %v\n", rel.Source, rel.Type, rel.Target, err)
+				}
+			} else {
+				// Fallback si origen o destino no estaban en la lista de nodos importados
+				query := fmt.Sprintf(`
+					MATCH (s), (t)
+					WHERE (elementId(s) = $source OR s.id = $source OR toString(s.id) = $source OR s.cve_id = $source OR s.ttp_id = $source)
+					  AND (elementId(t) = $target OR t.id = $target OR toString(t.id) = $target OR t.cve_id = $target OR t.ttp_id = $target)
+					MERGE (s)-[r:%s]->(t)
+					SET r += $properties
+				`, rel.Type)
+
+				_, err := tx.Run(ctx, query, map[string]interface{}{
+					"source":     rel.Source,
+					"target":     rel.Target,
+					"properties": relProps,
+				})
+				if err != nil {
+					fmt.Printf("Aviso: no se pudo relacionar %s -[%s]-> %s: %v\n", rel.Source, rel.Type, rel.Target, err)
+				}
 			}
 		}
 
