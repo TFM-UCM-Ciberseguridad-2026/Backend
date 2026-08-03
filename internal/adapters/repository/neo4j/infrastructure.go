@@ -24,7 +24,7 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	// Consulta de lectura optimizada para obtener nodos y relaciones en una sola transacción
+	// Consulta de lectura optimizada para obtener los nodos y relaciones de la infraestructura (excluyendo TTPs y ThreatActors para no sobrecargar el grafo visual)
 	query := `
 		MATCH (n)
 		WHERE NOT n:ThreatActor AND NOT n:TTP
@@ -536,6 +536,9 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 			} else if ttpVal, exists := props["ttp_id"]; exists && ttpVal != nil {
 				matchKey = "ttp_id"
 				matchVal = ttpVal
+			} else if actorVal, exists := props["actor_id"]; exists && actorVal != nil {
+				matchKey = "actor_id"
+				matchVal = actorVal
 			} else {
 				matchKey = "id"
 				matchVal = node.ID
