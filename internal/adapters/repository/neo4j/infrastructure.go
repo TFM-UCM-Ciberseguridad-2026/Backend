@@ -503,7 +503,8 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 	defer session.Close(ctx)
 
 	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
-		nodeLookup := make(map[string]nodeMatchTarget)
+		// Mapa de identificador del JSON -> elementId asignado por Neo4j
+		nodeLookup := make(map[string]string)
 
 		// 1. Ingestar nodos
 		for _, node := range data.Nodes {
@@ -551,9 +552,10 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 			query := fmt.Sprintf(`
 				MERGE (n:%s {%s: $matchVal})
 				SET n%s, n += $properties
+				RETURN elementId(n) AS elemId
 			`, primaryLabel, matchKey, labelStr.String())
 
-			_, err := tx.Run(ctx, query, map[string]interface{}{
+			res, err := tx.Run(ctx, query, map[string]interface{}{
 				"matchVal":   matchVal,
 				"properties": props,
 			})
@@ -561,18 +563,16 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 				return nil, fmt.Errorf("error al importar nodo %s (%v): %w", primaryLabel, matchVal, err)
 			}
 
-			// Registrar en nodeLookup para la posterior vinculación de relaciones
-			targetInfo := nodeMatchTarget{
-				Label:    primaryLabel,
-				MatchKey: matchKey,
-				MatchVal: matchVal,
-			}
-			if node.ID != "" {
-				nodeLookup[node.ID] = targetInfo
-			}
-			matchValStr := fmt.Sprint(matchVal)
-			if matchValStr != "" {
-				nodeLookup[matchValStr] = targetInfo
+			if res.Next(ctx) {
+				if elemIdVal, ok := res.Record().Get("elemId"); ok && elemIdVal != nil {
+					elemIdStr := fmt.Sprint(elemIdVal)
+					if node.ID != "" {
+						nodeLookup[node.ID] = elemIdStr
+					}
+					if matchValStr := fmt.Sprint(matchVal); matchValStr != "" {
+						nodeLookup[matchValStr] = elemIdStr
+					}
+				}
 			}
 		}
 
@@ -584,21 +584,21 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 
 			relProps := normalizeProperties(rel.Properties)
 
-			sourceInfo, sourceOk := nodeLookup[rel.Source]
-			targetInfo, targetOk := nodeLookup[rel.Target]
+			sourceElemId, sourceOk := nodeLookup[rel.Source]
+			targetElemId, targetOk := nodeLookup[rel.Target]
 
 			if sourceOk && targetOk {
 				query := fmt.Sprintf(`
-					MATCH (s:%s {%s: $sourceVal})
-					MATCH (t:%s {%s: $targetVal})
+					MATCH (s), (t)
+					WHERE elementId(s) = $sourceElemId AND elementId(t) = $targetElemId
 					MERGE (s)-[r:%s]->(t)
 					SET r += $properties
-				`, sourceInfo.Label, sourceInfo.MatchKey, targetInfo.Label, targetInfo.MatchKey, rel.Type)
+				`, rel.Type)
 
 				_, err := tx.Run(ctx, query, map[string]interface{}{
-					"sourceVal":  sourceInfo.MatchVal,
-					"targetVal":  targetInfo.MatchVal,
-					"properties": relProps,
+					"sourceElemId": sourceElemId,
+					"targetElemId": targetElemId,
+					"properties":   relProps,
 				})
 				if err != nil {
 					fmt.Printf("Aviso: no se pudo relacionar %s -[%s]-> %s: %v\n", rel.Source, rel.Type, rel.Target, err)

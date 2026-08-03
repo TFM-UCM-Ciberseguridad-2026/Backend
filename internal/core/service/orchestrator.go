@@ -155,6 +155,11 @@ func (o *Orchestrator) CreateProject(ctx context.Context, project *domain.Projec
 	return o.projectPort.Save(ctx, project)
 }
 
+// DeleteProject elimina un proyecto y su infraestructura asociada en cascada.
+func (o *Orchestrator) DeleteProject(ctx context.Context, projectID int64) error {
+	return o.projectPort.DeleteByID(ctx, projectID)
+}
+
 // AddEndpointToProject guarda un nuevo endpoint y lo vincula a un proyecto.
 func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64, endpoint *domain.Endpoint) error {
 	if endpoint.EndpointID == 0 {

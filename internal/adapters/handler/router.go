@@ -24,6 +24,9 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* POST /api/projects: Crea y registra un nuevo proyecto de auditoría. */
 	mux.HandleFunc("POST /api/projects", h.CreateProject)
 
+	/* DELETE /api/projects/{id}: Elimina un proyecto y su infraestructura en cascada. */
+	mux.HandleFunc("DELETE /api/projects/{id}", h.DeleteProject)
+
 	/* POST /api/projects/{id}/endpoints: Asocia un endpoint (host) a un proyecto por su ID. */
 	mux.HandleFunc("POST /api/projects/{id}/endpoints", h.AddEndpointToProject)
 
