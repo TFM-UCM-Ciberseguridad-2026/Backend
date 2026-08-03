@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/service"
@@ -393,5 +394,83 @@ func (h *OrchestratorHandler) RefreshPatchesForVulnerability(w http.ResponseWrit
 		"source":         info.Source,
 		"patches":        info.Patches,
 		"fixed_versions": info.FixedVersions,
+	}, http.StatusOK)
+}
+
+// POST /api/installations/{id}/applied-patches
+// Declara que un parche se ha aplicado sobre la instalación indicada.
+//
+// Cuerpo esperado:
+//
+//	{
+//	  "cve_id": "CVE-2021-44228",
+//	  "patch_id": 8,                       // opcional si el CVE solo tiene un parche
+//	  "remediation_level": "OFFICIAL_FIX",  // OFFICIAL_FIX | TEMPORARY_FIX | WORKAROUND | UNAVAILABLE
+//	  "applied_at": "2026-07-29T10:00:00Z", // opcional, por defecto ahora
+//	  "applied_by": "diego",
+//	  "notes": "..."
+//	}
+func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http.Request) {
+	installationID := r.PathValue("id")
+	if installationID == "" {
+		sendError(w, "Invalid installation ID", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		CVEID            string     `json:"cve_id"`
+		PatchID          int64      `json:"patch_id"`
+		RemediationLevel string     `json:"remediation_level"`
+		AppliedAt        *time.Time `json:"applied_at"`
+		AppliedBy        string     `json:"applied_by"`
+		Notes            string     `json:"notes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendError(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	appliedAt := time.Time{}
+	if req.AppliedAt != nil {
+		appliedAt = *req.AppliedAt
+	}
+
+	application, affected, err := h.orchestrator.DeclarePatchApplied(
+		r.Context(), installationID, req.CVEID, req.PatchID,
+		domain.RemediationLevel(req.RemediationLevel),
+		appliedAt, req.AppliedBy, req.Notes,
+	)
+	if err != nil {
+		// Datos mal informados por el cliente, no fallo del servidor.
+		sendError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	sendJSON(w, map[string]any{
+		"status":            "parche declarado como aplicado",
+		"application":       application,
+		"affected_findings": affected,
+	}, http.StatusCreated)
+}
+
+// GET /api/installations/{id}/applied-patches
+// Devuelve el histórico de parches aplicados sobre una instalación.
+func (h *OrchestratorHandler) GetAppliedPatchHistory(w http.ResponseWriter, r *http.Request) {
+	installationID := r.PathValue("id")
+	if installationID == "" {
+		sendError(w, "Invalid installation ID", http.StatusBadRequest)
+		return
+	}
+
+	history, err := h.orchestrator.GetAppliedPatchHistory(r.Context(), installationID)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]any{
+		"installation_id": installationID,
+		"count":           len(history),
+		"applied_patches": history,
 	}, http.StatusOK)
 }

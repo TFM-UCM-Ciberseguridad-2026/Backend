@@ -3,6 +3,8 @@ package service
 import (
 	"math"
 	"strings"
+
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 )
 
 // Parámetros de diseño documentados (ver spec del sistema).
@@ -70,6 +72,36 @@ func clamp(value, min, max float64) float64 {
 		return max
 	}
 	return value
+}
+
+// Factores de remediación por nivel declarado. El factor multiplica el riesgo del
+// finding, así que 1.00 significa "sin remediar" y 0.00 "vulnerabilidad eliminada".
+//
+// Los valores intermedios reflejan que una mitigación reduce el riesgo pero no lo anula:
+// el software vulnerable sigue instalado y la mitigación puede revertirse, saltarse o no
+// cubrir todos los vectores. El hotfix se considera más sólido que el workaround porque
+// toca el código, no solo la configuración.
+const (
+	remediationFactorOfficialFix  = 0.00
+	remediationFactorTemporaryFix = 0.30
+	remediationFactorWorkaround   = 0.50
+	remediationFactorUnavailable  = 1.00
+)
+
+// RemediationFactorForLevel traduce el nivel de remediación declarado al factor que
+// consume CalculateFindingRisk. Un nivel desconocido se trata como "sin remediación"
+// para no infravalorar el riesgo por un dato mal informado.
+func RemediationFactorForLevel(level domain.RemediationLevel) float64 {
+	switch level {
+	case domain.RemediationLevelOfficialFix:
+		return remediationFactorOfficialFix
+	case domain.RemediationLevelTemporaryFix:
+		return remediationFactorTemporaryFix
+	case domain.RemediationLevelWorkaround:
+		return remediationFactorWorkaround
+	default:
+		return remediationFactorUnavailable
+	}
 }
 
 // CalculateFindingRisk aplica la fórmula:  riesgo = L × R x exposicion × impacto

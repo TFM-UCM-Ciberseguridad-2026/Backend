@@ -2,6 +2,7 @@ package neo4j
 
 import (
 	"context"
+	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
@@ -134,4 +135,59 @@ func (r *findingRepo) GetByID(ctx context.Context, id int64) (*domain.Finding, e
 func (r *findingRepo) DeleteByID(ctx context.Context, id int64) error {
 	query := `MATCH (n:Finding {id: $id}) DETACH DELETE n`
 	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
+}
+
+// ApplyRemediationByInstallationAndCVE fija el factor de remediación y el estado de los
+// findings abiertos de una instalación que apuntan al CVE indicado.
+//
+// Cuando el factor es 0 (parche oficial) pone además risk_score y priority_score a cero:
+// el finding sale de las agregaciones, y sin esta limpieza conservaría indefinidamente la
+// última puntuación calculada, que se seguiría mostrando en la API y en el front.
+func (r *findingRepo) ApplyRemediationByInstallationAndCVE(ctx context.Context, installationID, cveID string, remediationFactor float64, status string) ([]int64, error) {
+	query := `
+		MATCH (:SoftwareInstallation {id: $installation_id})-[:HAS_FINDING]->(f:Finding)
+		      -[:OF_VULNERABILITY]->(:Vulnerability {cve_id: $cve_id})
+		SET f.remediation_factor = $remediation_factor,
+		    f.status             = $status,
+		    f.last_seen          = $now
+		FOREACH (_ IN CASE WHEN $remediation_factor = 0.0 THEN [1] ELSE [] END |
+		    SET f.risk_score     = 0.0,
+		        f.priority_score = 0.0,
+		        f.resolved_at    = $now
+		)
+		RETURN f.id AS finding_id
+	`
+
+	params := map[string]any{
+		"installation_id":    installationID,
+		"cve_id":             cveID,
+		"remediation_factor": remediationFactor,
+		"status":             status,
+		"now":                time.Now().UTC(),
+	}
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, params)
+		if err != nil {
+			return nil, err
+		}
+
+		ids := make([]int64, 0)
+		for result.Next(ctx) {
+			id, _ := result.Record().Get("finding_id")
+			ids = append(ids, toInt64(id))
+		}
+		return ids, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []int64{}, nil
+	}
+	return res.([]int64), nil
 }

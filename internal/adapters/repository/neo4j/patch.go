@@ -2,6 +2,7 @@ package neo4j
 
 import (
 	"context"
+	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
@@ -9,6 +10,104 @@ import (
 
 type patchRepo struct {
 	driver neo4j.DriverWithContext
+}
+
+// SaveApplication declara que un parche se ha aplicado sobre una instalación.
+//
+// Usa MERGE sobre la relación para que volver a declarar el mismo parche en la misma
+// instalación actualice la arista en lugar de duplicarla: una instalación tiene una
+// única situación actual respecto a un parche dado.
+func (r *patchRepo) SaveApplication(ctx context.Context, a *domain.AppliedPatch) error {
+	query := `
+		MATCH (p:Patch {id: $patch_id})
+		MATCH (si:SoftwareInstallation {id: $installation_id})
+		MERGE (p)-[rel:APPLIED_TO]->(si)
+		SET rel.applied_at         = $applied_at,
+		    rel.applied_by         = $applied_by,
+		    rel.remediation_level  = $remediation_level,
+		    rel.remediation_factor = $remediation_factor,
+		    rel.cve_id             = $cve_id,
+		    rel.notes              = $notes
+	`
+	// Sin RETURN: executeWriteUpdateHelper añade el suyo para detectar si el MATCH
+	// encontró algo, y dos RETURN seguidos son un error de sintaxis en Cypher.
+
+	params := map[string]any{
+		"patch_id":           a.PatchID,
+		"installation_id":    a.InstallationID,
+		"applied_at":         a.AppliedAt,
+		"applied_by":         a.AppliedBy,
+		"remediation_level":  string(a.RemediationLevel),
+		"remediation_factor": a.RemediationFactor,
+		"cve_id":             a.CVEID,
+		"notes":              a.Notes,
+	}
+
+	// executeWriteUpdateHelper falla si el MATCH no encuentra el parche o la
+	// instalación, que es justo lo que queremos: declarar sobre algo inexistente
+	// es un error, no una operación silenciosa.
+	return executeWriteUpdateHelper(ctx, r.driver, query, params)
+}
+
+// GetApplicationsByInstallation devuelve el histórico de parches aplicados sobre una
+// instalación, del más reciente al más antiguo.
+func (r *patchRepo) GetApplicationsByInstallation(ctx context.Context, installationID string) ([]domain.AppliedPatch, error) {
+	query := `
+		MATCH (p:Patch)-[rel:APPLIED_TO]->(:SoftwareInstallation {id: $installation_id})
+		RETURN p.id                AS patch_id,
+		       p.url               AS patch_url,
+		       p.description       AS patch_description,
+		       rel.applied_at         AS applied_at,
+		       rel.applied_by         AS applied_by,
+		       rel.remediation_level  AS remediation_level,
+		       rel.remediation_factor AS remediation_factor,
+		       rel.cve_id             AS cve_id,
+		       rel.notes              AS notes
+		ORDER BY applied_at DESC
+	`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"installation_id": installationID})
+		if err != nil {
+			return nil, err
+		}
+
+		applications := make([]domain.AppliedPatch, 0)
+		for result.Next(ctx) {
+			props := result.Record().AsMap()
+
+			appliedAt := time.Time{}
+			if t, ok := props["applied_at"].(time.Time); ok {
+				appliedAt = t
+			}
+
+			applications = append(applications, domain.AppliedPatch{
+				PatchID:           getInt64(props, "patch_id"),
+				InstallationID:    installationID,
+				CVEID:             getString(props, "cve_id"),
+				AppliedAt:         appliedAt,
+				AppliedBy:         getString(props, "applied_by"),
+				RemediationLevel:  domain.RemediationLevel(getString(props, "remediation_level")),
+				RemediationFactor: getFloat64(props, "remediation_factor"),
+				Notes:             getString(props, "notes"),
+				PatchURL:          getString(props, "patch_url"),
+				PatchDescription:  getString(props, "patch_description"),
+			})
+		}
+
+		return applications, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.AppliedPatch{}, nil
+	}
+	return res.([]domain.AppliedPatch), nil
 }
 
 func (r *patchRepo) Save(ctx context.Context, p *domain.Patch) error {

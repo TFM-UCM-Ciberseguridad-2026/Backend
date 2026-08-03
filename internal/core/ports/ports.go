@@ -42,10 +42,26 @@ type FindingPort interface {
 	Update(ctx context.Context, finding *domain.Finding) error
 	GetByID(ctx context.Context, id int64) (*domain.Finding, error)
 	DeleteByID(ctx context.Context, id int64) error
+
+	// ApplyRemediationByInstallationAndCVE fija el factor de remediación y el estado de
+	// todos los findings abiertos de una instalación que apunten al CVE indicado.
+	//
+	// Cuando el factor es 0 (parche oficial) también pone a cero risk_score y
+	// priority_score: el finding queda fuera de las agregaciones, así que sin esta
+	// limpieza conservaría para siempre la última puntuación calculada.
+	//
+	// Devuelve los IDs de los findings actualizados.
+	ApplyRemediationByInstallationAndCVE(ctx context.Context, installationID, cveID string, remediationFactor float64, status string) ([]int64, error)
 }
 
 type RemediationPort interface {
 	UpdateFixedVersionByCVE(ctx context.Context, cveID string, fixedVersion string) (int, error)
+
+	// ApplyByInstallationAndCVE sincroniza estado y fecha de aplicación en las
+	// remediaciones colgadas de los findings de una instalación para un CVE concreto.
+	// Un appliedAt nulo limpia la fecha, para poder revertir una declaración previa.
+	// Devuelve cuántas remediaciones se actualizaron.
+	ApplyByInstallationAndCVE(ctx context.Context, installationID, cveID, status string, appliedAt *time.Time) (int, error)
 
 	Save(ctx context.Context, remediation *domain.Remediation) error
 	Update(ctx context.Context, remediation *domain.Remediation) error
@@ -87,6 +103,15 @@ type PatchPort interface {
 
 	// GetByVulnerability devuelve todos los parches que corrigen un CVE concreto.
 	GetByVulnerability(ctx context.Context, cveID string) ([]domain.Patch, error)
+
+	// SaveApplication declara que un parche se ha aplicado sobre una instalación,
+	// creando (Patch)-[:APPLIED_TO]->(SoftwareInstallation) con la fecha y el nivel
+	// de remediación. Repetir la declaración actualiza la arista existente.
+	SaveApplication(ctx context.Context, application *domain.AppliedPatch) error
+
+	// GetApplicationsByInstallation devuelve el histórico de parches aplicados sobre
+	// una instalación, del más reciente al más antiguo.
+	GetApplicationsByInstallation(ctx context.Context, installationID string) ([]domain.AppliedPatch, error)
 }
 
 type ProjectPort interface {
