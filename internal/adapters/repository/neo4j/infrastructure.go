@@ -24,7 +24,7 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	// Consulta de lectura optimizada para obtener los nodos y relaciones de la infraestructura (excluyendo TTPs y ThreatActors para no sobrecargar el grafo visual)
+	// Consulta de lectura optimizada para obtener los nodos, relaciones y mapeos TTP de la infraestructura
 	query := `
 		MATCH (n)
 		WHERE NOT n:ThreatActor AND NOT n:TTP
@@ -32,7 +32,9 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 		OPTIONAL MATCH (s)-[rel]->(t)
 		WHERE NOT s:ThreatActor AND NOT s:TTP AND NOT t:ThreatActor AND NOT t:TTP
 		WITH nodes, collect(case when rel is null then null else {id: elementId(rel), type: type(rel), source: elementId(s), target: elementId(t), properties: properties(rel)} end) AS relationships
-		RETURN nodes, [r in relationships WHERE r IS NOT NULL] AS relationships
+		OPTIONAL MATCH (ttp:TTP)-[:TARGETS_VULN]->(v:Vulnerability)
+		WITH nodes, relationships, collect(case when ttp is null or v is null then null else {ttp_id: coalesce(ttp.ttp_id, ttp.id), cve_id: coalesce(v.cve_id, v.id)} end) AS ttpMaps
+		RETURN nodes, [r in relationships WHERE r IS NOT NULL] AS relationships, [m in ttpMaps WHERE m IS NOT NULL] AS ttp_mappings
 	`
 
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
@@ -71,12 +73,51 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 					labels[i], _ = l.(string)
 				}
 				props, _ := nodeMap["properties"].(map[string]interface{})
+				if props == nil {
+					props = make(map[string]interface{})
+				}
 
 				graphData.Nodes = append(graphData.Nodes, domain.GraphNode{
 					ID:         id,
 					Labels:     labels,
 					Properties: props,
 				})
+			}
+		}
+	}
+
+	// Mapear TTPs encontradas en la infraestructura a las propiedades de los nodos Vulnerability
+	if ttpMapsRaw, ok := recordMap["ttp_mappings"].([]interface{}); ok {
+		cveToTTPs := make(map[string][]string)
+		for _, rawMap := range ttpMapsRaw {
+			if m, ok := rawMap.(map[string]interface{}); ok {
+				ttpID, _ := m["ttp_id"].(string)
+				cveID, _ := m["cve_id"].(string)
+				if ttpID != "" && cveID != "" {
+					cveToTTPs[cveID] = append(cveToTTPs[cveID], ttpID)
+				}
+			}
+		}
+
+		if len(cveToTTPs) > 0 {
+			for i := range graphData.Nodes {
+				n := &graphData.Nodes[i]
+				var cveID string
+				if n.Properties != nil {
+					if c, ok := n.Properties["cve_id"].(string); ok && c != "" {
+						cveID = c
+					} else if c, ok := n.Properties["id"].(string); ok && c != "" {
+						cveID = c
+					}
+				}
+				if cveID != "" {
+					if ttps, exists := cveToTTPs[cveID]; exists {
+						if n.Properties == nil {
+							n.Properties = make(map[string]interface{})
+						}
+						n.Properties["ttps"] = ttps
+					}
+				}
 			}
 		}
 	}
@@ -135,7 +176,7 @@ func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context,
 		     size(infraTTPs) AS totalInfraTTPs,
 		     size(matchedTTPs) AS matchedCount,
 		     [t IN matchedTTPs | t.name] AS matchedNames,
-		     [t IN matchedTTPs | t.id] AS matchedIDs
+		     [t IN matchedTTPs | coalesce(t.ttp_id, t.id)] AS matchedIDs
 		RETURN ta.id AS actor_id,
 		       ta.name AS actor_name,
 		       ta.origin AS origin,
