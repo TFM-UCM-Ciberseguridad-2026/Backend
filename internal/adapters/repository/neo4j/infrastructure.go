@@ -24,7 +24,7 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	// Consulta de lectura optimizada para obtener nodos y relaciones en una sola transacción
+	// Consulta de lectura optimizada para obtener los nodos, relaciones y mapeos TTP de la infraestructura
 	query := `
 		MATCH (n)
 		WHERE NOT n:ThreatActor AND NOT n:TTP
@@ -32,7 +32,9 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 		OPTIONAL MATCH (s)-[rel]->(t)
 		WHERE NOT s:ThreatActor AND NOT s:TTP AND NOT t:ThreatActor AND NOT t:TTP
 		WITH nodes, collect(case when rel is null then null else {id: elementId(rel), type: type(rel), source: elementId(s), target: elementId(t), properties: properties(rel)} end) AS relationships
-		RETURN nodes, [r in relationships WHERE r IS NOT NULL] AS relationships
+		OPTIONAL MATCH (ttp:TTP)-[:TARGETS_VULN]->(v:Vulnerability)
+		WITH nodes, relationships, collect(case when ttp is null or v is null then null else {ttp_id: coalesce(ttp.ttp_id, ttp.id), cve_id: coalesce(v.cve_id, v.id)} end) AS ttpMaps
+		RETURN nodes, [r in relationships WHERE r IS NOT NULL] AS relationships, [m in ttpMaps WHERE m IS NOT NULL] AS ttp_mappings
 	`
 
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
@@ -71,12 +73,51 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 					labels[i], _ = l.(string)
 				}
 				props, _ := nodeMap["properties"].(map[string]interface{})
+				if props == nil {
+					props = make(map[string]interface{})
+				}
 
 				graphData.Nodes = append(graphData.Nodes, domain.GraphNode{
 					ID:         id,
 					Labels:     labels,
 					Properties: props,
 				})
+			}
+		}
+	}
+
+	// Mapear TTPs encontradas en la infraestructura a las propiedades de los nodos Vulnerability
+	if ttpMapsRaw, ok := recordMap["ttp_mappings"].([]interface{}); ok {
+		cveToTTPs := make(map[string][]string)
+		for _, rawMap := range ttpMapsRaw {
+			if m, ok := rawMap.(map[string]interface{}); ok {
+				ttpID, _ := m["ttp_id"].(string)
+				cveID, _ := m["cve_id"].(string)
+				if ttpID != "" && cveID != "" {
+					cveToTTPs[cveID] = append(cveToTTPs[cveID], ttpID)
+				}
+			}
+		}
+
+		if len(cveToTTPs) > 0 {
+			for i := range graphData.Nodes {
+				n := &graphData.Nodes[i]
+				var cveID string
+				if n.Properties != nil {
+					if c, ok := n.Properties["cve_id"].(string); ok && c != "" {
+						cveID = c
+					} else if c, ok := n.Properties["id"].(string); ok && c != "" {
+						cveID = c
+					}
+				}
+				if cveID != "" {
+					if ttps, exists := cveToTTPs[cveID]; exists {
+						if n.Properties == nil {
+							n.Properties = make(map[string]interface{})
+						}
+						n.Properties["ttps"] = ttps
+					}
+				}
 			}
 		}
 	}
@@ -135,7 +176,7 @@ func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context,
 		     size(infraTTPs) AS totalInfraTTPs,
 		     size(matchedTTPs) AS matchedCount,
 		     [t IN matchedTTPs | t.name] AS matchedNames,
-		     [t IN matchedTTPs | t.id] AS matchedIDs
+		     [t IN matchedTTPs | coalesce(t.ttp_id, t.id)] AS matchedIDs
 		RETURN ta.id AS actor_id,
 		       ta.name AS actor_name,
 		       ta.origin AS origin,
@@ -469,4 +510,168 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 
 	return res.([]domain.ExploitationPath), nil
 }
+
+type nodeMatchTarget struct {
+	Label    string
+	MatchKey string
+	MatchVal interface{}
+}
+
+func normalizeProperties(props map[string]interface{}) map[string]interface{} {
+	if props == nil {
+		return make(map[string]interface{})
+	}
+	cleaned := make(map[string]interface{}, len(props))
+	for k, v := range props {
+		if floatVal, ok := v.(float64); ok {
+			if floatVal == float64(int64(floatVal)) {
+				cleaned[k] = int64(floatVal)
+				continue
+			}
+		}
+		cleaned[k] = v
+	}
+	return cleaned
+}
+
+// ImportGraphData procesa e ingesta dinámicamente un conjunto de nodos y relaciones en la base de datos Neo4j.
+func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.GraphData) error {
+	if data == nil || len(data.Nodes) == 0 {
+		return nil
+	}
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		// Mapa de identificador del JSON -> elementId asignado por Neo4j
+		nodeLookup := make(map[string]string)
+
+		// 1. Ingestar nodos
+		for _, node := range data.Nodes {
+			if len(node.Labels) == 0 {
+				continue
+			}
+
+			// Determinar etiqueta primaria y construir la cláusula Cypher
+			primaryLabel := node.Labels[0]
+			for _, l := range node.Labels {
+				if l != "BaseNode" && l != "Persistable" {
+					primaryLabel = l
+					break
+				}
+			}
+
+			props := normalizeProperties(node.Properties)
+
+			// Asegurar que existe una clave ID única
+			var matchKey string
+			var matchVal interface{}
+
+			if idVal, exists := props["id"]; exists && idVal != nil {
+				matchKey = "id"
+				matchVal = idVal
+			} else if cveVal, exists := props["cve_id"]; exists && cveVal != nil {
+				matchKey = "cve_id"
+				matchVal = cveVal
+			} else if ttpVal, exists := props["ttp_id"]; exists && ttpVal != nil {
+				matchKey = "ttp_id"
+				matchVal = ttpVal
+			} else if actorVal, exists := props["actor_id"]; exists && actorVal != nil {
+				matchKey = "actor_id"
+				matchVal = actorVal
+			} else {
+				matchKey = "id"
+				matchVal = node.ID
+				props["id"] = node.ID
+			}
+
+			// Construir query MERGE dinámico y aplicar todas las etiquetas del nodo
+			var labelStr strings.Builder
+			for _, l := range node.Labels {
+				labelStr.WriteString(":")
+				labelStr.WriteString(l)
+			}
+
+			query := fmt.Sprintf(`
+				MERGE (n:%s {%s: $matchVal})
+				SET n%s, n += $properties
+				RETURN elementId(n) AS elemId
+			`, primaryLabel, matchKey, labelStr.String())
+
+			res, err := tx.Run(ctx, query, map[string]interface{}{
+				"matchVal":   matchVal,
+				"properties": props,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("error al importar nodo %s (%v): %w", primaryLabel, matchVal, err)
+			}
+
+			if res.Next(ctx) {
+				if elemIdVal, ok := res.Record().Get("elemId"); ok && elemIdVal != nil {
+					elemIdStr := fmt.Sprint(elemIdVal)
+					if node.ID != "" {
+						nodeLookup[node.ID] = elemIdStr
+					}
+					if matchValStr := fmt.Sprint(matchVal); matchValStr != "" {
+						nodeLookup[matchValStr] = elemIdStr
+					}
+				}
+			}
+		}
+
+		// 2. Ingestar relaciones
+		for _, rel := range data.Relationships {
+			if rel.Type == "" || rel.Source == "" || rel.Target == "" {
+				continue
+			}
+
+			relProps := normalizeProperties(rel.Properties)
+
+			sourceElemId, sourceOk := nodeLookup[rel.Source]
+			targetElemId, targetOk := nodeLookup[rel.Target]
+
+			if sourceOk && targetOk {
+				query := fmt.Sprintf(`
+					MATCH (s), (t)
+					WHERE elementId(s) = $sourceElemId AND elementId(t) = $targetElemId
+					MERGE (s)-[r:%s]->(t)
+					SET r += $properties
+				`, rel.Type)
+
+				_, err := tx.Run(ctx, query, map[string]interface{}{
+					"sourceElemId": sourceElemId,
+					"targetElemId": targetElemId,
+					"properties":   relProps,
+				})
+				if err != nil {
+					fmt.Printf("Aviso: no se pudo relacionar %s -[%s]-> %s: %v\n", rel.Source, rel.Type, rel.Target, err)
+				}
+			} else {
+				// Fallback si origen o destino no estaban en la lista de nodos importados
+				query := fmt.Sprintf(`
+					MATCH (s), (t)
+					WHERE (elementId(s) = $source OR s.id = $source OR toString(s.id) = $source OR s.cve_id = $source OR s.ttp_id = $source)
+					  AND (elementId(t) = $target OR t.id = $target OR toString(t.id) = $target OR t.cve_id = $target OR t.ttp_id = $target)
+					MERGE (s)-[r:%s]->(t)
+					SET r += $properties
+				`, rel.Type)
+
+				_, err := tx.Run(ctx, query, map[string]interface{}{
+					"source":     rel.Source,
+					"target":     rel.Target,
+					"properties": relProps,
+				})
+				if err != nil {
+					fmt.Printf("Aviso: no se pudo relacionar %s -[%s]-> %s: %v\n", rel.Source, rel.Type, rel.Target, err)
+				}
+			}
+		}
+
+		return nil, nil
+	})
+
+	return err
+}
+
 
