@@ -271,3 +271,97 @@ func (r *endpointRepo) GetNodeInfo(ctx context.Context, label string, propertyKe
 
 	return props, nil
 }
+
+// SaveIPs reemplaza las direcciones IP de un endpoint por las indicadas, modelándolas
+// como nodos :IPAddress conectados vía (:Endpoint)-[:HAS_IP]->(:IPAddress).
+// Se borran y recrean en bloque porque el formulario del frontend sustituye el
+// conjunto completo de IPs en cada guardado, no las edita una a una.
+func (r *endpointRepo) SaveIPs(ctx context.Context, endpointID int64, ips []domain.EndpointIP) error {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		// 1. Eliminar IPs previas del endpoint
+		if _, err := tx.Run(ctx, `
+			MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_IP]->(ip:IPAddress)
+			DETACH DELETE ip
+		`, map[string]any{"endpoint_id": endpointID}); err != nil {
+			return nil, err
+		}
+
+		// 2. Crear las nuevas
+		for _, entry := range ips {
+			var vlan any
+			if entry.VLANID > 0 {
+				vlan = entry.VLANID
+			}
+			if _, err := tx.Run(ctx, `
+				MATCH (e:Endpoint {id: $endpoint_id})
+				CREATE (ip:IPAddress {ip: $ip, vlan_id: $vlan_id})
+				MERGE (e)-[:HAS_IP]->(ip)
+			`, map[string]any{
+				"endpoint_id": endpointID,
+				"ip":          entry.IP,
+				"vlan_id":     vlan,
+			}); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
+	})
+
+	return err
+}
+
+// GetIPs devuelve las direcciones IP asociadas a un endpoint.
+func (r *endpointRepo) GetIPs(ctx context.Context, endpointID int64) ([]domain.EndpointIP, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, `
+			MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_IP]->(ip:IPAddress)
+			RETURN ip.ip AS ip, ip.vlan_id AS vlan_id
+		`, map[string]any{"endpoint_id": endpointID})
+		if err != nil {
+			return nil, err
+		}
+
+		ips := make([]domain.EndpointIP, 0)
+		for result.Next(ctx) {
+			rec := result.Record()
+			ipVal, _ := rec.Get("ip")
+			vlanVal, _ := rec.Get("vlan_id")
+			ips = append(ips, domain.EndpointIP{
+				IP:     getStringAny(ipVal),
+				VLANID: getInt64Any(vlanVal),
+			})
+		}
+		return ips, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.EndpointIP{}, nil
+	}
+	return res.([]domain.EndpointIP), nil
+}
+
+// getStringAny/getInt64Any convierten valores any sueltos (no un map[string]any) de
+// resultados Neo4j. Los helpers getString/getInt64 ya existentes en db_helpers.go
+// operan sobre map[string]any, no sobre un valor individual, de ahí este par extra.
+func getStringAny(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func getInt64Any(v any) int64 {
+	if i, ok := v.(int64); ok {
+		return i
+	}
+	return 0
+}

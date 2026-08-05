@@ -474,3 +474,56 @@ func (h *OrchestratorHandler) GetAppliedPatchHistory(w http.ResponseWriter, r *h
 		"applied_patches": history,
 	}, http.StatusOK)
 }
+
+
+// createNetworkRequest es el DTO de entrada para POST /api/networks.
+// Ya no lleva endpoint_id: la red se crea de forma independiente y el orchestrator
+// enlaza automáticamente los endpoints compatibles por CIDR + VLAN.
+type createNetworkRequest struct {
+	Nombre      string `json:"nombre"`
+	CIDR        string `json:"cidr"`
+	Gateway     string `json:"gateway"`
+	VLANID      int64  `json:"vlan_id"`
+	Descripcion string `json:"descripcion"`
+}
+
+// POST /api/networks
+// Crea una red de forma independiente (sin endpoint asociado) y enlaza automáticamente
+// los endpoints cuya IP caiga dentro del CIDR y, si se indica VLAN, la compartan.
+func (h *OrchestratorHandler) CreateNetwork(w http.ResponseWriter, r *http.Request) {
+	var req createNetworkRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendError(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if req.Nombre == "" || req.CIDR == "" || req.Gateway == "" {
+		sendError(w, "nombre, cidr y gateway son obligatorios", http.StatusBadRequest)
+		return
+	}
+
+	network := domain.Network{
+		Nombre:      req.Nombre,
+		CIDR:        req.CIDR,
+		Gateway:     req.Gateway,
+		VLANID:      req.VLANID,
+		Descripcion: req.Descripcion,
+	}
+
+	networkID, linked, err := h.orchestrator.CreateNetwork(r.Context(), &network)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]any{
+		"status":           "success",
+		"network_id":       networkID,
+		"nombre":           req.Nombre,
+		"cidr":             req.CIDR,
+		"gateway":          req.Gateway,
+		"vlan_id":          req.VLANID,
+		"descripcion":      req.Descripcion,
+		"linked_endpoints": linked,
+	}, http.StatusCreated)
+}
