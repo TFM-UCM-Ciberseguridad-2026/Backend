@@ -157,6 +157,11 @@ func (o *Orchestrator) CreateProject(ctx context.Context, project *domain.Projec
 	return o.projectPort.Save(ctx, project)
 }
 
+// DeleteProject elimina un proyecto y su infraestructura asociada en cascada.
+func (o *Orchestrator) DeleteProject(ctx context.Context, projectID int64) error {
+	return o.projectPort.DeleteByID(ctx, projectID)
+}
+
 // AddEndpointToProject guarda un nuevo endpoint y lo vincula a un proyecto.
 func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64, endpoint *domain.Endpoint) error {
 	if endpoint.EndpointID == 0 {
@@ -322,6 +327,14 @@ func (o *Orchestrator) GetInfrastructure(ctx context.Context) (*domain.GraphData
 	}
 
 	return graph, nil
+}
+
+// ImportInfrastructure importa dinámicamente un conjunto de nodos y relaciones al grafo.
+func (o *Orchestrator) ImportInfrastructure(ctx context.Context, data *domain.GraphData) error {
+	if data == nil {
+		return fmt.Errorf("los datos de infraestructura a importar son nulos")
+	}
+	return o.infraPort.ImportGraphData(ctx, data)
 }
 
 // GetTopAPTs obtiene la lista rankeada de Actores de Amenaza (APT) que más TTPs comparten

@@ -155,6 +155,16 @@ func (r *projectRepo) GetByID(ctx context.Context, id int64) (*domain.Project, e
 }
 
 func (r *projectRepo) DeleteByID(ctx context.Context, id int64) error {
-	query := `MATCH (n:Project {id: $id}) DETACH DELETE n`
+	query := `
+		MATCH (p:Project {id: $id})
+		OPTIONAL MATCH (p)-[:HAS_ENDPOINT]->(e:Endpoint)
+		OPTIONAL MATCH (e)-[:CONNECTED_TO|HAS_HARDWARE|HOSTS|HAS_INSTALLATION]->(sub1)
+		OPTIONAL MATCH (sub1)-[:HAS_INSTALLATION]->(sub2)
+		OPTIONAL MATCH (sub1)-[:HAS_FINDING]->(f1:Finding)
+		OPTIONAL MATCH (sub2)-[:HAS_FINDING]->(f2:Finding)
+		OPTIONAL MATCH (f1)-[:HAS_REMEDIATION]->(r1:Remediation)
+		OPTIONAL MATCH (f2)-[:HAS_REMEDIATION]->(r2:Remediation)
+		DETACH DELETE p, e, sub1, sub2, f1, f2, r1, r2
+	`
 	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
 }

@@ -54,6 +54,23 @@ func (h *OrchestratorHandler) CreateProject(w http.ResponseWriter, r *http.Reque
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
 }
 
+// DELETE /api/projects/{id}
+func (h *OrchestratorHandler) DeleteProject(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	projectID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		sendError(w, "ID de proyecto inválido: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := h.orchestrator.DeleteProject(r.Context(), projectID); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]string{"status": "success", "message": "Proyecto eliminado con éxito"}, http.StatusOK)
+}
+
 // POST /api/projects/{id}/endpoints
 func (h *OrchestratorHandler) AddEndpointToProject(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
@@ -195,6 +212,22 @@ func (h *OrchestratorHandler) GetInfrastructure(w http.ResponseWriter, r *http.R
 		return
 	}
 	sendJSON(w, graph, http.StatusOK)
+}
+
+// POST /api/infrastructure/import
+func (h *OrchestratorHandler) ImportInfrastructure(w http.ResponseWriter, r *http.Request) {
+	var payload domain.GraphData
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := h.orchestrator.ImportInfrastructure(r.Context(), &payload); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]string{"status": "success", "message": "Infraestructura importada con éxito"}, http.StatusCreated)
 }
 
 // GET /api/infrastructure/top-apts

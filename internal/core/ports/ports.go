@@ -188,6 +188,7 @@ type InfrastructurePort interface {
 	GetGraphData(ctx context.Context) (*domain.GraphData, error)
 	GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int) ([]domain.APTThreatResult, error)
 	GetExploitationPaths(ctx context.Context) ([]domain.ExploitationPath, error)
+	ImportGraphData(ctx context.Context, data *domain.GraphData) error
 }
 
 // ContainerPort define las operaciones para gestionar imágenes y contenedores.
