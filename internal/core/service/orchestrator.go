@@ -175,7 +175,24 @@ func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64
 	if err := o.endpointPort.Save(ctx, endpoint); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
-	return o.relationshipPort.LinkProjectToEndpoint(ctx, projectID, endpoint.EndpointID)
+	if err := o.relationshipPort.LinkProjectToEndpoint(ctx, projectID, endpoint.EndpointID); err != nil {
+		return err
+	}
+
+	// Persistir las IPs del endpoint (si el formulario envió alguna). Se hace tras
+	// tener el EndpointID definitivo, ya que SaveIPs cuelga los nodos :IPAddress de él.
+	if len(endpoint.IPs) > 0 {
+		if err := o.endpointPort.SaveIPs(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
+			return fmt.Errorf("error guardando IPs del endpoint: %w", err)
+		}
+		if o.networkPort != nil {
+			if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
+				return fmt.Errorf("error enlazando endpoint a las redes coincidentes: %w", err)
+			}
+		}
+	}
+
+	return nil
 }
 
 // AssociateHardwareToEndpoint guarda componentes de hardware y los enlaza a un endpoint.
@@ -208,6 +225,32 @@ func (o *Orchestrator) AssociateNetworkToEndpoint(ctx context.Context, endpointI
 		return err
 	}
 	return o.relationshipPort.LinkEndpointToNetwork(ctx, endpointID, network.NetworkID)
+}
+
+
+// CreateNetwork crea una red de forma independiente (sin endpoint asociado explícito) y
+// enlaza automáticamente los endpoints cuya IP caiga dentro del CIDR y, si la red define
+// VLAN, compartan esa misma VLAN. Devuelve el ID de la red creada y cuántos endpoints se
+// enlazaron.
+func (o *Orchestrator) CreateNetwork(ctx context.Context, network *domain.Network) (int64, int, error) {
+	if network.NetworkID == 0 {
+		id, err := o.nextNodeID(ctx, "Network")
+		if err != nil {
+			return 0, 0, fmt.Errorf("error generando ID de red: %w", err)
+		}
+		network.NetworkID = id
+	}
+
+	if err := o.networkPort.Save(ctx, network); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+		return 0, 0, err
+	}
+
+	linked, err := o.networkPort.LinkMatchingEndpoints(ctx, network.NetworkID, network.CIDR, network.VLANID)
+	if err != nil {
+		return network.NetworkID, 0, fmt.Errorf("error enlazando endpoints a la red: %w", err)
+	}
+
+	return network.NetworkID, linked, nil
 }
 
 // RegisterSoftwareInstallation guarda la definición del software, la instancia instalada,

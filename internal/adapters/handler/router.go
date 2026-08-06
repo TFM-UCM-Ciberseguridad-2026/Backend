@@ -35,6 +35,8 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 
 	/* POST /api/endpoints/{id}/networks: Asocia direccionamiento y red a un endpoint. */
 	mux.HandleFunc("POST /api/endpoints/{id}/networks", h.AssociateNetworkToEndpoint)
+	/* POST /api/networks: Crea una red de forma independiente; el orchestrator enlaza automáticamente los endpoints cuya IP caiga en el CIDR y compartan VLAN. */
+	mux.HandleFunc("POST /api/networks", h.CreateNetwork)
 
 	/* POST /api/endpoints/{id}/installations: Registra la instalación de un software en un endpoint. */
 	mux.HandleFunc("POST /api/endpoints/{id}/installations", h.RegisterSoftwareInstallation)

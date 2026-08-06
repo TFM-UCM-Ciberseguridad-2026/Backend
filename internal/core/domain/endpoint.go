@@ -42,6 +42,7 @@ type Endpoint struct {
 	Status          string `json:"status"`
 	InternetExposed bool   `json:"internet_exposed"`
 	Environment     string `json:"environment"`
+	IPs []EndpointIP `json:"ips,omitempty"`
 
 	// Security requirements CIA del endpoint (Low/Medium/High), usados como CR/IR/AR
 	// en el cálculo del CVSS environmental de cada finding asociado.
@@ -70,4 +71,9 @@ type Endpoint struct {
 	PriorityDriverCVEID          string  `json:"priority_driver_cve_id"`
 
 	RiskySoftwareCount int `json:"risky_software_count"`
+}
+
+type EndpointIP struct {
+	IP     string `json:"ip"`
+	VLANID int64  `json:"vlan_id"`
 }

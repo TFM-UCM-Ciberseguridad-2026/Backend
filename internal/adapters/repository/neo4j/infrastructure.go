@@ -27,10 +27,11 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 	// Consulta de lectura optimizada para obtener los nodos, relaciones y mapeos TTP de la infraestructura
 	query := `
 		MATCH (n)
-		WHERE NOT n:ThreatActor AND NOT n:TTP
+		WHERE NOT n:ThreatActor AND NOT n:TTP AND NOT n:IPAddress
 		WITH collect({id: elementId(n), labels: labels(n), properties: properties(n)}) AS nodes
 		OPTIONAL MATCH (s)-[rel]->(t)
-		WHERE NOT s:ThreatActor AND NOT s:TTP AND NOT t:ThreatActor AND NOT t:TTP
+		WHERE NOT s:ThreatActor AND NOT s:TTP AND NOT s:IPAddress
+		  AND NOT t:ThreatActor AND NOT t:TTP AND NOT t:IPAddress
 		WITH nodes, collect(case when rel is null then null else {id: elementId(rel), type: type(rel), source: elementId(s), target: elementId(t), properties: properties(rel)} end) AS relationships
 		OPTIONAL MATCH (ttp:TTP)-[:TARGETS_VULN]->(v:Vulnerability)
 		WITH nodes, relationships, collect(case when ttp is null or v is null then null else {ttp_id: coalesce(ttp.ttp_id, ttp.id), cve_id: coalesce(v.cve_id, v.id)} end) AS ttpMaps
