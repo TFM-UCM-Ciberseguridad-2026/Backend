@@ -185,6 +185,11 @@ func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64
 		if err := o.endpointPort.SaveIPs(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
 			return fmt.Errorf("error guardando IPs del endpoint: %w", err)
 		}
+		if o.networkPort != nil {
+			if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
+				return fmt.Errorf("error enlazando endpoint a las redes coincidentes: %w", err)
+			}
+		}
 	}
 
 	return nil

@@ -91,6 +91,7 @@ type NetworkPort interface {
 	GetByID(ctx context.Context, id int64) (*domain.Network, error)
 	DeleteByID(ctx context.Context, id int64) error
 	LinkMatchingEndpoints(ctx context.Context, networkID int64, cidr string, vlanID int64) (int, error)
+	LinkEndpointToMatchingNetworks(ctx context.Context, endpointID int64, ips []domain.EndpointIP) (int, error)
 }
 
 type PatchPort interface {

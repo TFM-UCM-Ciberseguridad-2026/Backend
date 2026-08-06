@@ -3,6 +3,7 @@ package neo4j
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
@@ -283,7 +284,8 @@ func (r *endpointRepo) SaveIPs(ctx context.Context, endpointID int64, ips []doma
 	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		// 1. Eliminar IPs previas del endpoint
 		if _, err := tx.Run(ctx, `
-			MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_IP]->(ip:IPAddress)
+			MATCH (e:Endpoint)-[:HAS_IP]->(ip:IPAddress)
+			WHERE toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id)
 			DETACH DELETE ip
 		`, map[string]any{"endpoint_id": endpointID}); err != nil {
 			return nil, err
@@ -296,7 +298,8 @@ func (r *endpointRepo) SaveIPs(ctx context.Context, endpointID int64, ips []doma
 				vlan = entry.VLANID
 			}
 			if _, err := tx.Run(ctx, `
-				MATCH (e:Endpoint {id: $endpoint_id})
+				MATCH (e:Endpoint)
+				WHERE toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id)
 				CREATE (ip:IPAddress {ip: $ip, vlan_id: $vlan_id})
 				MERGE (e)-[:HAS_IP]->(ip)
 			`, map[string]any{
@@ -320,7 +323,8 @@ func (r *endpointRepo) GetIPs(ctx context.Context, endpointID int64) ([]domain.E
 
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		result, err := tx.Run(ctx, `
-			MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_IP]->(ip:IPAddress)
+			MATCH (e:Endpoint)-[:HAS_IP]->(ip:IPAddress)
+			WHERE toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id)
 			RETURN ip.ip AS ip, ip.vlan_id AS vlan_id
 		`, map[string]any{"endpoint_id": endpointID})
 		if err != nil {
@@ -353,15 +357,41 @@ func (r *endpointRepo) GetIPs(ctx context.Context, endpointID int64) ([]domain.E
 // resultados Neo4j. Los helpers getString/getInt64 ya existentes en db_helpers.go
 // operan sobre map[string]any, no sobre un valor individual, de ahí este par extra.
 func getStringAny(v any) string {
+	if v == nil {
+		return ""
+	}
 	if s, ok := v.(string); ok {
 		return s
 	}
-	return ""
+	return fmt.Sprint(v)
 }
 
 func getInt64Any(v any) int64 {
-	if i, ok := v.(int64); ok {
-		return i
+	if v == nil {
+		return 0
 	}
-	return 0
+	switch val := v.(type) {
+	case int64:
+		return val
+	case int:
+		return int64(val)
+	case int32:
+		return int64(val)
+	case float64:
+		return int64(val)
+	case float32:
+		return int64(val)
+	case string:
+		i, _ := strconv.ParseInt(val, 10, 64)
+		return i
+	default:
+		valStr := fmt.Sprint(val)
+		if i, err := strconv.ParseInt(valStr, 10, 64); err == nil {
+			return i
+		}
+		if f, err := strconv.ParseFloat(valStr, 64); err == nil {
+			return int64(f)
+		}
+		return 0
+	}
 }
