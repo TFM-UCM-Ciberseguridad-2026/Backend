@@ -67,8 +67,21 @@ func (r *softwareRepo) GetByID(ctx context.Context, id int64) (*domain.Software,
 }
 
 func (r *softwareRepo) DeleteByID(ctx context.Context, id int64) error {
-	query := `MATCH (n:Software {id: $id}) DETACH DELETE n`
-	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
+	query := `
+		MATCH (n:Software)
+		WHERE toString(n.id) = toString($id) OR elementId(n) = toString($id)
+		OPTIONAL MATCH (si:SoftwareInstallation)-[:INSTANCE_OF]->(n)
+		DETACH DELETE n, si
+	`
+	_ = executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
+
+	cleanupQuery := `
+		MATCH (n)
+		WHERE (n:Software OR n:Network OR n:Hardware OR n:IPAddress OR n:SoftwareInstallation OR n:Finding OR n:Remediation OR n:Exploit OR n:Patch OR n:Container OR n:ContainerImage OR n:Vulnerability)
+		  AND NOT EXISTS((n)-[*1..5]-(:Endpoint)) AND NOT EXISTS((n)-[*1..5]-(:Project))
+		DETACH DELETE n
+	`
+	return executeWriteHelper(ctx, r.driver, cleanupQuery, nil)
 }
 
 // ==========================================
@@ -232,6 +245,18 @@ func (r *softwareInstallationRepo) GetByID(ctx context.Context, id string) (*dom
 }
 
 func (r *softwareInstallationRepo) DeleteByID(ctx context.Context, id string) error {
-	query := `MATCH (n:SoftwareInstallation {id: $id}) DETACH DELETE n`
-	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
+	query := `
+		MATCH (n:SoftwareInstallation)
+		WHERE toString(n.id) = toString($id) OR toString(n.installation_id) = toString($id) OR elementId(n) = $id
+		DETACH DELETE n
+	`
+	_ = executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
+
+	cleanupQuery := `
+		MATCH (n)
+		WHERE (n:Software OR n:Network OR n:Hardware OR n:IPAddress OR n:SoftwareInstallation OR n:Finding OR n:Remediation OR n:Exploit OR n:Patch OR n:Container OR n:ContainerImage OR n:Vulnerability)
+		  AND NOT EXISTS((n)-[*1..5]-(:Endpoint)) AND NOT EXISTS((n)-[*1..5]-(:Project))
+		DETACH DELETE n
+	`
+	return executeWriteHelper(ctx, r.driver, cleanupQuery, nil)
 }

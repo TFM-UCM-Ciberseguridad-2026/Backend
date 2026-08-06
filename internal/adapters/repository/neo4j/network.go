@@ -2,7 +2,6 @@ package neo4j
 
 import (
 	"context"
-	"fmt"
 	"net"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -70,17 +69,32 @@ func (r *networkRepo) GetByID(ctx context.Context, id int64) (*domain.Network, e
 }
 
 func (r *networkRepo) DeleteByID(ctx context.Context, id int64) error {
-	query := `MATCH (n:Network {id: $id}) DETACH DELETE n`
-	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
+	query := `
+		MATCH (n:Network)
+		WHERE toString(n.id) = toString($id) OR elementId(n) = toString($id)
+		DETACH DELETE n
+	`
+	_ = executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
+
+	cleanupQuery := `
+		MATCH (n)
+		WHERE (n:Software OR n:Network OR n:Hardware OR n:IPAddress OR n:SoftwareInstallation OR n:Finding OR n:Remediation OR n:Exploit OR n:Patch OR n:Container OR n:ContainerImage OR n:Vulnerability)
+		  AND NOT EXISTS((n)-[*1..5]-(:Endpoint)) AND NOT EXISTS((n)-[*1..5]-(:Project))
+		DETACH DELETE n
+	`
+	return executeWriteHelper(ctx, r.driver, cleanupQuery, nil)
 }
 
 // LinkMatchingEndpoints recorre todos los endpoints con IPs registradas y conecta
 // los que caen dentro del CIDR de la red y, si la red define VLAN,
 // comparten esa misma VLAN. Devuelve cuántos endpoints se enlazaron.
 func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64, cidr string, vlanID int64) (int, error) {
-	_, ipNet, err := net.ParseCIDR(cidr)
-	if err != nil {
-		return 0, fmt.Errorf("CIDR inválido: %w", err)
+	var ipNet *net.IPNet
+	if cidr != "" {
+		_, ipNet, _ = net.ParseCIDR(cidr)
+	}
+	if ipNet == nil && vlanID <= 0 {
+		return 0, nil
 	}
 
 	readSession := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
@@ -105,15 +119,21 @@ func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64
 			endpointIDVal, _ := rec.Get("endpoint_id")
 			ipVal, _ := rec.Get("ip")
 			vlanVal, _ := rec.Get("vlan_id")
+			epVlan := getInt64Any(vlanVal)
 
-			parsedIP := net.ParseIP(getStringAny(ipVal))
-			if parsedIP == nil || !ipNet.Contains(parsedIP) {
-				continue
+			matched := false
+			if vlanID > 0 && epVlan == vlanID {
+				matched = true
+			} else if ipNet != nil {
+				if parsedIP := net.ParseIP(getStringAny(ipVal)); parsedIP != nil && ipNet.Contains(parsedIP) {
+					if vlanID == 0 || epVlan == vlanID {
+						matched = true
+					}
+				}
 			}
-			if vlanID > 0 && getInt64Any(vlanVal) != vlanID {
-				continue
+			if matched {
+				matches = append(matches, candidate{endpointID: getInt64Any(endpointIDVal)})
 			}
-			matches = append(matches, candidate{endpointID: getInt64Any(endpointIDVal)})
 		}
 		return matches, result.Err()
 	})
@@ -156,6 +176,19 @@ func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64
 // IP del endpoint cae dentro de su CIDR (y coincide en VLAN si la red lo especifica), conecta
 // automáticamente el endpoint a la red via (:Endpoint)-[:CONNECTED_TO]->(:Network).
 func (r *networkRepo) LinkEndpointToMatchingNetworks(ctx context.Context, endpointID int64, ips []domain.EndpointIP) (int, error) {
+	writeSession := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer writeSession.Close(ctx)
+
+	// 1. Desconectar de redes previas por si se alteró o borró la VLAN / IP
+	_, _ = writeSession.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		_, err := tx.Run(ctx, `
+			MATCH (e:Endpoint)-[r:CONNECTED_TO]->(n:Network)
+			WHERE toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id) OR elementId(e) = toString($endpoint_id)
+			DELETE r
+		`, map[string]any{"endpoint_id": endpointID})
+		return nil, err
+	})
+
 	if len(ips) == 0 {
 		return 0, nil
 	}
@@ -204,25 +237,24 @@ func (r *networkRepo) LinkEndpointToMatchingNetworks(ctx context.Context, endpoi
 
 	var matchingNetworkIDs []int64
 	for _, cand := range candidates {
-		if cand.cidr == "" {
-			continue
-		}
-		_, ipNet, err := net.ParseCIDR(cand.cidr)
-		if err != nil {
-			continue // Omitimos CIDRs mal formados si hubiera en BD
-		}
-
 		matched := false
 		for _, ipEntry := range ips {
-			parsedIP := net.ParseIP(ipEntry.IP)
-			if parsedIP == nil || !ipNet.Contains(parsedIP) {
-				continue
+			// Coincidencia estricta por VLAN (si ambos tienen la misma VLAN definida)
+			if cand.vlanID > 0 && ipEntry.VLANID == cand.vlanID {
+				matched = true
+				break
 			}
-			if cand.vlanID > 0 && ipEntry.VLANID != cand.vlanID {
-				continue
+			// Coincidencia por CIDR si es una red sin VLAN obligatoria o si coincide con la VLAN de la IP
+			if cand.cidr != "" {
+				if _, ipNet, err := net.ParseCIDR(cand.cidr); err == nil {
+					if parsedIP := net.ParseIP(ipEntry.IP); parsedIP != nil && ipNet.Contains(parsedIP) {
+						if cand.vlanID == 0 || ipEntry.VLANID == cand.vlanID {
+							matched = true
+							break
+						}
+					}
+				}
 			}
-			matched = true
-			break
 		}
 		if matched {
 			matchingNetworkIDs = append(matchingNetworkIDs, cand.networkID)
@@ -233,10 +265,10 @@ func (r *networkRepo) LinkEndpointToMatchingNetworks(ctx context.Context, endpoi
 		return 0, nil
 	}
 
-	writeSession := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
-	defer writeSession.Close(ctx)
+	writeSession2 := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer writeSession2.Close(ctx)
 
-	_, err = writeSession.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+	_, err = writeSession2.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		for _, netID := range matchingNetworkIDs {
 			if _, err := tx.Run(ctx, `
 				MATCH (e:Endpoint), (n:Network)

@@ -560,3 +560,233 @@ func (h *OrchestratorHandler) CreateNetwork(w http.ResponseWriter, r *http.Reque
 		"linked_endpoints": linked,
 	}, http.StatusCreated)
 }
+
+// === HANDLERS DE EDICIÓN Y BORRADO (CRUD COMPLETO) ===
+
+// PUT /api/endpoints/{id}
+func (h *OrchestratorHandler) UpdateEndpoint(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	endpointID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		sendError(w, "ID de endpoint inválido", http.StatusBadRequest)
+		return
+	}
+	var endpoint domain.Endpoint
+	if err := json.NewDecoder(r.Body).Decode(&endpoint); err != nil {
+		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	endpoint.EndpointID = endpointID
+
+	if err := h.orchestrator.UpdateEndpoint(r.Context(), &endpoint); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]any{"status": "success", "message": "Endpoint actualizado con éxito"}, http.StatusOK)
+}
+
+// GET /api/endpoints/{id}/ips
+func (h *OrchestratorHandler) GetEndpointIPs(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	endpointID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		sendError(w, "ID de endpoint inválido", http.StatusBadRequest)
+		return
+	}
+	ips, err := h.orchestrator.GetEndpointIPs(r.Context(), endpointID)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]any{"ips": ips}, http.StatusOK)
+}
+
+// DELETE /api/endpoints/{id}
+func (h *OrchestratorHandler) DeleteEndpoint(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	if endpointID, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+		if err := h.orchestrator.DeleteEndpoint(r.Context(), endpointID); err == nil {
+			sendJSON(w, map[string]any{"status": "success", "message": "Endpoint eliminado con éxito"}, http.StatusOK)
+			return
+		}
+	}
+	if err := h.orchestrator.DeleteNodeByID(r.Context(), idStr); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]any{"status": "success", "message": "Endpoint eliminado con éxito"}, http.StatusOK)
+}
+
+// PUT /api/networks/{id}
+func (h *OrchestratorHandler) UpdateNetwork(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	networkID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		sendError(w, "ID de red inválido", http.StatusBadRequest)
+		return
+	}
+	var req createNetworkRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	network := domain.Network{
+		NetworkID:   networkID,
+		Nombre:      req.Nombre,
+		CIDR:        req.CIDR,
+		Gateway:     req.Gateway,
+		VLANID:      req.VLANID,
+		Descripcion: req.Descripcion,
+	}
+	linked, err := h.orchestrator.UpdateNetwork(r.Context(), &network)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]any{"status": "success", "linked_endpoints": linked, "message": "Red actualizada con éxito"}, http.StatusOK)
+}
+
+// DELETE /api/networks/{id}
+func (h *OrchestratorHandler) DeleteNetwork(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	if networkID, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+		if err := h.orchestrator.DeleteNetwork(r.Context(), networkID); err == nil {
+			sendJSON(w, map[string]any{"status": "success", "message": "Red eliminada con éxito"}, http.StatusOK)
+			return
+		}
+	}
+	if err := h.orchestrator.DeleteNodeByID(r.Context(), idStr); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]any{"status": "success", "message": "Red eliminada con éxito"}, http.StatusOK)
+}
+
+// PUT /api/hardware/{id}
+func (h *OrchestratorHandler) UpdateHardware(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	hwID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		sendError(w, "ID de hardware inválido", http.StatusBadRequest)
+		return
+	}
+	var hw domain.Hardware
+	if err := json.NewDecoder(r.Body).Decode(&hw); err != nil {
+		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	hw.HardwareID = hwID
+	if err := h.orchestrator.UpdateHardware(r.Context(), &hw); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]any{"status": "success", "message": "Hardware actualizado con éxito"}, http.StatusOK)
+}
+
+// DELETE /api/hardware/{id}
+func (h *OrchestratorHandler) DeleteHardware(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	if hwID, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+		if err := h.orchestrator.DeleteHardware(r.Context(), hwID); err == nil {
+			sendJSON(w, map[string]any{"status": "success", "message": "Hardware eliminado con éxito"}, http.StatusOK)
+			return
+		}
+	}
+	if err := h.orchestrator.DeleteNodeByID(r.Context(), idStr); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]any{"status": "success", "message": "Hardware eliminado con éxito"}, http.StatusOK)
+}
+
+// PUT /api/software/{id}
+func (h *OrchestratorHandler) UpdateSoftware(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	swID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		sendError(w, "ID de software inválido", http.StatusBadRequest)
+		return
+	}
+	var sw domain.Software
+	if err := json.NewDecoder(r.Body).Decode(&sw); err != nil {
+		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	sw.SoftwareID = swID
+	if err := h.orchestrator.UpdateSoftware(r.Context(), &sw); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]any{"status": "success", "message": "Software actualizado con éxito"}, http.StatusOK)
+}
+
+// DELETE /api/software/{id}
+func (h *OrchestratorHandler) DeleteSoftware(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	if swID, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+		if err := h.orchestrator.DeleteSoftware(r.Context(), swID); err == nil {
+			sendJSON(w, map[string]any{"status": "success", "message": "Software eliminado con éxito"}, http.StatusOK)
+			return
+		}
+	}
+	if err := h.orchestrator.DeleteNodeByID(r.Context(), idStr); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]any{"status": "success", "message": "Software eliminado con éxito"}, http.StatusOK)
+}
+
+// PUT /api/installations/{id}
+func (h *OrchestratorHandler) UpdateSoftwareInstallation(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	if idStr == "" {
+		sendError(w, "ID de instalación obligatorio", http.StatusBadRequest)
+		return
+	}
+	var inst domain.SoftwareInstallation
+	if err := json.NewDecoder(r.Body).Decode(&inst); err != nil {
+		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	inst.InstallationID = idStr
+	if err := h.orchestrator.UpdateSoftwareInstallation(r.Context(), &inst); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]any{"status": "success", "message": "Instalación actualizada con éxito"}, http.StatusOK)
+}
+
+// DELETE /api/installations/{id}
+func (h *OrchestratorHandler) DeleteSoftwareInstallation(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	if idStr == "" {
+		sendError(w, "ID de instalación obligatorio", http.StatusBadRequest)
+		return
+	}
+	if err := h.orchestrator.DeleteSoftwareInstallation(r.Context(), idStr); err != nil {
+		// Si falló el borrado de instalación específico, intentar borrado genérico
+		if err2 := h.orchestrator.DeleteNodeByID(r.Context(), idStr); err2 == nil {
+			sendJSON(w, map[string]any{"status": "success", "message": "Instalación eliminada con éxito"}, http.StatusOK)
+			return
+		}
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]any{"status": "success", "message": "Instalación eliminada con éxito"}, http.StatusOK)
+}
+
+// DELETE /api/nodes/{id} (Borrado genérico de cualquier nodo del grafo)
+func (h *OrchestratorHandler) DeleteNode(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	if idStr == "" {
+		sendError(w, "ID de nodo obligatorio", http.StatusBadRequest)
+		return
+	}
+	if err := h.orchestrator.DeleteNodeByID(r.Context(), idStr); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]any{"status": "success", "message": "Nodo eliminado con éxito"}, http.StatusOK)
+}
+
+

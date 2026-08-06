@@ -156,15 +156,25 @@ func (r *projectRepo) GetByID(ctx context.Context, id int64) (*domain.Project, e
 
 func (r *projectRepo) DeleteByID(ctx context.Context, id int64) error {
 	query := `
-		MATCH (p:Project {id: $id})
+		MATCH (p:Project)
+		WHERE toString(p.id) = toString($id) OR elementId(p) = toString($id)
 		OPTIONAL MATCH (p)-[:HAS_ENDPOINT]->(e:Endpoint)
-		OPTIONAL MATCH (e)-[:CONNECTED_TO|HAS_HARDWARE|HOSTS|HAS_INSTALLATION]->(sub1)
-		OPTIONAL MATCH (sub1)-[:HAS_INSTALLATION]->(sub2)
-		OPTIONAL MATCH (sub1)-[:HAS_FINDING]->(f1:Finding)
-		OPTIONAL MATCH (sub2)-[:HAS_FINDING]->(f2:Finding)
-		OPTIONAL MATCH (f1)-[:HAS_REMEDIATION]->(r1:Remediation)
-		OPTIONAL MATCH (f2)-[:HAS_REMEDIATION]->(r2:Remediation)
-		DETACH DELETE p, e, sub1, sub2, f1, f2, r1, r2
+		OPTIONAL MATCH (e)-[:CONNECTED_TO|HAS_HARDWARE|HOSTS|HAS_INSTALLATION|HAS_IP]->(sub1)
+		OPTIONAL MATCH (sub1)-[:HAS_INSTALLATION|HAS_FINDING|USES_IMAGE|INSTANCE_OF]->(sub2)
+		OPTIONAL MATCH (sub2)-[:HAS_FINDING|OF_VULNERABILITY|HAS_REMEDIATION|HAS_EXPLOIT]->(sub3)
+		OPTIONAL MATCH (sub3)-[:HAS_REMEDIATION|HAS_EXPLOIT|HAS_PATCH]->(sub4)
+		WHERE NOT (sub1:ThreatActor OR sub1:TTP) AND NOT (sub2:ThreatActor OR sub2:TTP) AND NOT (sub3:ThreatActor OR sub3:TTP) AND NOT (sub4:ThreatActor OR sub4:TTP)
+		DETACH DELETE p, e, sub1, sub2, sub3, sub4
 	`
-	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
+	_ = executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
+
+	// Limpieza exhaustiva de cualquier nodo huérfano (redes sueltas, softwares, vulnerabilidades)
+	cleanupQuery := `
+		MATCH (n)
+		WHERE (n:Software OR n:Network OR n:Hardware OR n:IPAddress OR n:SoftwareInstallation OR n:Finding OR n:Remediation OR n:Exploit OR n:Patch OR n:Container OR n:ContainerImage OR n:Vulnerability)
+		  AND NOT EXISTS((n)-[*1..5]-(:Endpoint)) AND NOT EXISTS((n)-[*1..5]-(:Project))
+		DETACH DELETE n
+	`
+	return executeWriteHelper(ctx, r.driver, cleanupQuery, nil)
 }
+

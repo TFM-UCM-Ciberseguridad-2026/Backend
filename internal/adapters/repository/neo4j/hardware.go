@@ -78,6 +78,18 @@ func (r *hardwareRepo) GetByID(ctx context.Context, id int64) (*domain.Hardware,
 }
 
 func (r *hardwareRepo) DeleteByID(ctx context.Context, id int64) error {
-	query := `MATCH (n:Hardware {id: $id}) DETACH DELETE n`
-	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
+	query := `
+		MATCH (n:Hardware)
+		WHERE toString(n.id) = toString($id) OR elementId(n) = toString($id)
+		DETACH DELETE n
+	`
+	_ = executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
+
+	cleanupQuery := `
+		MATCH (n)
+		WHERE (n:Software OR n:Network OR n:Hardware OR n:IPAddress OR n:SoftwareInstallation OR n:Finding OR n:Remediation OR n:Exploit OR n:Patch OR n:Container OR n:ContainerImage OR n:Vulnerability)
+		  AND NOT EXISTS((n)-[*1..5]-(:Endpoint)) AND NOT EXISTS((n)-[*1..5]-(:Project))
+		DETACH DELETE n
+	`
+	return executeWriteHelper(ctx, r.driver, cleanupQuery, nil)
 }
