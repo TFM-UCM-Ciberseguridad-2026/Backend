@@ -34,7 +34,7 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	mux.HandleFunc("POST /api/endpoints/{id}/hardware", h.AssociateHardwareToEndpoint)
 
 	/* POST /api/endpoints/{id}/networks: Asocia direccionamiento y red a un endpoint. */
-	mux.HandleFunc("POST /api/endpoints/{id}/networks", h.AssociateNetworkToEndpoint)
+	//mux.HandleFunc("POST /api/endpoints/{id}/networks", h.AssociateNetworkToEndpoint)
 	/* POST /api/networks: Crea una red de forma independiente; el orchestrator enlaza automáticamente los endpoints cuya IP caiga en el CIDR y compartan VLAN. */
 	mux.HandleFunc("POST /api/networks", h.CreateNetwork)
 
@@ -46,6 +46,9 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 
 	/* POST /api/findings/{id}/vuln-remediations: Asocia vulnerabilidades y planes de remediación a un hallazgo. */
 	mux.HandleFunc("POST /api/findings/{id}/vuln-remediations", h.AssociateVulnerabilitiesAndRemediations)
+
+	/* GET /api/findings/{id}/vulnerabilities: Devuelve los CVEs asociados a un finding, usado por el modal "Ver CVEs" del inspector de nodos. */
+	mux.HandleFunc("GET /api/findings/{id}/vulnerabilities", h.GetFindingVulnerabilities)
 
 	/* GET /api/infrastructure: Obtiene el grafo de infraestructura y relaciones. */
 	mux.HandleFunc("GET /api/infrastructure", h.GetInfrastructure)

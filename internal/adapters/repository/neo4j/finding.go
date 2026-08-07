@@ -191,3 +191,52 @@ func (r *findingRepo) ApplyRemediationByInstallationAndCVE(ctx context.Context, 
 	}
 	return res.([]int64), nil
 }
+
+func (r *findingRepo) GetVulnerabilitiesByFinding(ctx context.Context, findingID int64) ([]domain.Vulnerability, error) {
+	query := `
+		MATCH (f:Finding {id: $finding_id})-[:OF_VULNERABILITY]->(v:Vulnerability)
+		RETURN properties(v) AS props
+		ORDER BY v.base_score DESC
+	`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"finding_id": findingID})
+		if err != nil {
+			return nil, err
+		}
+
+		vulns := make([]domain.Vulnerability, 0)
+		for result.Next(ctx) {
+			rec := result.Record()
+			propsRaw, _ := rec.Get("props")
+			props, ok := propsRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			vulns = append(vulns, domain.Vulnerability{
+				CVEID:       getString(props, "cve_id"),
+				Description: getString(props, "description"),
+				BaseScore:   getFloat64(props, "base_score"),
+				CVSSVector:  getString(props, "cvss_vector"),
+				NVDVector:   getString(props, "nvd_vector"),
+				CWE:         getString(props, "cwe"),
+				CPE:         getString(props, "cpe"),
+				Exploit:     getBool(props, "exploit"),
+				KEV:         getBool(props, "kev"),
+				EPSSScore:   getFloat64(props, "epss_score"),
+			})
+		}
+		return vulns, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.Vulnerability{}, nil
+	}
+	return res.([]domain.Vulnerability), nil
+}

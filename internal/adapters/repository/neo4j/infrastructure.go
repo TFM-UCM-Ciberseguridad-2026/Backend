@@ -25,17 +25,24 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 	defer session.Close(ctx)
 
 	// Consulta de lectura optimizada para obtener los nodos, relaciones y mapeos TTP de la infraestructura
+
 	query := `
 		MATCH (n)
-		WHERE NOT n:ThreatActor AND NOT n:TTP AND NOT n:IPAddress
-		WITH collect({id: elementId(n), labels: labels(n), properties: properties(n)}) AS nodes
+		WITH collect(n) AS rawNodes
+		WITH [n IN rawNodes WHERE NOT (n:ThreatActor OR n:TTP OR n:IPAddress OR n:Vulnerability)] AS cleanNodes
+		WITH [n IN cleanNodes | {
+			id: elementId(n), 
+			labels: labels(n), 
+			properties: properties(n), 
+			vulnCount: COUNT { (n)-[:OF_VULNERABILITY]->(:Vulnerability) }
+		}] AS nodes
 		OPTIONAL MATCH (s)-[rel]->(t)
-		WHERE NOT s:ThreatActor AND NOT s:TTP AND NOT s:IPAddress
-		  AND NOT t:ThreatActor AND NOT t:TTP AND NOT t:IPAddress
-		WITH nodes, collect(case when rel is null then null else {id: elementId(rel), type: type(rel), source: elementId(s), target: elementId(t), properties: properties(rel)} end) AS relationships
+		WITH nodes, collect(rel) AS rawRels
+		WITH nodes, [r IN rawRels WHERE NOT (startNode(r):ThreatActor OR startNode(r):TTP OR startNode(r):IPAddress OR startNode(r):Vulnerability OR endNode(r):ThreatActor OR endNode(r):TTP OR endNode(r):IPAddress OR endNode(r):Vulnerability)] AS cleanRels
 		OPTIONAL MATCH (ttp:TTP)-[:TARGETS_VULN]->(v:Vulnerability)
-		WITH nodes, relationships, collect(case when ttp is null or v is null then null else {ttp_id: coalesce(ttp.ttp_id, ttp.id), cve_id: coalesce(v.cve_id, v.id)} end) AS ttpMaps
-		RETURN nodes, [r in relationships WHERE r IS NOT NULL] AS relationships, [m in ttpMaps WHERE m IS NOT NULL] AS ttp_mappings
+		WITH nodes, cleanRels, collect({ttp_id: coalesce(ttp.ttp_id, ttp.id), cve_id: coalesce(v.cve_id, v.id)}) AS rawTtpMaps
+		WITH nodes, cleanRels, [m IN rawTtpMaps WHERE m.ttp_id IS NOT NULL AND m.cve_id IS NOT NULL] AS ttpMaps
+		RETURN nodes, [r IN cleanRels | {id: elementId(r), type: type(r), source: elementId(startNode(r)), target: elementId(endNode(r)), properties: properties(r)}] AS relationships, ttpMaps AS ttp_mappings
 	`
 
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
@@ -77,7 +84,18 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 				if props == nil {
 					props = make(map[string]interface{})
 				}
-
+				isFinding := false
+				for _, l := range labels {
+					if l == "Finding" {
+						isFinding = true
+						break
+					}
+				}
+				if isFinding {
+					if vulnCount, ok := nodeMap["vulnCount"].(int64); ok {
+						props["vulnerability_count"] = vulnCount
+					}
+				}
 				graphData.Nodes = append(graphData.Nodes, domain.GraphNode{
 					ID:         id,
 					Labels:     labels,
@@ -376,23 +394,23 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 		paths := make([]domain.ExploitationPath, 0)
 		pathCounter := 1
 
-		getBool := func(val any) bool {
+		getBoolLocal := func(val any) bool {
 			if val == nil { return false }
 			if b, ok := val.(bool); ok { return b }
 			return false
 		}
-		getString := func(val any) string {
+		getStringLocal := func(val any) string {
 			if val == nil { return "" }
 			if s, ok := val.(string); ok { return s }
 			return ""
 		}
-		getFloat := func(val any) float64 {
+		getFloatLocal := func(val any) float64 {
 			if val == nil { return 0.0 }
 			if f, ok := val.(float64); ok { return f }
 			if i, ok := val.(int64); ok { return float64(i) }
 			return 0.0
 		}
-		getInt := func(val any) int64 {
+		getIntLocal := func(val any) int64 {
 			if val == nil { return 0 }
 			if i, ok := val.(int64); ok { return i }
 			return 0
@@ -412,7 +430,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 			record := result.Record()
 			
 			entryIDVal, _ := record.Get("entry_id")
-			entryID := getInt(entryIDVal)
+			entryID := getIntLocal(entryIDVal)
 			
 			stepsRaw, _ := record.Get("steps")
 			stepsList, ok := stepsRaw.([]any)
@@ -426,7 +444,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 			
 			ep := domain.ExploitationPath{
 				PathID:          fmt.Sprintf("path-entry-%d-route-%d", entryID, pathCounter),
-				InitialEndpoint: getString(firstEndpointProps["hostname"]),
+				InitialEndpoint: getStringLocal(firstEndpointProps["hostname"]),
 				TotalRiskScore:  0.0,
 				Steps:           make([]domain.AttackStep, 0, len(stepsList)),
 			}
@@ -438,29 +456,29 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 				stepMap := getMap(stepAny)
 				if stepMap == nil { continue }
 
-				index := getInt(stepMap["index"])
+				index := getIntLocal(stepMap["index"])
 				endpointProps := getNodeProps(stepMap["endpoint"])
 				softwareProps := getNodeProps(stepMap["software"])
 				findingProps := getNodeProps(stepMap["finding"])
 				vulnProps := getNodeProps(stepMap["vuln"])
-				hasLPE := getBool(stepMap["hasLPE"])
-				isContainer := getBool(stepMap["is_container"])
+				hasLPE := getBoolLocal(stepMap["hasLPE"])
+				isContainer := getBoolLocal(stepMap["is_container"])
 
 				var containerID, containerName string
 				if isContainer {
 					containerProps := getNodeProps(stepMap["container"])
-					containerID = getString(containerProps["id"])
-					containerName = getString(containerProps["name"])
+					containerID = getStringLocal(containerProps["id"])
+					containerName = getStringLocal(containerProps["name"])
 				}
 
-				hostname := getString(endpointProps["hostname"])
-				cvss := getString(vulnProps["cvss_vector"])
-				risk := getFloat(findingProps["risk_score"])
-				cwe := getString(vulnProps["cwe"])
-				
+				hostname := getStringLocal(endpointProps["hostname"])
+				cvss := getStringLocal(vulnProps["cvss_vector"])
+				risk := getFloatLocal(findingProps["risk_score"])
+				cwe := getStringLocal(vulnProps["cwe"])
+
 				// Lógica de RCE
 				isRCE := false
-				if cwe == "CWE-94" || cwe == "CWE-78" || cwe == "CWE-77" || getBool(vulnProps["exploit"]) {
+				if cwe == "CWE-94" || cwe == "CWE-78" || cwe == "CWE-77" || getBoolLocal(vulnProps["exploit"]) {
 					isRCE = true
 				}
 				// Lógica de RootObtained
@@ -478,16 +496,16 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 					StepIndex:        int(index),
 					SourceEndpoint:   prevEndpoint,
 					TargetEndpoint:   hostname,
-					TargetEndpointID: getInt(endpointProps["id"]),
+					TargetEndpointID: getIntLocal(endpointProps["id"]),
 					IsContainer:      isContainer,
 					ContainerID:      containerID,
 					ContainerName:    containerName,
-					Vulnerability:    getString(vulnProps["cve_id"]),
-					SoftwareAffected: getString(softwareProps["install_path"]),
+					Vulnerability:    getStringLocal(vulnProps["cve_id"]),
+					SoftwareAffected: getStringLocal(softwareProps["install_path"]),
 					RiskScore:        risk,
 					RCE:              isRCE,
 					RootObtained:     rootObtained,
-					Exploitable:      getBool(vulnProps["exploit"]) || getBool(vulnProps["kev"]),
+					Exploitable:      getBoolLocal(vulnProps["exploit"]) || getBoolLocal(vulnProps["kev"]),
 					CVSSVector:       cvss,
 				})
 
