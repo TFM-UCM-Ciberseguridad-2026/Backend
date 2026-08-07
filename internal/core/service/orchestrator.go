@@ -1175,3 +1175,99 @@ func (o *Orchestrator) SyncScoutDaily(ctx context.Context) error {
 
 	return nil
 }
+
+// === EDICIÓN Y BORRADO DE ACTIVOS (CRUD COMPLETO) ===
+
+// UpdateEndpoint actualiza los datos y re-enlaza las IPs de un Endpoint en Neo4j.
+func (o *Orchestrator) UpdateEndpoint(ctx context.Context, endpoint *domain.Endpoint) error {
+	if err := o.endpointPort.Update(ctx, endpoint); err != nil {
+		return err
+	}
+	// Siempre sincronizamos IPs (para poder borrar VLANs o quitar todas las IPs de un endpoint)
+	if err := o.endpointPort.SaveIPs(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
+		return fmt.Errorf("error actualizando IPs del endpoint: %w", err)
+	}
+	if o.networkPort != nil {
+		if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
+			return fmt.Errorf("error re-enlazando endpoint a las redes coincidentes: %w", err)
+		}
+	}
+	return nil
+}
+
+// DeleteEndpoint elimina un Endpoint por su ID.
+func (o *Orchestrator) DeleteEndpoint(ctx context.Context, endpointID int64) error {
+	return o.endpointPort.DeleteByID(ctx, endpointID)
+}
+
+// GetEndpointIPs devuelve las IPs asociadas a un endpoint.
+func (o *Orchestrator) GetEndpointIPs(ctx context.Context, endpointID int64) ([]domain.EndpointIP, error) {
+	return o.endpointPort.GetIPs(ctx, endpointID)
+}
+
+// UpdateNetwork actualiza los datos y re-enlaza automáticamente los Endpoints compatibles a la red.
+func (o *Orchestrator) UpdateNetwork(ctx context.Context, network *domain.Network) (int, error) {
+	if err := o.networkPort.Update(ctx, network); err != nil {
+		return 0, err
+	}
+	linked, err := o.networkPort.LinkMatchingEndpoints(ctx, network.NetworkID, network.CIDR, network.VLANID)
+	if err != nil {
+		return 0, fmt.Errorf("error enlazando endpoints a la red actualizada: %w", err)
+	}
+	return linked, nil
+}
+
+// DeleteNetwork elimina una Red por su ID.
+func (o *Orchestrator) DeleteNetwork(ctx context.Context, networkID int64) error {
+	return o.networkPort.DeleteByID(ctx, networkID)
+}
+
+// UpdateHardware actualiza las especificaciones de Hardware.
+func (o *Orchestrator) UpdateHardware(ctx context.Context, hardware *domain.Hardware) error {
+	return o.hardwarePort.Update(ctx, hardware)
+}
+
+// DeleteHardware elimina un componente Hardware por su ID.
+func (o *Orchestrator) DeleteHardware(ctx context.Context, hardwareID int64) error {
+	return o.hardwarePort.DeleteByID(ctx, hardwareID)
+}
+
+// UpdateSoftware actualiza los datos del Software en el catálogo.
+func (o *Orchestrator) UpdateSoftware(ctx context.Context, software *domain.Software) error {
+	return o.softwarePort.Update(ctx, software)
+}
+
+// DeleteSoftware elimina un nodo Software por su ID numérico.
+func (o *Orchestrator) DeleteSoftware(ctx context.Context, softwareID int64) error {
+	return o.softwarePort.DeleteByID(ctx, softwareID)
+}
+
+// UpdateSoftwareInstallation actualiza los datos de una instalación de software.
+func (o *Orchestrator) UpdateSoftwareInstallation(ctx context.Context, installation *domain.SoftwareInstallation) error {
+	return o.softwareInstPort.Update(ctx, installation)
+}
+
+// DeleteSoftwareInstallation elimina una instalación por su ID.
+func (o *Orchestrator) DeleteSoftwareInstallation(ctx context.Context, installationID string) error {
+	return o.softwareInstPort.DeleteByID(ctx, installationID)
+}
+
+// DeleteNodeByID elimina genéricamente cualquier nodo del grafo de Neo4j (sea entero o string su ID/CVE/TTP o elementId).
+func (o *Orchestrator) DeleteNodeByID(ctx context.Context, id string) error {
+	if o.dbHelper == nil {
+		return fmt.Errorf("dbHelper no disponible para borrado genérico")
+	}
+	query := `
+		MATCH (n)
+		WHERE toString(n.id) = toString($id) OR toString(n.cve_id) = toString($id) OR toString(n.ttp_id) = toString($id) OR toString(n.installation_id) = toString($id) OR elementId(n) = $id
+		DETACH DELETE n
+	`
+	return o.dbHelper.ExecuteWrite(ctx, query, map[string]any{"id": id})
+}
+// ExportProjectGraph orquesta la exportación nativa de un proyecto desde Neo4j.
+func (o *Orchestrator) ExportProjectGraph(ctx context.Context, projectID int64) (*domain.GraphData, error) {
+	if o.projectPort == nil {
+		return nil, fmt.Errorf("puerto de proyectos no inicializado")
+	}
+	return o.projectPort.ExportGraph(ctx, projectID)
+}

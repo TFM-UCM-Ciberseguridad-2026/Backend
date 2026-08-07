@@ -2,6 +2,7 @@ package neo4j
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -42,7 +43,9 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 		OPTIONAL MATCH (ttp:TTP)-[:TARGETS_VULN]->(v:Vulnerability)
 		WITH nodes, cleanRels, collect({ttp_id: coalesce(ttp.ttp_id, ttp.id), cve_id: coalesce(v.cve_id, v.id)}) AS rawTtpMaps
 		WITH nodes, cleanRels, [m IN rawTtpMaps WHERE m.ttp_id IS NOT NULL AND m.cve_id IS NOT NULL] AS ttpMaps
-		RETURN nodes, [r IN cleanRels | {id: elementId(r), type: type(r), source: elementId(startNode(r)), target: elementId(endNode(r)), properties: properties(r)}] AS relationships, ttpMaps AS ttp_mappings
+		OPTIONAL MATCH (e:Endpoint)-[:HAS_IP]->(ip:IPAddress)
+		WITH nodes, cleanRels, ttpMaps, collect(case when e is null or ip is null then null else {endpoint_id: elementId(e), ip: coalesce(ip.ip, ""), vlan_id: coalesce(ip.vlan_id, 0)} end) AS ipMaps
+		RETURN nodes, [r IN cleanRels | {id: elementId(r), type: type(r), source: elementId(startNode(r)), target: elementId(endNode(r)), properties: properties(r)}] AS relationships, ttpMaps AS ttp_mappings, [i in ipMaps WHERE i IS NOT NULL] AS ip_mappings
 	`
 
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
@@ -141,6 +144,44 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 		}
 	}
 
+	// Mapear direcciones IP y VLANs a las propiedades de los nodos Endpoint
+	if ipMapsRaw, ok := recordMap["ip_mappings"].([]interface{}); ok {
+		endpointToIPs := make(map[string][]map[string]interface{})
+		for _, rawMap := range ipMapsRaw {
+			if m, ok := rawMap.(map[string]interface{}); ok {
+				endpointID, _ := m["endpoint_id"].(string)
+				ip, _ := m["ip"].(string)
+				var vlanID int64
+				switch v := m["vlan_id"].(type) {
+				case int64:
+					vlanID = v
+				case int:
+					vlanID = int64(v)
+				case float64:
+					vlanID = int64(v)
+				}
+				if endpointID != "" && (ip != "" || vlanID > 0) {
+					endpointToIPs[endpointID] = append(endpointToIPs[endpointID], map[string]interface{}{
+						"ip":      ip,
+						"vlan_id": vlanID,
+					})
+				}
+			}
+		}
+
+		if len(endpointToIPs) > 0 {
+			for i := range graphData.Nodes {
+				n := &graphData.Nodes[i]
+				if ips, exists := endpointToIPs[n.ID]; exists {
+					if n.Properties == nil {
+						n.Properties = make(map[string]interface{})
+					}
+					n.Properties["ips"] = ips
+				}
+			}
+		}
+	}
+
 	// Parsear Relaciones
 	if relsRaw, ok := recordMap["relationships"].([]interface{}); ok {
 		for _, relRaw := range relsRaw {
@@ -158,6 +199,125 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 					Target:     target,
 					Properties: props,
 				})
+			}
+		}
+	}
+
+	// Mapear VLANs de CONNECTED_TO a las IPs de los Endpoints como IPs virtuales
+	// Mapear HAS_INSTALLATION e INSTANCE_OF a las propiedades del SoftwareInstallation
+	for _, rel := range graphData.Relationships {
+		if rel.Type == "CONNECTED_TO" {
+			// Encontrar el Network (target) para coger el vlan_id
+			var vlanID int64
+			for _, n := range graphData.Nodes {
+				if n.ID == rel.Target {
+					if v, ok := n.Properties["vlan_id"]; ok {
+						switch val := v.(type) {
+						case int64:
+							vlanID = val
+						case int:
+							vlanID = int64(val)
+						case float64:
+							vlanID = int64(val)
+						}
+					}
+					break
+				}
+			}
+
+			// Si la red tiene VLAN ID, añadirla al Endpoint (source) si no la tiene ya
+			if vlanID > 0 {
+				for i := range graphData.Nodes {
+					if graphData.Nodes[i].ID == rel.Source {
+						n := &graphData.Nodes[i]
+						if n.Properties == nil {
+							n.Properties = make(map[string]interface{})
+						}
+						
+						var existingIPs []map[string]interface{}
+						if ips, ok := n.Properties["ips"].([]map[string]interface{}); ok {
+							existingIPs = ips
+						} else {
+							existingIPs = []map[string]interface{}{}
+						}
+
+						exists := false
+						for _, ipMap := range existingIPs {
+							if vid, ok := ipMap["vlan_id"]; ok {
+								var existingVlanID int64
+								switch val := vid.(type) {
+								case int64:
+									existingVlanID = val
+								case int:
+									existingVlanID = int64(val)
+								case float64:
+									existingVlanID = int64(val)
+								}
+								if existingVlanID == vlanID {
+									exists = true
+									break
+								}
+							}
+						}
+
+						if !exists {
+							existingIPs = append(existingIPs, map[string]interface{}{
+								"ip":      "",
+								"vlan_id": vlanID,
+							})
+							n.Properties["ips"] = existingIPs
+						}
+						break
+					}
+				}
+			}
+		} else if rel.Type == "HAS_INSTALLATION" {
+			// El source es un Endpoint, el target es un SoftwareInstallation
+			for i := range graphData.Nodes {
+				if graphData.Nodes[i].ID == rel.Target {
+					n := &graphData.Nodes[i]
+					if n.Properties == nil {
+						n.Properties = make(map[string]interface{})
+					}
+					// Buscar el nombre o ID del endpoint
+					var endpointName string
+					for _, src := range graphData.Nodes {
+						if src.ID == rel.Source {
+							if hn, ok := src.Properties["hostname"].(string); ok {
+								endpointName = hn
+							} else if idStr, ok := src.Properties["id"].(string); ok {
+								endpointName = idStr
+							}
+							break
+						}
+					}
+					n.Properties["associated_endpoint"] = endpointName
+					n.Properties["associated_endpoint_node_id"] = rel.Source
+					break
+				}
+			}
+		} else if rel.Type == "INSTANCE_OF" {
+			// El source es SoftwareInstallation, target es Software
+			for i := range graphData.Nodes {
+				if graphData.Nodes[i].ID == rel.Source {
+					n := &graphData.Nodes[i]
+					if n.Properties == nil {
+						n.Properties = make(map[string]interface{})
+					}
+					// Buscar nombre del software
+					var swName string
+					for _, tgt := range graphData.Nodes {
+						if tgt.ID == rel.Target {
+							if name, ok := tgt.Properties["name"].(string); ok {
+								swName = name
+							}
+							break
+						}
+					}
+					n.Properties["associated_software"] = swName
+					n.Properties["associated_software_node_id"] = rel.Target
+					break
+				}
 			}
 		}
 	}
@@ -370,6 +530,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 		    endpoint: ep,
 		    software: bestNet.si,
 		    finding: bestNet.f,
+		    finding_id: elementId(bestNet.f),
 		    vuln: bestNet.v,
 		    is_container: bestNet.is_container,
 		    container: bestNet.container,
@@ -492,6 +653,8 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 					}
 				}
 
+				findingElementID := getStringLocal(stepMap["finding_id"])
+
 				ep.Steps = append(ep.Steps, domain.AttackStep{
 					StepIndex:        int(index),
 					SourceEndpoint:   prevEndpoint,
@@ -500,6 +663,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 					IsContainer:      isContainer,
 					ContainerID:      containerID,
 					ContainerName:    containerName,
+					FindingID:        findingElementID,
 					Vulnerability:    getStringLocal(vulnProps["cve_id"]),
 					SoftwareAffected: getStringLocal(softwareProps["install_path"]),
 					RiskScore:        risk,
@@ -548,6 +712,15 @@ func normalizeProperties(props map[string]interface{}) map[string]interface{} {
 				continue
 			}
 		}
+		
+		switch val := v.(type) {
+		case map[string]interface{}, []interface{}:
+			if b, err := json.Marshal(val); err == nil {
+				cleaned[k] = string(b)
+				continue
+			}
+		}
+
 		cleaned[k] = v
 	}
 	return cleaned

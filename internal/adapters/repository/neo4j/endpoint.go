@@ -90,7 +90,8 @@ func (r *endpointRepo) Save(ctx context.Context, endpoint *domain.Endpoint) erro
 // Update actualiza un Endpoint existente en la base de datos de grafos Neo4j.
 func (r *endpointRepo) Update(ctx context.Context, endpoint *domain.Endpoint) error {
 	query := `
-		MATCH (e:Endpoint {id: $id})
+		MATCH (e:Endpoint)
+		WHERE toString(e.id) = toString($id) OR elementId(e) = toString($id)
 		SET e.hostname = $hostname,
 		    e.type = $type,
 		    e.status = $status,
@@ -210,10 +211,38 @@ func (r *endpointRepo) GetByID(ctx context.Context, id int64) (*domain.Endpoint,
 	return endpoint, nil
 }
 
-// DeleteByID elimina un Endpoint de Neo4j por su ID.
+// DeleteByID elimina un Endpoint y sus nodos dependientes (IPs, Hardware) y limpia huéfanos.
 func (r *endpointRepo) DeleteByID(ctx context.Context, id int64) error {
-	query := `MATCH (e:Endpoint {id: $id}) DETACH DELETE e`
-	return r.ExecuteWrite(ctx, query, map[string]any{"id": id})
+	query := `
+		MATCH (e:Endpoint)
+		WHERE toString(e.id) = toString($id) OR elementId(e) = toString($id)
+		OPTIONAL MATCH (e)-[:CONNECTED_TO]->(n:Network)
+		WITH e, n
+		OPTIONAL MATCH (p:Project)-[:HAS_ENDPOINT]->(e)
+		WITH e, n, p
+		FOREACH (proj IN CASE WHEN p IS NOT NULL AND n IS NOT NULL THEN [p] ELSE [] END |
+			MERGE (proj)-[:CONTAINS_NETWORK]->(n)
+		)
+		WITH e
+		OPTIONAL MATCH (e)-[:HAS_IP|HAS_HARDWARE|HOSTS]->(sub)
+		WITH e, collect(sub) AS subs
+		DETACH DELETE e
+		WITH subs
+		UNWIND subs AS s
+		WITH s WHERE s IS NOT NULL
+		DETACH DELETE s
+	`
+	if err := r.ExecuteWrite(ctx, query, map[string]any{"id": id}); err != nil {
+		return err
+	}
+
+	cleanupQuery := `
+		MATCH (n)
+		WHERE (n:Software OR n:Hardware OR n:IPAddress OR n:SoftwareInstallation OR n:Finding OR n:Remediation OR n:Container OR n:ContainerImage)
+		  AND NOT EXISTS((n)-[*1..5]-(:Endpoint)) AND NOT EXISTS((n)-[*1..5]-(:Project))
+		DETACH DELETE n
+	`
+	return r.ExecuteWrite(ctx, cleanupQuery, nil)
 }
 
 // ==========================================
@@ -285,7 +314,7 @@ func (r *endpointRepo) SaveIPs(ctx context.Context, endpointID int64, ips []doma
 		// 1. Eliminar IPs previas del endpoint
 		if _, err := tx.Run(ctx, `
 			MATCH (e:Endpoint)-[:HAS_IP]->(ip:IPAddress)
-			WHERE toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id)
+			WHERE toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id) OR elementId(e) = toString($endpoint_id)
 			DETACH DELETE ip
 		`, map[string]any{"endpoint_id": endpointID}); err != nil {
 			return nil, err
@@ -293,19 +322,15 @@ func (r *endpointRepo) SaveIPs(ctx context.Context, endpointID int64, ips []doma
 
 		// 2. Crear las nuevas
 		for _, entry := range ips {
-			var vlan any
-			if entry.VLANID > 0 {
-				vlan = entry.VLANID
-			}
 			if _, err := tx.Run(ctx, `
 				MATCH (e:Endpoint)
-				WHERE toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id)
+				WHERE toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id) OR elementId(e) = toString($endpoint_id)
 				CREATE (ip:IPAddress {ip: $ip, vlan_id: $vlan_id})
 				MERGE (e)-[:HAS_IP]->(ip)
 			`, map[string]any{
 				"endpoint_id": endpointID,
 				"ip":          entry.IP,
-				"vlan_id":     vlan,
+				"vlan_id":     entry.VLANID,
 			}); err != nil {
 				return nil, err
 			}
@@ -322,9 +347,9 @@ func (r *endpointRepo) GetIPs(ctx context.Context, endpointID int64) ([]domain.E
 	defer session.Close(ctx)
 
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		result, err := tx.Run(ctx, `
+		resultIPs, err := tx.Run(ctx, `
 			MATCH (e:Endpoint)-[:HAS_IP]->(ip:IPAddress)
-			WHERE toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id)
+			WHERE toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id) OR elementId(e) = toString($endpoint_id)
 			RETURN ip.ip AS ip, ip.vlan_id AS vlan_id
 		`, map[string]any{"endpoint_id": endpointID})
 		if err != nil {
@@ -332,16 +357,42 @@ func (r *endpointRepo) GetIPs(ctx context.Context, endpointID int64) ([]domain.E
 		}
 
 		ips := make([]domain.EndpointIP, 0)
-		for result.Next(ctx) {
-			rec := result.Record()
+		vlanMap := make(map[int64]bool)
+		for resultIPs.Next(ctx) {
+			rec := resultIPs.Record()
 			ipVal, _ := rec.Get("ip")
 			vlanVal, _ := rec.Get("vlan_id")
+			vlanID := getInt64Any(vlanVal)
+			vlanMap[vlanID] = true
 			ips = append(ips, domain.EndpointIP{
 				IP:     getStringAny(ipVal),
-				VLANID: getInt64Any(vlanVal),
+				VLANID: vlanID,
 			})
 		}
-		return ips, result.Err()
+		
+		resultNets, err := tx.Run(ctx, `
+			MATCH (e:Endpoint)-[:CONNECTED_TO]->(n:Network)
+			WHERE toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id) OR elementId(e) = toString($endpoint_id)
+			RETURN n.vlan_id AS vlan_id
+		`, map[string]any{"endpoint_id": endpointID})
+		if err != nil {
+			return nil, err
+		}
+		
+		for resultNets.Next(ctx) {
+			rec := resultNets.Record()
+			vlanVal, _ := rec.Get("vlan_id")
+			vlanID := getInt64Any(vlanVal)
+			if vlanID > 0 && !vlanMap[vlanID] {
+				vlanMap[vlanID] = true
+				ips = append(ips, domain.EndpointIP{
+					IP:     "",
+					VLANID: vlanID,
+				})
+			}
+		}
+
+		return ips, nil
 	})
 
 	if err != nil {
