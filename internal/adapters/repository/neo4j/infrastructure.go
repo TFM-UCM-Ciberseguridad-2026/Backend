@@ -511,6 +511,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 		    endpoint: ep,
 		    software: bestNet.si,
 		    finding: bestNet.f,
+		    finding_id: elementId(bestNet.f),
 		    vuln: bestNet.v,
 		    is_container: bestNet.is_container,
 		    container: bestNet.container,
@@ -633,6 +634,8 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 					}
 				}
 
+				findingElementID := getString(stepMap["finding_id"])
+
 				ep.Steps = append(ep.Steps, domain.AttackStep{
 					StepIndex:        int(index),
 					SourceEndpoint:   prevEndpoint,
@@ -641,6 +644,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 					IsContainer:      isContainer,
 					ContainerID:      containerID,
 					ContainerName:    containerName,
+					FindingID:        findingElementID,
 					Vulnerability:    getString(vulnProps["cve_id"]),
 					SoftwareAffected: getString(softwareProps["install_path"]),
 					RiskScore:        risk,
