@@ -142,20 +142,45 @@ func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64
 	}
 
 	matches, _ := res.([]candidate)
-	if len(matches) == 0 {
-		return 0, nil
-	}
-
 	writeSession := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer writeSession.Close(ctx)
 
 	_, err = writeSession.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		// 1. Desconectar a los endpoints antiguos, reteniendo la red en el proyecto
+		_, err := tx.Run(ctx, `
+			MATCH (e:Endpoint)-[r:CONNECTED_TO]->(n:Network)
+			WHERE toInteger(n.id) = toInteger($network_id) OR toString(n.id) = toString($network_id) OR elementId(n) = toString($network_id)
+			WITH e, r, n
+			OPTIONAL MATCH (p:Project)-[:HAS_ENDPOINT]->(e)
+			WITH e, r, n, p
+			FOREACH (proj IN CASE WHEN p IS NOT NULL THEN [p] ELSE [] END |
+				MERGE (proj)-[:CONTAINS_NETWORK]->(n)
+			)
+			WITH e, r
+			DELETE r
+		`, map[string]any{"network_id": networkID})
+		if err != nil {
+			return nil, err
+		}
+
+		if len(matches) == 0 {
+			return nil, nil
+		}
+
+		// 2. Conectar los matches (si los hay)
 		for _, m := range matches {
 			if _, err := tx.Run(ctx, `
 				MATCH (e:Endpoint), (n:Network)
 				WHERE (toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id))
 				  AND (toInteger(n.id) = toInteger($network_id) OR toString(n.id) = toString($network_id))
 				MERGE (e)-[:CONNECTED_TO]->(n)
+				WITH e, n
+				OPTIONAL MATCH (p:Project)-[:HAS_ENDPOINT]->(e)
+				WITH n, p
+				FOREACH (proj IN CASE WHEN p IS NOT NULL THEN [p] ELSE [] END |
+					MERGE (proj)-[:CONTAINS_NETWORK]->(n)
+				)
+				RETURN n
 			`, map[string]any{
 				"endpoint_id": m.endpointID,
 				"network_id":  networkID,
@@ -184,6 +209,13 @@ func (r *networkRepo) LinkEndpointToMatchingNetworks(ctx context.Context, endpoi
 		_, err := tx.Run(ctx, `
 			MATCH (e:Endpoint)-[r:CONNECTED_TO]->(n:Network)
 			WHERE toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id) OR elementId(e) = toString($endpoint_id)
+			WITH e, r, n
+			OPTIONAL MATCH (p:Project)-[:HAS_ENDPOINT]->(e)
+			WITH e, r, n, p
+			FOREACH (proj IN CASE WHEN p IS NOT NULL THEN [p] ELSE [] END |
+				MERGE (proj)-[:CONTAINS_NETWORK]->(n)
+			)
+			WITH e, r
 			DELETE r
 		`, map[string]any{"endpoint_id": endpointID})
 		return nil, err
@@ -275,6 +307,11 @@ func (r *networkRepo) LinkEndpointToMatchingNetworks(ctx context.Context, endpoi
 				WHERE (toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id))
 				  AND (toInteger(n.id) = toInteger($network_id) OR toString(n.id) = toString($network_id))
 				MERGE (e)-[:CONNECTED_TO]->(n)
+				WITH e, n
+				OPTIONAL MATCH (e)-[:BELONGS_TO]->(p:Project)
+				FOREACH (proj IN CASE WHEN p IS NOT NULL THEN [p] ELSE [] END |
+					MERGE (proj)-[:CONTAINS_NETWORK]->(n)
+				)
 			`, map[string]any{
 				"endpoint_id": endpointID,
 				"network_id":  netID,

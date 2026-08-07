@@ -1253,5 +1253,10 @@ func (o *Orchestrator) DeleteNodeByID(ctx context.Context, id string) error {
 	`
 	return o.dbHelper.ExecuteWrite(ctx, query, map[string]any{"id": id})
 }
-
-
+// ExportProjectGraph orquesta la exportación nativa de un proyecto desde Neo4j.
+func (o *Orchestrator) ExportProjectGraph(ctx context.Context, projectID int64) (*domain.GraphData, error) {
+	if o.projectPort == nil {
+		return nil, fmt.Errorf("puerto de proyectos no inicializado")
+	}
+	return o.projectPort.ExportGraph(ctx, projectID)
+}

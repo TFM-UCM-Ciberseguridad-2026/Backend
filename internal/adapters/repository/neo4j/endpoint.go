@@ -216,10 +216,25 @@ func (r *endpointRepo) DeleteByID(ctx context.Context, id int64) error {
 	query := `
 		MATCH (e:Endpoint)
 		WHERE toString(e.id) = toString($id) OR elementId(e) = toString($id)
+		OPTIONAL MATCH (e)-[:CONNECTED_TO]->(n:Network)
+		WITH e, n
+		OPTIONAL MATCH (p:Project)-[:HAS_ENDPOINT]->(e)
+		WITH e, n, p
+		FOREACH (proj IN CASE WHEN p IS NOT NULL AND n IS NOT NULL THEN [p] ELSE [] END |
+			MERGE (proj)-[:CONTAINS_NETWORK]->(n)
+		)
+		WITH e
 		OPTIONAL MATCH (e)-[:HAS_IP|HAS_HARDWARE|HOSTS]->(sub)
-		DETACH DELETE e, sub
+		WITH e, collect(sub) AS subs
+		DETACH DELETE e
+		WITH subs
+		UNWIND subs AS s
+		WITH s WHERE s IS NOT NULL
+		DETACH DELETE s
 	`
-	_ = r.ExecuteWrite(ctx, query, map[string]any{"id": id})
+	if err := r.ExecuteWrite(ctx, query, map[string]any{"id": id}); err != nil {
+		return err
+	}
 
 	cleanupQuery := `
 		MATCH (n)

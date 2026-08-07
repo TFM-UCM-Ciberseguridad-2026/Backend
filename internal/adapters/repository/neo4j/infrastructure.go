@@ -2,6 +2,7 @@ package neo4j
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -693,6 +694,15 @@ func normalizeProperties(props map[string]interface{}) map[string]interface{} {
 				continue
 			}
 		}
+		
+		switch val := v.(type) {
+		case map[string]interface{}, []interface{}:
+			if b, err := json.Marshal(val); err == nil {
+				cleaned[k] = string(b)
+				continue
+			}
+		}
+
 		cleaned[k] = v
 	}
 	return cleaned
