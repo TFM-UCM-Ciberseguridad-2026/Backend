@@ -19,7 +19,7 @@ func NewTTPRepository(driver neo4j.DriverWithContext) *ttpRepo {
 func (r *ttpRepo) Save(ctx context.Context, ttp *domain.TTP) error {
 	query := `
 		MERGE (t:TTP {ttp_id: $ttp_id})
-		ON CREATE SET t.name = $name,
+		SET t.name = $name,
 		    t.tactic = $tactic,
 		    t.description = $description,
 		    t.updated_at = timestamp()
@@ -31,7 +31,7 @@ func (r *ttpRepo) Save(ctx context.Context, ttp *domain.TTP) error {
 		"description": ttp.Description,
 	}
 
-	return executeWriteSaveHelper(ctx, r.driver, query, params)
+	return executeWriteHelper(ctx, r.driver, query, params)
 }
 
 func (r *ttpRepo) Update(ctx context.Context, ttp *domain.TTP) error {
@@ -85,4 +85,31 @@ func (r *ttpRepo) RelateToVulnerability(ctx context.Context, cveID string, ttpID
 		"ttp_id": ttpID,
 	}
 	return executeWriteHelper(ctx, r.driver, query, params)
+}
+
+func (r *ttpRepo) SaveBatch(ctx context.Context, ttps []domain.TTP) error {
+	if len(ttps) == 0 {
+		return nil
+	}
+
+	var ttpMaps []map[string]any
+	for _, t := range ttps {
+		ttpMaps = append(ttpMaps, map[string]any{
+			"ttp_id":      t.TTPID,
+			"name":        t.Name,
+			"tactic":      t.Tactic,
+			"description": t.Description,
+		})
+	}
+
+	query := `
+		UNWIND $ttps AS item
+		MERGE (t:TTP {ttp_id: item.ttp_id})
+		SET t.name = item.name,
+		    t.tactic = item.tactic,
+		    t.description = item.description,
+		    t.updated_at = timestamp()
+	`
+
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{"ttps": ttpMaps})
 }

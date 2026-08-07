@@ -195,7 +195,15 @@ func (r *findingRepo) ApplyRemediationByInstallationAndCVE(ctx context.Context, 
 func (r *findingRepo) GetVulnerabilitiesByFinding(ctx context.Context, findingID int64) ([]domain.Vulnerability, error) {
 	query := `
 		MATCH (f:Finding {id: $finding_id})-[:OF_VULNERABILITY]->(v:Vulnerability)
-		RETURN properties(v) AS props
+		OPTIONAL MATCH (c:CAPEC)-[:MAPS_TO_CWE]->(w:CWE) WHERE (v)-[:HAS_CWE]->(w) OR w.cwe_id IN v.cwe
+		OPTIONAL MATCH (c)-[:MAPS_TO_TTP]->(t:TTP)
+		WITH v, collect(DISTINCT {
+			ttp_id: t.ttp_id,
+			name: coalesce(t.name, ''),
+			tactic: coalesce(t.tactic, ''),
+			description: coalesce(t.description, '')
+		}) AS rawTTPs
+		RETURN properties(v) AS props, [x IN rawTTPs WHERE x.ttp_id IS NOT NULL] AS ttps
 		ORDER BY v.base_score DESC
 	`
 
@@ -216,14 +224,32 @@ func (r *findingRepo) GetVulnerabilitiesByFinding(ctx context.Context, findingID
 			if !ok {
 				continue
 			}
+
+			var ttpsList []domain.TTP
+			if ttpsRaw, ok := rec.Get("ttps"); ok && ttpsRaw != nil {
+				if items, ok := ttpsRaw.([]any); ok {
+					for _, item := range items {
+						if m, ok := item.(map[string]any); ok {
+							ttpsList = append(ttpsList, domain.TTP{
+								TTPID:       getString(m, "ttp_id"),
+								Name:        getString(m, "name"),
+								Tactic:      getString(m, "tactic"),
+								Description: getString(m, "description"),
+							})
+						}
+					}
+				}
+			}
+
 			vulns = append(vulns, domain.Vulnerability{
 				CVEID:       getString(props, "cve_id"),
 				Description: getString(props, "description"),
 				BaseScore:   getFloat64(props, "base_score"),
 				CVSSVector:  getString(props, "cvss_vector"),
 				NVDVector:   getString(props, "nvd_vector"),
-				CWE:         getString(props, "cwe"),
+				CWE:         getStringSlice(props, "cwe"),
 				CPE:         getString(props, "cpe"),
+				TTPs:        ttpsList,
 				Exploit:     getBool(props, "exploit"),
 				KEV:         getBool(props, "kev"),
 				EPSSScore:   getFloat64(props, "epss_score"),

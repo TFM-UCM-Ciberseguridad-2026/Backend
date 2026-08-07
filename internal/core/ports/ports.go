@@ -30,6 +30,9 @@ type VulnerabilityPort interface {
 	Update(ctx context.Context, vuln *domain.Vulnerability) error
 	GetByID(ctx context.Context, cveID string) (*domain.Vulnerability, error)
 	DeleteByID(ctx context.Context, cveID string) error
+	LinkVulnerabilityToCWEs(ctx context.Context, cveID string, cwes []string) error
+	GetInferredTTPsByCVE(ctx context.Context, cveID string) ([]domain.TTP, error)
+	LinkInferredTTPsToVulnerability(ctx context.Context, cveID string) (int, error)
 }
 
 type SoftwarePort interface {
@@ -177,6 +180,12 @@ type TTPPort interface {
 	GetByID(ctx context.Context, id string) (*domain.TTP, error)
 	DeleteByID(ctx context.Context, id string) error
 	RelateToVulnerability(ctx context.Context, cveID string, ttpID string) error
+	SaveBatch(ctx context.Context, ttps []domain.TTP) error
+}
+
+// MitreATTACKProvider obtiene el catálogo MITRE ATT&CK Enterprise desde el feed STIX 2.1.
+type MitreATTACKProvider interface {
+	FetchATTACKBundle(ctx context.Context) ([]domain.TTP, error)
 }
 
 type ThreatActorPort interface {
@@ -218,6 +227,20 @@ type EPSSProvider interface {
 // KEVProvider obtiene el catálogo CISA Known Exploited Vulnerabilities.
 type KEVProvider interface {
 	FetchKEV(ctx context.Context) (map[string]bool, error)
+}
+
+// CAPECProvider obtiene el catálogo MITRE CAPEC desde el feed STIX 2.1.
+type CAPECProvider interface {
+	FetchCAPECBundle(ctx context.Context) ([]domain.CAPEC, error)
+}
+
+// CAPECPort define las operaciones de persistencia para patrones de ataque CAPEC.
+type CAPECPort interface {
+	Save(ctx context.Context, capec *domain.CAPEC) error
+	GetByID(ctx context.Context, id string) (*domain.CAPEC, error)
+	LinkCAPECToCWE(ctx context.Context, capecID string, cweID string) error
+	LinkCAPECToTTP(ctx context.Context, capecID string, ttpID string) error
+	SaveBatch(ctx context.Context, capecs []domain.CAPEC) error
 }
 
 // PatchProvider obtiene información de remediación (parches publicados y versiones
