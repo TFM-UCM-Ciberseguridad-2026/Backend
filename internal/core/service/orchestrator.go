@@ -332,6 +332,15 @@ func (o *Orchestrator) GetTopAPTs(ctx context.Context) ([]domain.APTThreatResult
 	return o.infraPort.GetTopAPTsByInfrastructureTTPs(ctx, 10)
 }
 
+
+// GetVulnerabilitiesForFinding devuelve los CVEs asociados a un finding concreto. Se usa
+// desde el botón "Ver CVEs" del inspector de nodos, ya que los nodos Vulnerability no
+// viajan en el grafo general.
+func (o *Orchestrator) GetVulnerabilitiesForFinding(ctx context.Context, findingID int64) ([]domain.Vulnerability, error) {
+	return o.findingPort.GetVulnerabilitiesByFinding(ctx, findingID)
+}
+
+
 /*
 AutoScanAndRegisterVulnerabilities implementa el caso de uso central para automatizar la detección y registro de fallos:
  1. Recupera la entidad del software a partir de su ID.

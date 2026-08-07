@@ -45,6 +45,9 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* POST /api/findings/{id}/vuln-remediations: Asocia vulnerabilidades y planes de remediación a un hallazgo. */
 	mux.HandleFunc("POST /api/findings/{id}/vuln-remediations", h.AssociateVulnerabilitiesAndRemediations)
 
+	/* GET /api/findings/{id}/vulnerabilities: Devuelve los CVEs asociados a un finding, usado por el modal "Ver CVEs" del inspector de nodos. */
+	mux.HandleFunc("GET /api/findings/{id}/vulnerabilities", h.GetFindingVulnerabilities)
+
 	/* GET /api/infrastructure: Obtiene el grafo de infraestructura y relaciones. */
 	mux.HandleFunc("GET /api/infrastructure", h.GetInfrastructure)
 

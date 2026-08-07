@@ -54,6 +54,8 @@ type FindingPort interface {
 	//
 	// Devuelve los IDs de los findings actualizados.
 	ApplyRemediationByInstallationAndCVE(ctx context.Context, installationID, cveID string, remediationFactor float64, status string) ([]int64, error)
+	GetVulnerabilitiesByFinding(ctx context.Context, findingID int64) ([]domain.Vulnerability, error)
+
 }
 
 type RemediationPort interface {
