@@ -211,22 +211,6 @@ func (o *Orchestrator) AssociateHardwareToEndpoint(ctx context.Context, endpoint
 	return o.relationshipPort.LinkEndpointToHardware(ctx, endpointID, hardware.HardwareID)
 }
 
-// AssociateNetworkToEndpoint guarda un segmento de red y lo asocia a un endpoint.
-func (o *Orchestrator) AssociateNetworkToEndpoint(ctx context.Context, endpointID int64, network *domain.Network) error {
-	if network.NetworkID == 0 {
-		id, err := o.nextNodeID(ctx, "Network")
-		if err != nil {
-			return fmt.Errorf("error generando ID de red: %w", err)
-		}
-		network.NetworkID = id
-	}
-
-	if err := o.networkPort.Save(ctx, network); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
-		return err
-	}
-	return o.relationshipPort.LinkEndpointToNetwork(ctx, endpointID, network.NetworkID)
-}
-
 
 // CreateNetwork crea una red de forma independiente (sin endpoint asociado explícito) y
 // enlaza automáticamente los endpoints cuya IP caiga dentro del CIDR y, si la red define

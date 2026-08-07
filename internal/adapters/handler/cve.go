@@ -115,28 +115,6 @@ func (h *OrchestratorHandler) AssociateHardwareToEndpoint(w http.ResponseWriter,
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
 }
 
-// POST /api/endpoints/{id}/networks
-func (h *OrchestratorHandler) AssociateNetworkToEndpoint(w http.ResponseWriter, r *http.Request) {
-	idStr := r.PathValue("id")
-	endpointID, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		sendError(w, "Invalid endpoint ID", http.StatusBadRequest)
-		return
-	}
-
-	var net domain.Network
-	if err := json.NewDecoder(r.Body).Decode(&net); err != nil {
-		sendError(w, "Invalid JSON", http.StatusBadRequest)
-		return
-	}
-
-	if err := h.orchestrator.AssociateNetworkToEndpoint(r.Context(), endpointID, &net); err != nil {
-		sendError(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
-}
-
 // POST /api/endpoints/{id}/installations
 func (h *OrchestratorHandler) RegisterSoftwareInstallation(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
