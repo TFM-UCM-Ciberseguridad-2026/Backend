@@ -212,6 +212,7 @@ func (o *Orchestrator) AssociateHardwareToEndpoint(ctx context.Context, endpoint
 }
 
 // AssociateNetworkToEndpoint guarda un segmento de red y lo asocia a un endpoint.
+/*
 func (o *Orchestrator) AssociateNetworkToEndpoint(ctx context.Context, endpointID int64, network *domain.Network) error {
 	if network.NetworkID == 0 {
 		id, err := o.nextNodeID(ctx, "Network")
@@ -226,6 +227,7 @@ func (o *Orchestrator) AssociateNetworkToEndpoint(ctx context.Context, endpointI
 	}
 	return o.relationshipPort.LinkEndpointToNetwork(ctx, endpointID, network.NetworkID)
 }
+*/
 
 
 // CreateNetwork crea una red de forma independiente (sin endpoint asociado explícito) y
@@ -347,6 +349,15 @@ func (o *Orchestrator) ImportInfrastructure(ctx context.Context, data *domain.Gr
 func (o *Orchestrator) GetTopAPTs(ctx context.Context) ([]domain.APTThreatResult, error) {
 	return o.infraPort.GetTopAPTsByInfrastructureTTPs(ctx, 10)
 }
+
+
+// GetVulnerabilitiesForFinding devuelve los CVEs asociados a un finding concreto. Se usa
+// desde el botón "Ver CVEs" del inspector de nodos, ya que los nodos Vulnerability no
+// viajan en el grafo general.
+func (o *Orchestrator) GetVulnerabilitiesForFinding(ctx context.Context, findingID int64) ([]domain.Vulnerability, error) {
+	return o.findingPort.GetVulnerabilitiesByFinding(ctx, findingID)
+}
+
 
 /*
 AutoScanAndRegisterVulnerabilities implementa el caso de uso central para automatizar la detección y registro de fallos:

@@ -116,6 +116,7 @@ func (h *OrchestratorHandler) AssociateHardwareToEndpoint(w http.ResponseWriter,
 }
 
 // POST /api/endpoints/{id}/networks
+/*
 func (h *OrchestratorHandler) AssociateNetworkToEndpoint(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	endpointID, err := strconv.ParseInt(idStr, 10, 64)
@@ -136,6 +137,7 @@ func (h *OrchestratorHandler) AssociateNetworkToEndpoint(w http.ResponseWriter, 
 	}
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
 }
+*/
 
 // POST /api/endpoints/{id}/installations
 func (h *OrchestratorHandler) RegisterSoftwareInstallation(w http.ResponseWriter, r *http.Request) {
@@ -203,6 +205,29 @@ func (h *OrchestratorHandler) AssociateVulnerabilitiesAndRemediations(w http.Res
 	}
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
 }
+
+// GET /api/findings/{id}/vulnerabilities
+func (h *OrchestratorHandler) GetFindingVulnerabilities(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	findingID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		sendError(w, "Invalid finding ID", http.StatusBadRequest)
+		return
+	}
+
+	vulns, err := h.orchestrator.GetVulnerabilitiesForFinding(r.Context(), findingID)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]any{
+		"finding_id":      findingID,
+		"count":           len(vulns),
+		"vulnerabilities": vulns,
+	}, http.StatusOK)
+}
+
 
 // GET /api/infrastructure
 func (h *OrchestratorHandler) GetInfrastructure(w http.ResponseWriter, r *http.Request) {
