@@ -97,12 +97,12 @@ func main() {
 	}
 	fmt.Println("AssociateHardwareToEndpoint ejecutado.")
 
-	// CU 4: Asociar red
+	// CU 4: Crear red
 	net := &domain.Network{NetworkID: 999, Nombre: "DMZ", CIDR: "192.168.1.0/24", Gateway: "192.168.1.1"}
-	if err := orchestrator.AssociateNetworkToEndpoint(ctx, 555, net); err != nil {
-		log.Fatalf("Error AssociateNetworkToEndpoint: %v", err)
+	if _, _, err := orchestrator.CreateNetwork(ctx, net); err != nil {
+		log.Fatalf("Error CreateNetwork: %v", err)
 	}
-	fmt.Println("AssociateNetworkToEndpoint ejecutado.")
+	fmt.Println("CreateNetwork ejecutado.")
 
 	// CU 5: Registrar instalación de software
 	sw := &domain.Software{SoftwareID: 404, Name: "Apache Tomcat", Version: "9.0.41", Vendor: "Apache Software Foundation"}

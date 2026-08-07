@@ -113,7 +113,7 @@ func main() {
 		VLANID:      970,
 		Descripcion: "Network for frontend validation",
 	}
-	if err := orchestrator.AssociateNetworkToEndpoint(ctx, endpointID, network); err != nil {
+	if _, _, err := orchestrator.CreateNetwork(ctx, network); err != nil {
 		log.Fatalf("Error creando network: %v", err)
 	}
 
