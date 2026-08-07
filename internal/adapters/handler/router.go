@@ -53,6 +53,9 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* POST /api/infrastructure/import: Importa la declaración de infraestructura desde un JSON. */
 	mux.HandleFunc("POST /api/infrastructure/import", h.ImportInfrastructure)
 
+	/* GET /api/projects/{id}/export: Exporta el grafo de infraestructura de un proyecto. */
+	mux.HandleFunc("GET /api/projects/{id}/export", h.ExportProject)
+
 	/* GET /api/infrastructure/top-apts: Obtiene los actores de amenazas (APTs) que afectan la infraestructura auditada. */
 	mux.HandleFunc("GET /api/infrastructure/top-apts", h.GetTopAPTs)
 
@@ -90,5 +93,21 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* GET /api/installations/{id}/applied-patches: Histórico de parches aplicados sobre la instalación. */
 	mux.HandleFunc("GET /api/installations/{id}/applied-patches", h.GetAppliedPatchHistory)
 
+	// Rutas CRUD para Edición y Borrado de Activos
+	mux.HandleFunc("GET /api/endpoints/{id}/ips", h.GetEndpointIPs)
+	mux.HandleFunc("PUT /api/endpoints/{id}", h.UpdateEndpoint)
+
+	mux.HandleFunc("DELETE /api/endpoints/{id}", h.DeleteEndpoint)
+	mux.HandleFunc("PUT /api/networks/{id}", h.UpdateNetwork)
+	mux.HandleFunc("DELETE /api/networks/{id}", h.DeleteNetwork)
+	mux.HandleFunc("PUT /api/hardware/{id}", h.UpdateHardware)
+	mux.HandleFunc("DELETE /api/hardware/{id}", h.DeleteHardware)
+	mux.HandleFunc("PUT /api/software/{id}", h.UpdateSoftware)
+	mux.HandleFunc("DELETE /api/software/{id}", h.DeleteSoftware)
+	mux.HandleFunc("PUT /api/installations/{id}", h.UpdateSoftwareInstallation)
+	mux.HandleFunc("DELETE /api/installations/{id}", h.DeleteSoftwareInstallation)
+	mux.HandleFunc("DELETE /api/nodes/{id}", h.DeleteNode)
+
 	return mux
 }
+
