@@ -74,13 +74,10 @@ func clamp(value, min, max float64) float64 {
 	return value
 }
 
-// Factores de remediación por nivel declarado. El factor multiplica el riesgo del
-// finding, así que 1.00 significa "sin remediar" y 0.00 "vulnerabilidad eliminada".
-//
-// Los valores intermedios reflejan que una mitigación reduce el riesgo pero no lo anula:
-// el software vulnerable sigue instalado y la mitigación puede revertirse, saltarse o no
-// cubrir todos los vectores. El hotfix se considera más sólido que el workaround porque
-// toca el código, no solo la configuración.
+// Factores de remediación por nivel: multiplican el riesgo del finding, así que 1.00 es
+// "sin remediar" y 0.00 "vulnerabilidad eliminada". Los intermedios reflejan que una
+// mitigación no anula el riesgo (el software vulnerable sigue ahí y puede revertirse);
+// el hotfix pesa más que el workaround porque toca código, no configuración.
 const (
 	remediationFactorOfficialFix  = 0.00
 	remediationFactorTemporaryFix = 0.30
@@ -88,9 +85,8 @@ const (
 	remediationFactorUnavailable  = 1.00
 )
 
-// RemediationFactorForLevel traduce el nivel de remediación declarado al factor que
-// consume CalculateFindingRisk. Un nivel desconocido se trata como "sin remediación"
-// para no infravalorar el riesgo por un dato mal informado.
+// RemediationFactorForLevel. Un nivel desconocido se trata como "sin remediación" para no
+// infravalorar el riesgo.
 func RemediationFactorForLevel(level domain.RemediationLevel) float64 {
 	switch level {
 	case domain.RemediationLevelOfficialFix:

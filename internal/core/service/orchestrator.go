@@ -728,22 +728,18 @@ func (o *Orchestrator) GetPatchesForVulnerability(ctx context.Context, cveID str
 	return o.patchPort.GetByVulnerability(ctx, cveID)
 }
 
-// DeclarePatchApplied registra que un parche se ha aplicado sobre una instalación y
-// propaga el efecto a los findings de esa instalación afectados por el CVE.
+// DeclarePatchApplied registra un parche aplicado, propaga el efecto a los findings del
+// CVE en esa instalación y recalcula el riesgo de los endpoints afectados.
 //
-// El nivel de remediación determina el factor que multiplica el riesgo:
-//   - OFFICIAL_FIX   → factor 0.00, los findings pasan a PATCHED y salen de la agregación
-//   - TEMPORARY_FIX  → factor 0.30, los findings siguen abiertos con riesgo reducido
-//   - WORKAROUND     → factor 0.50, idem
-//   - UNAVAILABLE    → factor 1.00, revierte una declaración previa
+// El nivel determina el factor que multiplica el riesgo: OFFICIAL_FIX 0.00 (el finding
+// pasa a PATCHED), TEMPORARY_FIX 0.30, WORKAROUND 0.50 y UNAVAILABLE 1.00, que revierte
+// una declaración previa. Solo el parche oficial cierra el finding; una mitigación deja
+// el software vulnerable instalado.
 //
-// Solo el parche oficial cierra el finding: una mitigación reduce el riesgo pero el
-// software vulnerable sigue instalado y la mitigación puede revertirse o no cubrir todos
-// los vectores.
+// La declaración se contrasta con la versión instalada, pero eso nunca la bloquea: hay
+// parcheos legítimos que no cambian el número de versión.
 //
-// No recalcula el riesgo del endpoint: esta operación fija las entradas del cálculo
-// (factor y estado) y el recálculo se dispara con ComputeEndpointRisk, que es lo que ya
-// hace el cron. Devuelve la declaración persistida y los findings afectados.
+// Devuelve la declaración persistida y los findings afectados.
 func (o *Orchestrator) DeclarePatchApplied(
 	ctx context.Context,
 	installationID string,
@@ -767,8 +763,7 @@ func (o *Orchestrator) DeclarePatchApplied(
 		appliedAt = time.Now().UTC()
 	}
 
-	// Si no se indica el parche, se resuelve a partir del CVE. Cuando hay varios
-	// registrados no podemos elegir por el usuario: pedimos que lo concrete.
+	// Sin patch_id se resuelve por el CVE; con varios candidatos hay que concretar.
 	if patchID == 0 {
 		patches, err := o.patchPort.GetByVulnerability(ctx, cveID)
 		if err != nil {
@@ -795,6 +790,7 @@ func (o *Orchestrator) DeclarePatchApplied(
 		RemediationLevel:  level,
 		RemediationFactor: remediationFactor,
 		Notes:             notes,
+		Verification:      o.verifyPatchApplication(ctx, installationID, cveID, level),
 	}
 
 	if err := o.patchPort.SaveApplication(ctx, application); err != nil {
@@ -817,12 +813,9 @@ func (o *Orchestrator) DeclarePatchApplied(
 		return nil, nil, fmt.Errorf("error propagando la remediación a los findings: %w", err)
 	}
 
-	// Sincronizar el nodo Remediation con la declaración. La arista APPLIED_TO es la
-	// fuente de verdad del histórico, pero Remediation.status/applied_at es lo que
-	// consulta quien mira la remediación de un finding, así que deben coincidir.
-	//
-	// Al revertir (UNAVAILABLE) se limpia la fecha: la remediación vuelve a estar
-	// pendiente y conservar un applied_at antiguo daría a entender lo contrario.
+	// La arista APPLIED_TO es la fuente del histórico, pero Remediation.status/applied_at
+	// es lo que se consulta desde el finding, así que deben coincidir. Al revertir se
+	// limpia la fecha: conservarla contradiría el estado pendiente.
 	var remediationAppliedAt *time.Time
 	if level != domain.RemediationLevelUnavailable {
 		applied := application.AppliedAt
@@ -835,7 +828,65 @@ func (o *Orchestrator) DeclarePatchApplied(
 		return nil, nil, fmt.Errorf("error sincronizando las remediaciones: %w", err)
 	}
 
+	// Un fallo aquí no invalida la declaración, ya persistida: el cron la recalculará.
+	if err := o.recomputeRiskForInstallation(ctx, installationID); err != nil {
+		return application, affected, fmt.Errorf("parche declarado, pero falló el recálculo del riesgo: %w", err)
+	}
+
 	return application, affected, nil
+}
+
+// verifyPatchApplication contrasta la declaración con la versión instalada. No devuelve
+// error: es informativa, así que los fallos se traducen a un motivo.
+func (o *Orchestrator) verifyPatchApplication(
+	ctx context.Context,
+	installationID, cveID string,
+	level domain.RemediationLevel,
+) domain.PatchVerification {
+	// Una mitigación no cambia la versión instalada, así que compararla sería ruido.
+	if !level.FullyRemediates() {
+		return domain.PatchVerification{Reason: domain.VerificationNotApplicable}
+	}
+
+	software, err := o.softwareInstPort.GetInstalledSoftware(ctx, installationID)
+	if err != nil || software == nil {
+		return domain.PatchVerification{Reason: domain.VerificationNoInstalledVersion}
+	}
+
+	rawFixedVersion, err := o.remediationPort.GetFixedVersionByInstallationAndCVE(ctx, installationID, cveID)
+	if err != nil {
+		return domain.PatchVerification{
+			Reason:           domain.VerificationNoFixedVersion,
+			InstalledVersion: software.Version,
+		}
+	}
+
+	return domain.VerifyInstalledVersion(
+		software.Name,
+		software.Version,
+		domain.ParseFixedVersions(rawFixedVersion),
+	)
+}
+
+// recomputeRiskForInstallation recalcula el riesgo de los endpoints que alojan una
+// instalación, directamente o vía contenedor.
+func (o *Orchestrator) recomputeRiskForInstallation(ctx context.Context, installationID string) error {
+	if o.riskPort == nil {
+		return fmt.Errorf("el motor de riesgo no está configurado")
+	}
+
+	endpointIDs, err := o.riskPort.GetEndpointIDsByInstallation(ctx, installationID)
+	if err != nil {
+		return fmt.Errorf("error localizando los endpoints de la instalación %s: %w", installationID, err)
+	}
+
+	for _, endpointID := range endpointIDs {
+		if err := o.ComputeEndpointRisk(ctx, endpointID); err != nil {
+			return fmt.Errorf("error recalculando el riesgo del endpoint %d: %w", endpointID, err)
+		}
+	}
+
+	return nil
 }
 
 // GetAppliedPatchHistory devuelve el histórico de parches aplicados sobre una instalación,

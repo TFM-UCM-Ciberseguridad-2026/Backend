@@ -42,12 +42,48 @@ func (r *remediationRepo) DeleteByID(ctx context.Context, id int64) error {
 	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
 }
 
-// ApplyByInstallationAndCVE sincroniza estado y fecha en las remediaciones colgadas de
-// los findings de una instalación para un CVE, recorriendo
-// (SoftwareInstallation)-[:HAS_FINDING]->(Finding)-[:HAS_REMEDIATION]->(Remediation).
-//
-// El parámetro appliedAt se pasa como any para poder escribir null en el grafo cuando se
-// revierte una declaración: el driver de Neo4j no acepta punteros como parámetro.
+// GetFixedVersionByInstallationAndCVE devuelve la versión corregida registrada en la
+// remediación, o cadena vacía si no consta.
+func (r *remediationRepo) GetFixedVersionByInstallationAndCVE(ctx context.Context, installationID, cveID string) (string, error) {
+	query := `
+		MATCH (:SoftwareInstallation {id: $installation_id})-[:HAS_FINDING]->(f:Finding)
+		      -[:OF_VULNERABILITY]->(:Vulnerability {cve_id: $cve_id})
+		MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
+		WHERE coalesce(rem.fixed_version, '') <> ''
+		RETURN rem.fixed_version AS fixed_version
+		LIMIT 1
+	`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{
+			"installation_id": installationID,
+			"cve_id":          cveID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if result.Next(ctx) {
+			value, _ := result.Record().Get("fixed_version")
+			return toStr(value), result.Err()
+		}
+		return "", result.Err()
+	})
+
+	if err != nil {
+		return "", err
+	}
+	if res == nil {
+		return "", nil
+	}
+	return res.(string), nil
+}
+
+// ApplyByInstallationAndCVE sincroniza estado y fecha en las remediaciones de los findings
+// de una instalación para un CVE. appliedAt se desreferencia a any porque el driver no
+// acepta punteros y al revertir hay que escribir null.
 func (r *remediationRepo) ApplyByInstallationAndCVE(ctx context.Context, installationID, cveID, status string, appliedAt *time.Time) (int, error) {
 	query := `
 		MATCH (:SoftwareInstallation {id: $installation_id})-[:HAS_FINDING]->(f:Finding)

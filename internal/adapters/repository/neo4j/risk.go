@@ -20,11 +20,11 @@ func NewRiskRepository(driver neo4j.DriverWithContext) ports.RiskPort {
 // Devuelve el contexto completo de cada finding abierto para calcular su riesgo.
 func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID int64) ([]domain.FindingRiskContext, error) {
 	query := `
-		MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+		// El software cuelga del endpoint o de un contenedor que este aloja; el recorrido
+		// variable cubre ambos caminos.
+		MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
 		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-		// Misma lista de estados cerrados que GetFindingScoresByInstallation. Antes esta
-		// consulta solo excluía RESOLVED, de modo que un finding PATCHED entraba en el
-		// cálculo pero luego desaparecía de la agregación.
+		// Misma lista de estados cerrados que GetFindingScoresByInstallation.
 		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
 		RETURN
 		    f.id                    AS finding_id,
@@ -286,11 +286,12 @@ func (r *riskRepo) UpdateSoftwareInstallationRisk(ctx context.Context, installat
 	})
 }
 
-// GetInstallationIDsByEndpoint devuelve los IDs de todas las instalaciones de software asociadas a un endpoint.
+// GetInstallationIDsByEndpoint devuelve las instalaciones del endpoint y las de los
+// contenedores que aloja.
 func (r *riskRepo) GetInstallationIDsByEndpoint(ctx context.Context, endpointID int64) ([]string, error) {
 	query := `
-        MATCH (:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
-        RETURN si.id AS installation_id
+        MATCH (:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
+        RETURN DISTINCT si.id AS installation_id
         ORDER BY installation_id
     `
 
@@ -373,9 +374,44 @@ func (r *riskRepo) GetSoftwareCriticalityLevel(ctx context.Context, installation
 	return res.(string), nil
 }
 
+// GetEndpointIDsByInstallation es el recorrido inverso de GetInstallationIDsByEndpoint.
+// Devuelve lista porque el grafo no impide que una instalación cuelgue de varios endpoints.
+func (r *riskRepo) GetEndpointIDsByInstallation(ctx context.Context, installationID string) ([]int64, error) {
+	query := `
+        MATCH (e:Endpoint)-[:HAS_INSTALLATION|HOSTS*1..2]->(:SoftwareInstallation {id: $installation_id})
+        RETURN DISTINCT e.id AS endpoint_id
+        ORDER BY endpoint_id
+    `
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"installation_id": installationID})
+		if err != nil {
+			return nil, err
+		}
+
+		ids := make([]int64, 0)
+		for result.Next(ctx) {
+			id, _ := result.Record().Get("endpoint_id")
+			ids = append(ids, toInt64(id))
+		}
+		return ids, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []int64{}, nil
+	}
+	return res.([]int64), nil
+}
+
 func (r *riskRepo) GetSoftwareRiskSummariesByEndpoint(ctx context.Context, endpointID int64) ([]domain.SoftwareRiskSummary, error) {
 	query := `
-        MATCH (:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+        MATCH (:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
         OPTIONAL MATCH (si)-[:INSTANCE_OF]->(s:Software)
         WHERE NOT coalesce(si.status, 'INSTALLED') IN ['REMOVED', 'UNINSTALLED', 'DELETED']
         RETURN si.id AS installation_id,
