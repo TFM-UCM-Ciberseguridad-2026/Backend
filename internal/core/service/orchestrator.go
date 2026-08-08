@@ -225,9 +225,10 @@ func (o *Orchestrator) AssociateHardwareToEndpoint(ctx context.Context, endpoint
 
 // CreateNetwork crea una red de forma independiente (sin endpoint asociado explícito) y
 // enlaza automáticamente los endpoints cuya IP caiga dentro del CIDR y, si la red define
-// VLAN, compartan esa misma VLAN. Devuelve el ID de la red creada y cuántos endpoints se
-// enlazaron.
-func (o *Orchestrator) CreateNetwork(ctx context.Context, network *domain.Network) (int64, int, error) {
+// VLAN, compartan esa misma VLAN. Si ningún endpoint coincide, ancla la red al proyecto
+// indicado como nodo huérfano de ese proyecto en concreto (no aparece en el resto).
+// Devuelve el ID de la red creada y cuántos endpoints se enlazaron.
+func (o *Orchestrator) CreateNetwork(ctx context.Context, network *domain.Network, projectID int64) (int64, int, error) {
 	if network.NetworkID == 0 {
 		id, err := o.nextNodeID(ctx, "Network")
 		if err != nil {
@@ -243,6 +244,12 @@ func (o *Orchestrator) CreateNetwork(ctx context.Context, network *domain.Networ
 	linked, err := o.networkPort.LinkMatchingEndpoints(ctx, network.NetworkID, network.CIDR, network.VLANID)
 	if err != nil {
 		return network.NetworkID, 0, fmt.Errorf("error enlazando endpoints a la red: %w", err)
+	}
+
+	if projectID > 0 {
+		if err := o.networkPort.LinkNetworkToProjectIfOrphan(ctx, network.NetworkID, projectID); err != nil {
+			return network.NetworkID, linked, fmt.Errorf("error anclando la red huérfana al proyecto: %w", err)
+		}
 	}
 
 	return network.NetworkID, linked, nil
@@ -1199,13 +1206,20 @@ func (o *Orchestrator) GetEndpointIPs(ctx context.Context, endpointID int64) ([]
 }
 
 // UpdateNetwork actualiza los datos y re-enlaza automáticamente los Endpoints compatibles a la red.
-func (o *Orchestrator) UpdateNetwork(ctx context.Context, network *domain.Network) (int, error) {
+// Si tras la actualización ningún endpoint coincide, ancla la red al proyecto indicado
+// como huérfana de ese proyecto (ver LinkNetworkToProjectIfOrphan).
+func (o *Orchestrator) UpdateNetwork(ctx context.Context, network *domain.Network, projectID int64) (int, error) {
 	if err := o.networkPort.Update(ctx, network); err != nil {
 		return 0, err
 	}
 	linked, err := o.networkPort.LinkMatchingEndpoints(ctx, network.NetworkID, network.CIDR, network.VLANID)
 	if err != nil {
 		return 0, fmt.Errorf("error enlazando endpoints a la red actualizada: %w", err)
+	}
+	if projectID > 0 {
+		if err := o.networkPort.LinkNetworkToProjectIfOrphan(ctx, network.NetworkID, projectID); err != nil {
+			return linked, fmt.Errorf("error anclando la red huérfana al proyecto: %w", err)
+		}
 	}
 	return linked, nil
 }

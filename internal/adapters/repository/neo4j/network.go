@@ -327,3 +327,21 @@ func (r *networkRepo) LinkEndpointToMatchingNetworks(ctx context.Context, endpoi
 
 	return len(matchingNetworkIDs), nil
 }
+
+// LinkNetworkToProjectIfOrphan ver comentario en ports.NetworkPort.
+func (r *networkRepo) LinkNetworkToProjectIfOrphan(ctx context.Context, networkID int64, projectID int64) error {
+	query := `
+		MATCH (n:Network)
+		WHERE (toInteger(n.id) = toInteger($network_id) OR toString(n.id) = toString($network_id) OR elementId(n) = toString($network_id))
+		  AND NOT EXISTS((:Project)-[:CONTAINS_NETWORK]->(n))
+		  AND NOT EXISTS((:Endpoint)-[:CONNECTED_TO]->(n))
+		WITH n
+		MATCH (p:Project)
+		WHERE toInteger(p.id) = toInteger($project_id) OR toString(p.id) = toString($project_id) OR elementId(p) = toString($project_id)
+		MERGE (p)-[:CONTAINS_NETWORK]->(n)
+	`
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{
+		"network_id": networkID,
+		"project_id": projectID,
+	})
+}
