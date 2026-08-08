@@ -343,6 +343,11 @@ func (o *Orchestrator) GetTopAPTs(ctx context.Context, projectID int64) ([]domai
 	return o.infraPort.GetTopAPTsByInfrastructureTTPs(ctx, 10, projectID)
 }
 
+// GetTotalMitreTTPs obtiene el numero total de TTPs en el catalogo de MITRE.
+func (o *Orchestrator) GetTotalMitreTTPs(ctx context.Context) (int, error) {
+	return o.infraPort.GetTotalMitreTTPs(ctx)
+}
+
 
 // GetVulnerabilitiesForFinding devuelve los CVEs asociados a un finding concreto. Se usa
 // desde el botón "Ver CVEs" del inspector de nodos, ya que los nodos Vulnerability no

@@ -331,6 +331,31 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 	return graphData, nil
 }
 
+func (r *infrastructureRepo) GetTotalMitreTTPs(ctx context.Context) (int, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `MATCH (t:TTP) RETURN count(t) AS total`
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, query, nil)
+		if err != nil {
+			return 0, err
+		}
+		if result.Next(ctx) {
+			record := result.Record()
+			total, _ := record.Get("total")
+			if t, ok := total.(int64); ok {
+				return int(t), nil
+			}
+		}
+		return 0, nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return res.(int), nil
+}
+
 
 // GetTopAPTsByInfrastructureTTPs recorre el grafo completo desde la infraestructura del usuario
 // hasta los actores de amenaza, calculando qué APTs cubren más TTPs vinculadas a las CVEs detectadas.

@@ -249,6 +249,16 @@ func (h *OrchestratorHandler) GetTopAPTs(w http.ResponseWriter, r *http.Request)
 	sendJSON(w, results, http.StatusOK)
 }
 
+// GET /api/infrastructure/mitre-ttp-count
+func (h *OrchestratorHandler) GetMitreTTPCount(w http.ResponseWriter, r *http.Request) {
+	count, err := h.orchestrator.GetTotalMitreTTPs(r.Context())
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]int{"count": count}, http.StatusOK)
+}
+
 // GET /api/infrastructure/exploitation-paths
 func (h *OrchestratorHandler) GetExploitationPaths(w http.ResponseWriter, r *http.Request) {
 	paths, err := h.orchestrator.GenerateExploitationPaths(r.Context())
