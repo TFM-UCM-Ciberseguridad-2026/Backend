@@ -45,6 +45,10 @@ type Orchestrator struct {
 	kevProvider      ports.KEVProvider
 	scoutPort        ports.ContainerScannerPort
 	patchProvider    ports.PatchProvider
+	capecPort        ports.CAPECPort
+	capecProvider    ports.CAPECProvider
+	ttpPort          ports.TTPPort
+	mitreAttackProvider ports.MitreATTACKProvider
 }
 
 func NewOrchestrator(
@@ -103,6 +107,13 @@ func (o *Orchestrator) WithScout(scoutPort ports.ContainerScannerPort) *Orchestr
 // de NewOrchestrator y no romper el código que ya la usa.
 func (o *Orchestrator) WithPatchProvider(patchProvider ports.PatchProvider) *Orchestrator {
 	o.patchProvider = patchProvider
+	return o
+}
+
+// WithCAPEC inyecta el repositorio y proveedor STIX del catálogo CAPEC.
+func (o *Orchestrator) WithCAPEC(capecPort ports.CAPECPort, capecProvider ports.CAPECProvider) *Orchestrator {
+	o.capecPort = capecPort
+	o.capecProvider = capecProvider
 	return o
 }
 
@@ -1253,3 +1264,46 @@ func (o *Orchestrator) ExportProjectGraph(ctx context.Context, projectID int64) 
 	}
 	return o.projectPort.ExportGraph(ctx, projectID)
 }
+
+// SyncCAPECCatalog descarga el catálogo STIX 2.1 de MITRE CAPEC e ingiere los patrones de ataque y sus relaciones con CWE en Neo4j.
+func (o *Orchestrator) SyncCAPECCatalog(ctx context.Context) (int, error) {
+	if o.capecProvider == nil || o.capecPort == nil {
+		return 0, fmt.Errorf("los componentes de CAPEC (capecPort y capecProvider) no han sido inyectados en el orquestador")
+	}
+
+	capecs, err := o.capecProvider.FetchCAPECBundle(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("error obteniendo el catálogo STIX CAPEC: %w", err)
+	}
+
+	if err := o.capecPort.SaveBatch(ctx, capecs); err != nil {
+		return 0, fmt.Errorf("error guardando el catálogo CAPEC en Neo4j: %w", err)
+	}
+
+	return len(capecs), nil
+}
+
+func (o *Orchestrator) WithMitreATTACK(ttpPort ports.TTPPort, provider ports.MitreATTACKProvider) *Orchestrator {
+	o.ttpPort = ttpPort
+	o.mitreAttackProvider = provider
+	return o
+}
+
+// SyncATTACKCatalog descarga el catálogo STIX 2.1 de MITRE ATT&CK Enterprise e ingiere la metadata de TTPs (nombre, tácticas, descripción) en Neo4j.
+func (o *Orchestrator) SyncATTACKCatalog(ctx context.Context) (int, error) {
+	if o.mitreAttackProvider == nil || o.ttpPort == nil {
+		return 0, fmt.Errorf("los componentes de MITRE ATT&CK (ttpPort y mitreAttackProvider) no han sido inyectados en el orquestador")
+	}
+
+	ttps, err := o.mitreAttackProvider.FetchATTACKBundle(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("error obteniendo el catálogo STIX MITRE ATT&CK: %w", err)
+	}
+
+	if err := o.ttpPort.SaveBatch(ctx, ttps); err != nil {
+		return 0, fmt.Errorf("error guardando el catálogo MITRE ATT&CK TTPs en Neo4j: %w", err)
+	}
+
+	return len(ttps), nil
+}
+
