@@ -339,8 +339,8 @@ func (o *Orchestrator) ImportInfrastructure(ctx context.Context, data *domain.Gr
 
 // GetTopAPTs obtiene la lista rankeada de Actores de Amenaza (APT) que más TTPs comparten
 // con las vulnerabilidades detectadas en la infraestructura del usuario.
-func (o *Orchestrator) GetTopAPTs(ctx context.Context) ([]domain.APTThreatResult, error) {
-	return o.infraPort.GetTopAPTsByInfrastructureTTPs(ctx, 10)
+func (o *Orchestrator) GetTopAPTs(ctx context.Context, projectID int64) ([]domain.APTThreatResult, error) {
+	return o.infraPort.GetTopAPTsByInfrastructureTTPs(ctx, 10, projectID)
 }
 
 
