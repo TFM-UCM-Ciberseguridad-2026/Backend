@@ -889,6 +889,34 @@ func (o *Orchestrator) recomputeRiskForInstallation(ctx context.Context, install
 	return nil
 }
 
+// defaultPatchQueueLimit acota la cola cuando el cliente no pide un tamaño.
+const defaultPatchQueueLimit = 50
+
+// GetPatchQueue devuelve los findings pendientes ordenados por prioridad de parcheo.
+// projectID nulo recorre toda la infraestructura.
+//
+// Clasifica cada entrada en el momento de servirla en lugar de leer un tier persistido:
+// así la cola queda consistente aunque el finding se haya calculado con un baremo
+// anterior.
+func (o *Orchestrator) GetPatchQueue(ctx context.Context, projectID *int64, limit int) ([]domain.PatchQueueItem, error) {
+	if o.riskPort == nil {
+		return nil, fmt.Errorf("el motor de riesgo no está configurado")
+	}
+	if limit <= 0 {
+		limit = defaultPatchQueueLimit
+	}
+
+	items, err := o.riskPort.GetPatchQueue(ctx, projectID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("error obteniendo la cola de parcheo: %w", err)
+	}
+
+	for i := range items {
+		items[i].PriorityTier = ClassifyRiskTier(items[i].PriorityScore)
+	}
+	return items, nil
+}
+
 // GetAppliedPatchHistory devuelve el histórico de parches aplicados sobre una instalación,
 // del más reciente al más antiguo.
 func (o *Orchestrator) GetAppliedPatchHistory(ctx context.Context, installationID string) ([]domain.AppliedPatch, error) {
