@@ -57,7 +57,7 @@ func main() {
 	for _, vuln := range vulnerabilities {
 		fmt.Printf("[ID CVE]:      %s\n", vuln.CVEID)
 		fmt.Printf("    Score CVSS:  %.1f\n", vuln.BaseScore)
-		fmt.Printf("    CWE:         %s\n", vuln.CWE)
+		fmt.Printf("    CWE:         %v\n", vuln.CWE)
 		fmt.Printf("    Primer CPE:  %s\n", vuln.CPE)
 		fmt.Printf("    Descripción (%s): %s\n", vuln.Description, vuln.Description)
 		fmt.Println("--------------------------------------------------------------------------------")

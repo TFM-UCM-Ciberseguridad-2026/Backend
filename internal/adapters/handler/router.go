@@ -60,6 +60,9 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* GET /api/infrastructure/top-apts: Obtiene los actores de amenazas (APTs) que afectan la infraestructura auditada. */
 	mux.HandleFunc("GET /api/infrastructure/top-apts", h.GetTopAPTs)
 
+	/* GET /api/infrastructure/mitre-ttp-count: Obtiene el numero total de TTPs en el catalogo MITRE. */
+	mux.HandleFunc("GET /api/infrastructure/mitre-ttp-count", h.GetMitreTTPCount)
+
 	/* GET /api/infrastructure/exploitation-paths: Obtiene las rutas de explotación calculadas en la infraestructura. */
 	mux.HandleFunc("GET /api/infrastructure/exploitation-paths", h.GetExploitationPaths)
 

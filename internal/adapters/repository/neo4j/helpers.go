@@ -2,6 +2,7 @@ package neo4j
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -87,6 +88,34 @@ func getString(m map[string]any, k string) string {
 		return v
 	}
 	return ""
+}
+
+func getStringSlice(m map[string]any, k string) []string {
+	if v, ok := m[k].([]any); ok {
+		var res []string
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				res = append(res, s)
+			}
+		}
+		if res != nil {
+			return res
+		}
+	}
+	if v, ok := m[k].([]string); ok {
+		return v
+	}
+	if v, ok := m[k].(string); ok && v != "" && v != "N/A" {
+		parts := strings.Split(v, ",")
+		var res []string
+		for _, p := range parts {
+			if trimmed := strings.TrimSpace(p); trimmed != "" {
+				res = append(res, trimmed)
+			}
+		}
+		return res
+	}
+	return []string{}
 }
 
 func getInt64(m map[string]any, k string) int64 {

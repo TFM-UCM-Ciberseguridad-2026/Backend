@@ -233,12 +233,30 @@ func (h *OrchestratorHandler) ImportInfrastructure(w http.ResponseWriter, r *htt
 
 // GET /api/infrastructure/top-apts
 func (h *OrchestratorHandler) GetTopAPTs(w http.ResponseWriter, r *http.Request) {
-	results, err := h.orchestrator.GetTopAPTs(r.Context())
+	projectIDStr := r.URL.Query().Get("project_id")
+	var projectID int64 = 0
+	if projectIDStr != "" {
+		if id, err := strconv.ParseInt(projectIDStr, 10, 64); err == nil {
+			projectID = id
+		}
+	}
+
+	results, err := h.orchestrator.GetTopAPTs(r.Context(), projectID)
 	if err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	sendJSON(w, results, http.StatusOK)
+}
+
+// GET /api/infrastructure/mitre-ttp-count
+func (h *OrchestratorHandler) GetMitreTTPCount(w http.ResponseWriter, r *http.Request) {
+	count, err := h.orchestrator.GetTotalMitreTTPs(r.Context())
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]int{"count": count}, http.StatusOK)
 }
 
 // GET /api/infrastructure/exploitation-paths

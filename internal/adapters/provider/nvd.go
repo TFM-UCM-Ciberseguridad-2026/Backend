@@ -303,10 +303,32 @@ func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 		}
 	}
 
-	// 3. Extraer CWE
-	cwe := "N/A"
-	if len(cve.Weaknesses) > 0 && len(cve.Weaknesses[0].Description) > 0 {
-		cwe = cve.Weaknesses[0].Description[0].Value
+	// 3. Extraer CWE (Soporte para múltiples CWEs y filtrado por idioma preferente)
+	var cweList []string
+	seenCWE := make(map[string]bool)
+
+	for _, w := range cve.Weaknesses {
+		var selectedValue string
+		for _, d := range w.Description {
+			if d.Value == "" {
+				continue
+			}
+			if d.Lang == "en" {
+				selectedValue = d.Value
+				break
+			}
+			if selectedValue == "" {
+				selectedValue = d.Value
+			}
+		}
+		if selectedValue != "" && !seenCWE[selectedValue] {
+			seenCWE[selectedValue] = true
+			cweList = append(cweList, selectedValue)
+		}
+	}
+
+	if cweList == nil {
+		cweList = []string{}
 	}
 
 	// 4. Extraer el primer CPE identificable
@@ -341,7 +363,7 @@ func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 		BaseScore:       baseScore,
 		CVSSVector:      cvssVector,
 		NVDVector:       nvdVector,
-		CWE:             cwe,
+		CWE:             cweList,
 		CPE:             cpe,
 		TTPRelated:      "",    // Se rellenará en la capa de aplicación mediante integraciones de MITRE
 		Exploit:         false, // Valores por defecto (se alimentan desde otras APIs como FIRST o CISA)

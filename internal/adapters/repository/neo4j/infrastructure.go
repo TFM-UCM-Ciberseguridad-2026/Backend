@@ -29,23 +29,29 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 
 	query := `
 		MATCH (n)
-		WITH collect(n) AS rawNodes
-		WITH [n IN rawNodes WHERE NOT (n:ThreatActor OR n:TTP OR n:IPAddress OR n:Vulnerability)] AS cleanNodes
-		WITH [n IN cleanNodes | {
+		WHERE NOT (n:ThreatActor OR n:TTP OR n:IPAddress)
+		OPTIONAL MATCH (c:CAPEC)-[:MAPS_TO_CWE]->(w:CWE) WHERE ("Vulnerability" IN labels(n)) AND ((n)-[:HAS_CWE]->(w) OR w.cwe_id IN n.cwe)
+		OPTIONAL MATCH (c)-[:MAPS_TO_TTP]->(t:TTP)
+		WITH n, collect(DISTINCT case when t.ttp_id is not null then {ttp_id: t.ttp_id, name: coalesce(t.name, ''), tactic: coalesce(t.tactic, ''), description: coalesce(t.description, '')} else null end) AS inferredTTPs
+		WITH n, [x IN inferredTTPs WHERE x IS NOT NULL] AS cleanTTPs
+		WITH collect({
 			id: elementId(n), 
 			labels: labels(n), 
-			properties: properties(n), 
+			properties: n {.*, ttps: cleanTTPs}, 
 			vulnCount: COUNT { (n)-[:OF_VULNERABILITY]->(:Vulnerability) }
-		}] AS nodes
+		}) AS nodes
 		OPTIONAL MATCH (s)-[rel]->(t)
-		WITH nodes, collect(rel) AS rawRels
-		WITH nodes, [r IN rawRels WHERE NOT (startNode(r):ThreatActor OR startNode(r):TTP OR startNode(r):IPAddress OR startNode(r):Vulnerability OR endNode(r):ThreatActor OR endNode(r):TTP OR endNode(r):IPAddress OR endNode(r):Vulnerability)] AS cleanRels
-		OPTIONAL MATCH (ttp:TTP)-[:TARGETS_VULN]->(v:Vulnerability)
-		WITH nodes, cleanRels, collect({ttp_id: coalesce(ttp.ttp_id, ttp.id), cve_id: coalesce(v.cve_id, v.id)}) AS rawTtpMaps
-		WITH nodes, cleanRels, [m IN rawTtpMaps WHERE m.ttp_id IS NOT NULL AND m.cve_id IS NOT NULL] AS ttpMaps
+		WHERE NOT (startNode(rel):ThreatActor OR startNode(rel):TTP OR startNode(rel):IPAddress OR endNode(rel):ThreatActor OR endNode(rel):TTP OR endNode(rel):IPAddress)
+		WITH nodes, collect({
+			id: elementId(rel),
+			type: type(rel),
+			source: elementId(startNode(rel)),
+			target: elementId(endNode(rel)),
+			properties: properties(rel)
+		}) AS cleanRels
 		OPTIONAL MATCH (e:Endpoint)-[:HAS_IP]->(ip:IPAddress)
-		WITH nodes, cleanRels, ttpMaps, collect(case when e is null or ip is null then null else {endpoint_id: elementId(e), ip: coalesce(ip.ip, ""), vlan_id: coalesce(ip.vlan_id, 0)} end) AS ipMaps
-		RETURN nodes, [r IN cleanRels | {id: elementId(r), type: type(r), source: elementId(startNode(r)), target: elementId(endNode(r)), properties: properties(r)}] AS relationships, ttpMaps AS ttp_mappings, [i in ipMaps WHERE i IS NOT NULL] AS ip_mappings
+		WITH nodes, cleanRels, collect(case when e is null or ip is null then null else {endpoint_id: elementId(e), ip: coalesce(ip.ip, ""), vlan_id: coalesce(ip.vlan_id, 0)} end) AS ipMaps
+		RETURN nodes, cleanRels AS relationships, [] AS ttp_mappings, [i in ipMaps WHERE i IS NOT NULL] AS ip_mappings
 	`
 
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
@@ -325,11 +331,36 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 	return graphData, nil
 }
 
+func (r *infrastructureRepo) GetTotalMitreTTPs(ctx context.Context) (int, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `MATCH (t:TTP) RETURN count(t) AS total`
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, query, nil)
+		if err != nil {
+			return 0, err
+		}
+		if result.Next(ctx) {
+			record := result.Record()
+			total, _ := record.Get("total")
+			if t, ok := total.(int64); ok {
+				return int(t), nil
+			}
+		}
+		return 0, nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return res.(int), nil
+}
+
 
 // GetTopAPTsByInfrastructureTTPs recorre el grafo completo desde la infraestructura del usuario
 // hasta los actores de amenaza, calculando qué APTs cubren más TTPs vinculadas a las CVEs detectadas.
 // Cadena de traversal: Project → Endpoint → SoftwareInstallation → Finding → Vulnerability ← TTP ← ThreatActor
-func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int) ([]domain.APTThreatResult, error) {
+func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int, projectID int64) ([]domain.APTThreatResult, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
@@ -338,15 +369,19 @@ func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context,
 	// 2. Para cada ThreatActor, cuenta cuántas de esas TTPs utiliza
 	// 3. Calcula el porcentaje de cobertura y ordena descendentemente
 	query := `
-		// Paso 1: Obtener todas las TTPs únicas que apuntan a CVEs de la infraestructura
+		// Paso 1: Obtener todas las TTPs únicas que apuntan a CVEs de la infraestructura a través de CWE y CAPEC
 		MATCH (p:Project)-[:HAS_ENDPOINT]->(e:Endpoint)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
-		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)<-[:TARGETS_VULN]-(ttp:TTP)
+		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE $project_id = 0 OR p.id = $project_id
+		MATCH (c:CAPEC)-[:MAPS_TO_CWE]->(w:CWE)
+		WHERE (v)-[:HAS_CWE]->(w) OR w.cwe_id IN v.cwe
+		MATCH (c)-[:MAPS_TO_TTP]->(ttp:TTP)
 		WITH collect(DISTINCT ttp) AS infraTTPs
 
 		// Paso 2: Para cada ThreatActor, calcular solapamiento con las TTPs de la infraestructura
 		UNWIND infraTTPs AS infraTTP
 		WITH infraTTPs, infraTTP
-		MATCH (ta:ThreatActor)-[:USES_TTP]->(infraTTP)
+		MATCH (ta:ThreatActor)-[:USES]->(infraTTP)
 		WITH ta, infraTTPs,
 		     collect(DISTINCT infraTTP) AS matchedTTPs
 
@@ -356,10 +391,10 @@ func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context,
 		     size(matchedTTPs) AS matchedCount,
 		     [t IN matchedTTPs | t.name] AS matchedNames,
 		     [t IN matchedTTPs | coalesce(t.ttp_id, t.id)] AS matchedIDs
-		RETURN ta.id AS actor_id,
-		       ta.name AS actor_name,
-		       ta.origin AS origin,
-		       ta.motivation AS motivation,
+		RETURN coalesce(ta.actor_id, ta.id, 'UNKNOWN') AS actor_id,
+		       coalesce(ta.name, 'Unknown') AS actor_name,
+		       coalesce(ta.origin, 'Unknown') AS origin,
+		       coalesce(ta.motivation, 'Unknown') AS motivation,
 		       matchedCount AS matched_ttp_count,
 		       totalInfraTTPs AS total_infra_ttps,
 		       round(toFloat(matchedCount) / totalInfraTTPs * 10000) / 100 AS coverage_percent,
@@ -370,7 +405,7 @@ func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context,
 	`
 
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
-		result, err := tx.Run(ctx, query, map[string]any{"limit": limit})
+		result, err := tx.Run(ctx, query, map[string]any{"limit": limit, "project_id": projectID})
 		if err != nil {
 			return nil, err
 		}
@@ -635,11 +670,16 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 				hostname := getStringLocal(endpointProps["hostname"])
 				cvss := getStringLocal(vulnProps["cvss_vector"])
 				risk := getFloatLocal(findingProps["risk_score"])
-				cwe := getStringLocal(vulnProps["cwe"])
-
 				// Lógica de RCE
 				isRCE := false
-				if cwe == "CWE-94" || cwe == "CWE-78" || cwe == "CWE-77" || getBoolLocal(vulnProps["exploit"]) {
+				cwes := getStringSlice(vulnProps, "cwe")
+				for _, cwe := range cwes {
+					if cwe == "CWE-94" || cwe == "CWE-78" || cwe == "CWE-77" {
+						isRCE = true
+						break
+					}
+				}
+				if getBoolLocal(vulnProps["exploit"]) {
 					isRCE = true
 				}
 				// Lógica de RootObtained

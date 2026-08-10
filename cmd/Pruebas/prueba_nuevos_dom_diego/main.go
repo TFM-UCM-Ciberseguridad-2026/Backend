@@ -107,7 +107,7 @@ func main() {
 		Description: "PwnKit - Local Privilege Escalation en Polkit",
 		BaseScore:   7.8,
 		CVSSVector:  "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-		CWE:         "CWE-78",
+		CWE:         []string{"CWE-78"},
 		CPE:         "cpe:2.3:a:freedesktop:polkit:0.105",
 		TTPRelated:  "T1068",
 		Exploit:     true,
