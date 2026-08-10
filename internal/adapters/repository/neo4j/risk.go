@@ -20,11 +20,11 @@ func NewRiskRepository(driver neo4j.DriverWithContext) ports.RiskPort {
 // Devuelve el contexto completo de cada finding abierto para calcular su riesgo.
 func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID int64) ([]domain.FindingRiskContext, error) {
 	query := `
-		MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+		// El software cuelga del endpoint o de un contenedor que este aloja; el recorrido
+		// variable cubre ambos caminos.
+		MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
 		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-		// Misma lista de estados cerrados que GetFindingScoresByInstallation. Antes esta
-		// consulta solo excluía RESOLVED, de modo que un finding PATCHED entraba en el
-		// cálculo pero luego desaparecía de la agregación.
+		// Misma lista de estados cerrados que GetFindingScoresByInstallation.
 		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
 		RETURN
 		    f.id                    AS finding_id,
@@ -286,11 +286,12 @@ func (r *riskRepo) UpdateSoftwareInstallationRisk(ctx context.Context, installat
 	})
 }
 
-// GetInstallationIDsByEndpoint devuelve los IDs de todas las instalaciones de software asociadas a un endpoint.
+// GetInstallationIDsByEndpoint devuelve las instalaciones del endpoint y las de los
+// contenedores que aloja.
 func (r *riskRepo) GetInstallationIDsByEndpoint(ctx context.Context, endpointID int64) ([]string, error) {
 	query := `
-        MATCH (:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
-        RETURN si.id AS installation_id
+        MATCH (:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
+        RETURN DISTINCT si.id AS installation_id
         ORDER BY installation_id
     `
 
@@ -373,9 +374,131 @@ func (r *riskRepo) GetSoftwareCriticalityLevel(ctx context.Context, installation
 	return res.(string), nil
 }
 
+// GetPatchQueue devuelve los findings pendientes ordenados por prioridad. projectID nulo
+// recorre toda la infraestructura.
+func (r *riskRepo) GetPatchQueue(ctx context.Context, projectID *int64, limit int) ([]domain.PatchQueueItem, error) {
+	query := `
+		MATCH (e:Endpoint)-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
+		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+		  AND ($project_id IS NULL OR EXISTS { (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e) })
+		OPTIONAL MATCH (si)-[:INSTANCE_OF]->(s:Software)
+		OPTIONAL MATCH (c:Container)-[:HAS_INSTALLATION]->(si)
+		OPTIONAL MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
+		RETURN f.id                AS finding_id,
+		       f.status            AS status,
+		       v.cve_id            AS cve_id,
+		       si.id               AS installation_id,
+		       s.name              AS software_name,
+		       s.version           AS software_version,
+		       rem.fixed_version   AS fixed_version,
+		       e.id                AS endpoint_id,
+		       e.hostname          AS hostname,
+		       e.environment       AS environment,
+		       c IS NOT NULL       AS in_container,
+		       c.name              AS container_name,
+		       f.risk_score        AS risk_score,
+		       f.asset_criticality AS asset_criticality,
+		       f.urgency_boost     AS urgency_boost,
+		       f.priority_score    AS priority_score,
+		       EXISTS { (:Patch)-[:FIXES]->(v) } AS patch_available
+		// coalesce porque en Cypher los NULL ordenan primero con DESC: sin él, los
+		// findings a los que aún no se les ha calculado la prioridad encabezarían la cola.
+		ORDER BY coalesce(priority_score, 0.0) DESC, coalesce(risk_score, 0.0) DESC, finding_id ASC
+		LIMIT $limit
+	`
+
+	var projectParam any
+	if projectID != nil {
+		projectParam = *projectID
+	}
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{
+			"project_id": projectParam,
+			"limit":      int64(limit),
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		items := make([]domain.PatchQueueItem, 0)
+		for result.Next(ctx) {
+			props := result.Record().AsMap()
+			items = append(items, domain.PatchQueueItem{
+				Position:         len(items) + 1,
+				FindingID:        getInt64(props, "finding_id"),
+				CVEID:            getString(props, "cve_id"),
+				Status:           getString(props, "status"),
+				InstallationID:   getString(props, "installation_id"),
+				SoftwareName:     getString(props, "software_name"),
+				SoftwareVersion:  getString(props, "software_version"),
+				FixedVersion:     getString(props, "fixed_version"),
+				EndpointID:       getInt64(props, "endpoint_id"),
+				Hostname:         getString(props, "hostname"),
+				Environment:      getString(props, "environment"),
+				InContainer:      getBool(props, "in_container"),
+				ContainerName:    getString(props, "container_name"),
+				RiskScore:        getFloat64(props, "risk_score"),
+				AssetCriticality: getFloat64(props, "asset_criticality"),
+				UrgencyBoost:     getFloat64(props, "urgency_boost"),
+				PriorityScore:    getFloat64(props, "priority_score"),
+				PatchAvailable:   getBool(props, "patch_available"),
+			})
+		}
+		return items, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.PatchQueueItem{}, nil
+	}
+	return res.([]domain.PatchQueueItem), nil
+}
+
+// GetEndpointIDsByInstallation es el recorrido inverso de GetInstallationIDsByEndpoint.
+// Devuelve lista porque el grafo no impide que una instalación cuelgue de varios endpoints.
+func (r *riskRepo) GetEndpointIDsByInstallation(ctx context.Context, installationID string) ([]int64, error) {
+	query := `
+        MATCH (e:Endpoint)-[:HAS_INSTALLATION|HOSTS*1..2]->(:SoftwareInstallation {id: $installation_id})
+        RETURN DISTINCT e.id AS endpoint_id
+        ORDER BY endpoint_id
+    `
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"installation_id": installationID})
+		if err != nil {
+			return nil, err
+		}
+
+		ids := make([]int64, 0)
+		for result.Next(ctx) {
+			id, _ := result.Record().Get("endpoint_id")
+			ids = append(ids, toInt64(id))
+		}
+		return ids, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []int64{}, nil
+	}
+	return res.([]int64), nil
+}
+
 func (r *riskRepo) GetSoftwareRiskSummariesByEndpoint(ctx context.Context, endpointID int64) ([]domain.SoftwareRiskSummary, error) {
 	query := `
-        MATCH (:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+        MATCH (:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
         OPTIONAL MATCH (si)-[:INSTANCE_OF]->(s:Software)
         WHERE NOT coalesce(si.status, 'INSTALLED') IN ['REMOVED', 'UNINSTALLED', 'DELETED']
         RETURN si.id AS installation_id,

@@ -48,14 +48,10 @@ type FindingPort interface {
 	GetByID(ctx context.Context, id int64) (*domain.Finding, error)
 	DeleteByID(ctx context.Context, id int64) error
 
-	// ApplyRemediationByInstallationAndCVE fija el factor de remediación y el estado de
-	// todos los findings abiertos de una instalación que apunten al CVE indicado.
-	//
-	// Cuando el factor es 0 (parche oficial) también pone a cero risk_score y
-	// priority_score: el finding queda fuera de las agregaciones, así que sin esta
-	// limpieza conservaría para siempre la última puntuación calculada.
-	//
-	// Devuelve los IDs de los findings actualizados.
+	// ApplyRemediationByInstallationAndCVE fija factor y estado en los findings del CVE
+	// en esa instalación, y devuelve sus IDs. Con factor 0 pone también risk_score y
+	// priority_score a cero: el finding sale de las agregaciones y conservaría si no la
+	// última puntuación calculada.
 	ApplyRemediationByInstallationAndCVE(ctx context.Context, installationID, cveID string, remediationFactor float64, status string) ([]int64, error)
 	GetVulnerabilitiesByFinding(ctx context.Context, findingID int64) ([]domain.Vulnerability, error)
 
@@ -64,11 +60,13 @@ type FindingPort interface {
 type RemediationPort interface {
 	UpdateFixedVersionByCVE(ctx context.Context, cveID string, fixedVersion string) (int, error)
 
-	// ApplyByInstallationAndCVE sincroniza estado y fecha de aplicación en las
-	// remediaciones colgadas de los findings de una instalación para un CVE concreto.
-	// Un appliedAt nulo limpia la fecha, para poder revertir una declaración previa.
-	// Devuelve cuántas remediaciones se actualizaron.
+	// ApplyByInstallationAndCVE sincroniza estado y fecha en las remediaciones del CVE en
+	// esa instalación, y devuelve cuántas cambió. appliedAt nulo limpia la fecha.
 	ApplyByInstallationAndCVE(ctx context.Context, installationID, cveID, status string, appliedAt *time.Time) (int, error)
+
+	// GetFixedVersionByInstallationAndCVE devuelve la versión corregida que dejó el
+	// enriquecimiento desde OSV, o cadena vacía si no consta.
+	GetFixedVersionByInstallationAndCVE(ctx context.Context, installationID, cveID string) (string, error)
 
 	Save(ctx context.Context, remediation *domain.Remediation) error
 	Update(ctx context.Context, remediation *domain.Remediation) error
@@ -105,21 +103,18 @@ type PatchPort interface {
 	GetByID(ctx context.Context, id int64) (*domain.Patch, error)
 	DeleteByID(ctx context.Context, id int64) error
 
-	// GetByURL recupera un parche por su URL (identificador natural del parche publicado
-	// por el fabricante). Permite deduplicar en lugar de crear un nodo nuevo en cada
-	// escaneo. Devuelve (nil, nil) si no existe.
+	// GetByURL recupera un parche por su URL, que es su identificador natural y permite
+	// deduplicar entre escaneos. Devuelve (nil, nil) si no existe.
 	GetByURL(ctx context.Context, url string) (*domain.Patch, error)
 
-	// GetByVulnerability devuelve todos los parches que corrigen un CVE concreto.
+	// GetByVulnerability devuelve los parches que corrigen un CVE.
 	GetByVulnerability(ctx context.Context, cveID string) ([]domain.Patch, error)
 
-	// SaveApplication declara que un parche se ha aplicado sobre una instalación,
-	// creando (Patch)-[:APPLIED_TO]->(SoftwareInstallation) con la fecha y el nivel
-	// de remediación. Repetir la declaración actualiza la arista existente.
+	// SaveApplication crea (Patch)-[:APPLIED_TO]->(SoftwareInstallation). Redeclarar
+	// actualiza la arista existente.
 	SaveApplication(ctx context.Context, application *domain.AppliedPatch) error
 
-	// GetApplicationsByInstallation devuelve el histórico de parches aplicados sobre
-	// una instalación, del más reciente al más antiguo.
+	// GetApplicationsByInstallation devuelve el histórico, del más reciente al más antiguo.
 	GetApplicationsByInstallation(ctx context.Context, installationID string) ([]domain.AppliedPatch, error)
 }
 
@@ -136,6 +131,10 @@ type SoftwareInstallationPort interface {
 	Update(ctx context.Context, installation *domain.SoftwareInstallation) error
 	GetByID(ctx context.Context, id string) (*domain.SoftwareInstallation, error)
 	DeleteByID(ctx context.Context, id string) error
+
+	// GetInstalledSoftware recorre (SoftwareInstallation)-[:INSTANCE_OF]->(Software).
+	// Devuelve (nil, nil) si la instalación no tiene software asociado.
+	GetInstalledSoftware(ctx context.Context, installationID string) (*domain.Software, error)
 }
 
 // RelationshipPort abstrae la creación de relaciones entre entidades del dominio
@@ -260,6 +259,14 @@ type RiskPort interface {
 	// GetFindingContextsByEndpoint recorre Endpoint→Installation→Finding→Vulnerability
 	// y devuelve todo lo necesario para calcular el riesgo de cada finding.
 	GetFindingContextsByEndpoint(ctx context.Context, endpointID int64) ([]domain.FindingRiskContext, error)
+
+	// GetPatchQueue devuelve los findings pendientes ordenados por prioridad.
+	// projectID nulo recorre toda la infraestructura.
+	GetPatchQueue(ctx context.Context, projectID *int64, limit int) ([]domain.PatchQueueItem, error)
+
+	// GetEndpointIDsByInstallation devuelve los endpoints que alojan una instalación,
+	// directamente o vía contenedor. Inverso de GetInstallationIDsByEndpoint.
+	GetEndpointIDsByInstallation(ctx context.Context, installationID string) ([]int64, error)
 
 	// UpdateFindingScores persiste los scores calculados en el nodo Finding.
 	UpdateFindingScores(ctx context.Context, findingID int64, impactScore, likelihood, exposureFactor, remediationFactor, riskScore, assetCriticality, urgencyBoost, priorityScore float64) error

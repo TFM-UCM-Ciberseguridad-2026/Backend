@@ -74,13 +74,10 @@ func clamp(value, min, max float64) float64 {
 	return value
 }
 
-// Factores de remediación por nivel declarado. El factor multiplica el riesgo del
-// finding, así que 1.00 significa "sin remediar" y 0.00 "vulnerabilidad eliminada".
-//
-// Los valores intermedios reflejan que una mitigación reduce el riesgo pero no lo anula:
-// el software vulnerable sigue instalado y la mitigación puede revertirse, saltarse o no
-// cubrir todos los vectores. El hotfix se considera más sólido que el workaround porque
-// toca el código, no solo la configuración.
+// Factores de remediación por nivel: multiplican el riesgo del finding, así que 1.00 es
+// "sin remediar" y 0.00 "vulnerabilidad eliminada". Los intermedios reflejan que una
+// mitigación no anula el riesgo (el software vulnerable sigue ahí y puede revertirse);
+// el hotfix pesa más que el workaround porque toca código, no configuración.
 const (
 	remediationFactorOfficialFix  = 0.00
 	remediationFactorTemporaryFix = 0.30
@@ -88,9 +85,8 @@ const (
 	remediationFactorUnavailable  = 1.00
 )
 
-// RemediationFactorForLevel traduce el nivel de remediación declarado al factor que
-// consume CalculateFindingRisk. Un nivel desconocido se trata como "sin remediación"
-// para no infravalorar el riesgo por un dato mal informado.
+// RemediationFactorForLevel. Un nivel desconocido se trata como "sin remediación" para no
+// infravalorar el riesgo.
 func RemediationFactorForLevel(level domain.RemediationLevel) float64 {
 	switch level {
 	case domain.RemediationLevelOfficialFix:
@@ -188,12 +184,20 @@ func CalculateUrgencyBoost(impact float64, isKEV bool, hasExploit bool, patchAva
 	return clamp(boost, minUrgencyBoost, maxUrgencyBoost)
 }
 
-// CalculatePriorityScore deriva la cola de priorización de parcheo.
-// Se calcula con la siguiente formula:
-//  priority_score = risk_score * asset_criticality * urgency_boost
+// maxPriorityProduct es el producto máximo posible de los multiplicadores. Se usa para
+// normalizar la prioridad a [0,1] sin recortarla.
+const maxPriorityProduct = maxAssetCriticality * maxUrgencyBoost
 
+// CalculatePriorityScore deriva la cola de priorización de parcheo:
+//
+//	priority = risk * asset_criticality * urgency_boost / maxPriorityProduct
+//
+// La división es lo que hace utilizable la cola. Recortando a 1.0 el producto crudo,
+// cualquier riesgo por encima de 0.29 saturaba y findings muy distintos empataban en
+// 1.0000, con lo que no había forma de ordenarlos. Normalizando por el máximo teórico se
+// conserva el rango [0,1] y las diferencias entre findings.
 func CalculatePriorityScore(riskScore, assetCriticality, urgencyBoost float64) float64 {
-	return clamp(riskScore*assetCriticality*urgencyBoost, 0.0, 1.0)
+	return clamp(riskScore*assetCriticality*urgencyBoost/maxPriorityProduct, 0.0, 1.0)
 }
 
 // AggregateRiskScores combina los scores de riesgo de todos los findings asociados a una instalación de software
@@ -253,8 +257,15 @@ func ClassifyRiskTier(riskScore float64) string {
 	}
 }
 
+// maxSoftwareCriticalityMultiplier es el multiplicador del nivel CRITICAL, el mayor que
+// devuelve CalculateSoftwareCriticalityMultiplier.
+const maxSoftwareCriticalityMultiplier = 1.50
+
+// CalculateSoftwarePriorityScore normaliza igual que CalculatePriorityScore: sin dividir
+// por el máximo, cualquier base por encima de 0.667 saturaba y las instalaciones críticas
+// empataban entre sí.
 func CalculateSoftwarePriorityScore(priorityBase, criticalityMultiplier float64) float64 {
-	return clamp(priorityBase*criticalityMultiplier, 0.0, 1.0)
+	return clamp(priorityBase*criticalityMultiplier/maxSoftwareCriticalityMultiplier, 0.0, 1.0)
 }
 
 func AggregateEndpointPriority(scores []float64) float64 {
@@ -270,7 +281,7 @@ func CalculateSoftwareCriticalityMultiplier(level string) float64 {
 	case "HIGH":
 		return 1.25
 	case "CRITICAL":
-		return 1.50
+		return maxSoftwareCriticalityMultiplier
 	default:
 		return 1.00
 	}

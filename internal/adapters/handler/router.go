@@ -97,6 +97,9 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* GET /api/installations/{id}/applied-patches: Histórico de parches aplicados sobre la instalación. */
 	mux.HandleFunc("GET /api/installations/{id}/applied-patches", h.GetAppliedPatchHistory)
 
+	/* GET /api/patch-queue: Cola de parcheo ordenada por prioridad, opcionalmente filtrada por proyecto. */
+	mux.HandleFunc("GET /api/patch-queue", h.GetPatchQueue)
+
 	// Rutas CRUD para Edición y Borrado de Activos
 	mux.HandleFunc("GET /api/endpoints/{id}/ips", h.GetEndpointIPs)
 	mux.HandleFunc("PUT /api/endpoints/{id}", h.UpdateEndpoint)

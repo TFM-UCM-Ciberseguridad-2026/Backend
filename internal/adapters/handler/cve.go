@@ -505,6 +505,42 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 	}, http.StatusCreated)
 }
 
+// GET /api/patch-queue?project_id={id}&limit={n}
+// Cola de parcheo: findings pendientes ordenados por prioridad. Sin project_id recorre
+// toda la infraestructura.
+func (h *OrchestratorHandler) GetPatchQueue(w http.ResponseWriter, r *http.Request) {
+	var projectID *int64
+	if raw := r.URL.Query().Get("project_id"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			sendError(w, "Invalid project_id", http.StatusBadRequest)
+			return
+		}
+		projectID = &parsed
+	}
+
+	limit := 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			sendError(w, "Invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+
+	queue, err := h.orchestrator.GetPatchQueue(r.Context(), projectID, limit)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]any{
+		"count": len(queue),
+		"queue": queue,
+	}, http.StatusOK)
+}
+
 // GET /api/installations/{id}/applied-patches
 // Devuelve el histórico de parches aplicados sobre una instalación.
 func (h *OrchestratorHandler) GetAppliedPatchHistory(w http.ResponseWriter, r *http.Request) {
