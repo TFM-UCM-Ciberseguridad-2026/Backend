@@ -22,10 +22,8 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 	query := `
 		MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
 		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-		// Misma lista de estados cerrados que GetFindingScoresByInstallation. Antes esta
-		// consulta solo excluía RESOLVED, de modo que un finding PATCHED entraba en el
-		// cálculo pero luego desaparecía de la agregación.
 		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+		  AND NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
 		RETURN
 		    f.id                    AS finding_id,
 		    f.status                AS finding_status,
@@ -153,9 +151,13 @@ func (r *riskRepo) UpdateEndpointRisk(ctx context.Context, endpointID int64, ris
 	})
 }
 
-// GetAllEndpointIDs devuelve los IDs de todos los endpoints para el recálculo diario masivo.
+// GetAllEndpointIDs devuelve los IDs de todos los endpoints activos para el recálculo diario masivo.
 func (r *riskRepo) GetAllEndpointIDs(ctx context.Context) ([]int64, error) {
-	query := `MATCH (e:Endpoint) RETURN e.id AS id`
+	query := `
+		MATCH (e:Endpoint)
+		WHERE NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
+		RETURN e.id AS id
+	`
 
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
@@ -216,8 +218,12 @@ func toBool(v any) bool {
 // GetFindingScoresByInstallation devuelve los scores de riesgo de todos los findings asociados a una instalación de software.
 func (r *riskRepo) GetFindingScoresByInstallation(ctx context.Context, installationID string) ([]domain.FindingRiskSummary, error) {
 	query := `
-        MATCH (:SoftwareInstallation {id: $installation_id})-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+        MATCH (si:SoftwareInstallation {id: $installation_id})-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
         WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+          AND NOT EXISTS {
+              MATCH (e:Endpoint)-[:HAS_INSTALLATION]->(si)
+              WHERE toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
+          }
         RETURN f.id AS finding_id,
 			v.cve_id AS cve_id,
 			f.risk_score AS risk_score,
@@ -286,10 +292,11 @@ func (r *riskRepo) UpdateSoftwareInstallationRisk(ctx context.Context, installat
 	})
 }
 
-// GetInstallationIDsByEndpoint devuelve los IDs de todas las instalaciones de software asociadas a un endpoint.
+// GetInstallationIDsByEndpoint devuelve los IDs de todas las instalaciones de software asociadas a un endpoint activo.
 func (r *riskRepo) GetInstallationIDsByEndpoint(ctx context.Context, endpointID int64) ([]string, error) {
 	query := `
-        MATCH (:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+        MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+        WHERE NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
         RETURN si.id AS installation_id
         ORDER BY installation_id
     `
@@ -375,9 +382,10 @@ func (r *riskRepo) GetSoftwareCriticalityLevel(ctx context.Context, installation
 
 func (r *riskRepo) GetSoftwareRiskSummariesByEndpoint(ctx context.Context, endpointID int64) ([]domain.SoftwareRiskSummary, error) {
 	query := `
-        MATCH (:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+        MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
         OPTIONAL MATCH (si)-[:INSTANCE_OF]->(s:Software)
         WHERE NOT coalesce(si.status, 'INSTALLED') IN ['REMOVED', 'UNINSTALLED', 'DELETED']
+          AND NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
         RETURN si.id AS installation_id,
                s.id AS software_id,
                s.name AS software_name,
@@ -484,11 +492,11 @@ func (r *riskRepo) UpdateEndpointRiskAndPriority(ctx context.Context, endpointID
 	return executeWriteHelper(ctx, r.driver, query, params)
 }
 
-// GetEndpointIDsByProject devuelve los IDs de todos los endpoints asociados a un proyecto.
+// GetEndpointIDsByProject devuelve los IDs de todos los endpoints activos asociados a un proyecto.
 func (r *riskRepo) GetEndpointIDsByProject(ctx context.Context, projectID int64) ([]int64, error) {
 	query := `
         MATCH (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e:Endpoint)
-        WHERE NOT coalesce(e.status, 'ACTIVE') IN ['REMOVED', 'DECOMMISSIONED', 'DELETED']
+        WHERE NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
         RETURN e.id AS endpoint_id
         ORDER BY endpoint_id
     `
@@ -520,11 +528,11 @@ func (r *riskRepo) GetEndpointIDsByProject(ctx context.Context, projectID int64)
 	return res.([]int64), nil
 }
 
-// GetEndpointRiskSummariesByProject devuelve los resúmenes de riesgo de todos los endpoints asociados a un proyecto.
+// GetEndpointRiskSummariesByProject devuelve los resúmenes de riesgo de todos los endpoints activos asociados a un proyecto.
 func (r *riskRepo) GetEndpointRiskSummariesByProject(ctx context.Context, projectID int64) ([]domain.EndpointRiskSummary, error) {
 	query := `
         MATCH (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e:Endpoint)
-        WHERE NOT coalesce(e.status, 'ACTIVE') IN ['REMOVED', 'DECOMMISSIONED', 'DELETED']
+        WHERE NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
         RETURN e.id AS endpoint_id,
                e.hostname AS hostname,
                e.status AS status,
@@ -649,7 +657,7 @@ func (r *riskRepo) UpdateProjectRiskAndPriority(ctx context.Context, projectID i
 	})
 }
 
-// / GetAllProjectIDs devuelve los IDs de todos los proyectos para el recálculo diario masivo.
+// GetAllProjectIDs devuelve los IDs de todos los proyectos para el recálculo diario masivo.
 func (r *riskRepo) GetAllProjectIDs(ctx context.Context) ([]int64, error) {
 	query := `MATCH (p:Project) RETURN p.id AS id ORDER BY id`
 
