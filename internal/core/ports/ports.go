@@ -17,12 +17,12 @@ Propósito arquitectónico y teórico:
 */
 
 type EndpointPort interface {
-	Save(ctx context.Context, endpoint *domain.Endpoint) error       				// Guarda en la DB
-	Update(ctx context.Context, endpoint *domain.Endpoint) error     				// Actualiza en la DB
-	GetByID(ctx context.Context, id int64) (*domain.Endpoint, error) 				// Te da con el id el objeto recuperado de la bd
-	DeleteByID(ctx context.Context, id int64) error                  				// Borra un nodo de la BD
-	SaveIPs(ctx context.Context, endpointID int64, ips []domain.EndpointIP) error	// Reemplaza el conjunto de direcciones IP de un endpoint por las indicadas.
-	GetIPs(ctx context.Context, endpointID int64) ([]domain.EndpointIP, error)		// Devuelve las direcciones IP asociadas a un endpoint.
+	Save(ctx context.Context, endpoint *domain.Endpoint) error                    // Guarda en la DB
+	Update(ctx context.Context, endpoint *domain.Endpoint) error                  // Actualiza en la DB
+	GetByID(ctx context.Context, id int64) (*domain.Endpoint, error)              // Te da con el id el objeto recuperado de la bd
+	DeleteByID(ctx context.Context, id int64) error                               // Borra un nodo de la BD
+	SaveIPs(ctx context.Context, endpointID int64, ips []domain.EndpointIP) error // Reemplaza el conjunto de direcciones IP de un endpoint por las indicadas.
+	GetIPs(ctx context.Context, endpointID int64) ([]domain.EndpointIP, error)    // Devuelve las direcciones IP asociadas a un endpoint.
 }
 
 type VulnerabilityPort interface {
@@ -56,7 +56,6 @@ type FindingPort interface {
 	// última puntuación calculada.
 	ApplyRemediationByInstallationAndCVE(ctx context.Context, installationID, cveID string, remediationFactor float64, status string) ([]int64, error)
 	GetVulnerabilitiesByFinding(ctx context.Context, findingID int64) ([]domain.Vulnerability, error)
-
 }
 
 type RemediationPort interface {
