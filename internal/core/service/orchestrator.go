@@ -408,33 +408,31 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		// Guardar los parches si los hay y vincularlos a la vulnerabilidad
 		_ = o.RegisterPatchesForVulnerability(ctx, vCopy.CVEID, vCopy.Patches)
 
-		// Crear un Hallazgo (Finding) para conectar la instalación del software con el CVE detectado
+		// Crear un Finding inicial para esta vulnerabilidad en la instalación de software
 		now := time.Now().UTC()
 		findingID, err := o.nextNodeID(ctx, "Finding")
 		if err != nil {
 			findingID = int64(rand.Int31n(1000000) + 1)
 		}
-		finding := &domain.Finding{ //TODO: retocar los valores por defectoooo TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
+
+		finding := &domain.Finding{
 			FindingID:         findingID,
 			Status:            "OPEN",
 			FirstSeen:         now,
+			LastSeen:          &now,
 			ImpactScore:       vCopy.BaseScore,
 			Likelihood:        0.5,
 			RemediationFactor: 1.0,
 			RiskScore:         vCopy.BaseScore * 0.5,
 		}
 
-		if err := o.findingPort.Save(ctx, finding); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
-			return fmt.Errorf("error al guardar el hallazgo para la vulnerabilidad %s: %w", vCopy.CVEID, err)
+		_, created, err := o.findingPort.EnsureForInstallationAndCVE(ctx, installationID, vCopy.CVEID, finding)
+		if err != nil {
+			return fmt.Errorf("error asegurando finding para instalación %s y CVE %s: %w", installationID, vCopy.CVEID, err)
 		}
 
-		// Establecer las relaciones en Neo4j
-		if err := o.relationshipPort.LinkInstallationToFinding(ctx, installationID, finding.FindingID); err != nil {
-			return fmt.Errorf("error al enlazar la instalación al finding: %w", err)
-		}
-		if err := o.relationshipPort.LinkFindingToVulnerability(ctx, finding.FindingID, vCopy.CVEID); err != nil {
-			return fmt.Errorf("error al enlazar el finding a la vulnerabilidad: %w", err)
-		}
+		_ = created
+
 	}
 
 	return nil

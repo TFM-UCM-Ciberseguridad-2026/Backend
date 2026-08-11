@@ -48,6 +48,8 @@ type FindingPort interface {
 	GetByID(ctx context.Context, id int64) (*domain.Finding, error)
 	DeleteByID(ctx context.Context, id int64) error
 
+	EnsureForInstallationAndCVE(ctx context.Context, installationID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
+
 	// ApplyRemediationByInstallationAndCVE fija factor y estado en los findings del CVE
 	// en esa instalación, y devuelve sus IDs. Con factor 0 pone también risk_score y
 	// priority_score a cero: el finding sale de las agregaciones y conservaría si no la
