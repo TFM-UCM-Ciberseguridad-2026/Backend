@@ -220,12 +220,9 @@ func toBool(v any) bool {
 // GetFindingScoresByInstallation devuelve los scores de riesgo de todos los findings asociados a una instalación de software.
 func (r *riskRepo) GetFindingScoresByInstallation(ctx context.Context, installationID string) ([]domain.FindingRiskSummary, error) {
 	query := `
-        MATCH (si:SoftwareInstallation {id: $installation_id})-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+        MATCH (e:Endpoint)-[:HAS_INSTALLATION]->(si:SoftwareInstallation {id: $installation_id})-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
         WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
-          AND NOT EXISTS {
-              MATCH (e:Endpoint)-[:HAS_INSTALLATION]->(si)
-              WHERE toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
-          }
+          AND NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
         RETURN f.id AS finding_id,
 			v.cve_id AS cve_id,
 			f.risk_score AS risk_score,
