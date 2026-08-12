@@ -25,29 +25,29 @@ Propósito arquitectónico y teórico:
 */
 
 type Orchestrator struct {
-	projectPort      ports.ProjectPort
-	endpointPort     ports.EndpointPort
-	hardwarePort     ports.HardwarePort
-	networkPort      ports.NetworkPort
-	softwareInstPort ports.SoftwareInstallationPort
-	softwarePort     ports.SoftwarePort
-	findingPort      ports.FindingPort
-	vulnPort         ports.VulnerabilityPort
-	remediationPort  ports.RemediationPort
-	relationshipPort ports.RelationshipPort
-	infraPort        ports.InfrastructurePort
-	containerPort    ports.ContainerPort
-	patchPort        ports.PatchPort
-	dbHelper         ports.DatabaseHelper
-	vulnScannerPort  ports.VulnerabilityAPIscanner
-	riskPort         ports.RiskPort
-	epssProvider     ports.EPSSProvider
-	kevProvider      ports.KEVProvider
-	scoutPort        ports.ContainerScannerPort
-	patchProvider    ports.PatchProvider
-	capecPort        ports.CAPECPort
-	capecProvider    ports.CAPECProvider
-	ttpPort          ports.TTPPort
+	projectPort         ports.ProjectPort
+	endpointPort        ports.EndpointPort
+	hardwarePort        ports.HardwarePort
+	networkPort         ports.NetworkPort
+	softwareInstPort    ports.SoftwareInstallationPort
+	softwarePort        ports.SoftwarePort
+	findingPort         ports.FindingPort
+	vulnPort            ports.VulnerabilityPort
+	remediationPort     ports.RemediationPort
+	relationshipPort    ports.RelationshipPort
+	infraPort           ports.InfrastructurePort
+	containerPort       ports.ContainerPort
+	patchPort           ports.PatchPort
+	dbHelper            ports.DatabaseHelper
+	vulnScannerPort     ports.VulnerabilityAPIscanner
+	riskPort            ports.RiskPort
+	epssProvider        ports.EPSSProvider
+	kevProvider         ports.KEVProvider
+	scoutPort           ports.ContainerScannerPort
+	patchProvider       ports.PatchProvider
+	capecPort           ports.CAPECPort
+	capecProvider       ports.CAPECProvider
+	ttpPort             ports.TTPPort
 	mitreAttackProvider ports.MitreATTACKProvider
 }
 
@@ -222,7 +222,6 @@ func (o *Orchestrator) AssociateHardwareToEndpoint(ctx context.Context, endpoint
 	return o.relationshipPort.LinkEndpointToHardware(ctx, endpointID, hardware.HardwareID)
 }
 
-
 // CreateNetwork crea una red de forma independiente (sin endpoint asociado explícito) y
 // enlaza automáticamente los endpoints cuya IP caiga dentro del CIDR y, si la red define
 // VLAN, compartan esa misma VLAN. Devuelve el ID de la red creada y cuántos endpoints se
@@ -348,14 +347,12 @@ func (o *Orchestrator) GetTotalMitreTTPs(ctx context.Context) (int, error) {
 	return o.infraPort.GetTotalMitreTTPs(ctx)
 }
 
-
 // GetVulnerabilitiesForFinding devuelve los CVEs asociados a un finding concreto. Se usa
 // desde el botón "Ver CVEs" del inspector de nodos, ya que los nodos Vulnerability no
 // viajan en el grafo general.
 func (o *Orchestrator) GetVulnerabilitiesForFinding(ctx context.Context, findingID int64) ([]domain.Vulnerability, error) {
 	return o.findingPort.GetVulnerabilitiesByFinding(ctx, findingID)
 }
-
 
 /*
 AutoScanAndRegisterVulnerabilities implementa el caso de uso central para automatizar la detección y registro de fallos:
@@ -408,33 +405,31 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		// Guardar los parches si los hay y vincularlos a la vulnerabilidad
 		_ = o.RegisterPatchesForVulnerability(ctx, vCopy.CVEID, vCopy.Patches)
 
-		// Crear un Hallazgo (Finding) para conectar la instalación del software con el CVE detectado
+		// Crear un Finding inicial para esta vulnerabilidad en la instalación de software
 		now := time.Now().UTC()
 		findingID, err := o.nextNodeID(ctx, "Finding")
 		if err != nil {
 			findingID = int64(rand.Int31n(1000000) + 1)
 		}
-		finding := &domain.Finding{ //TODO: retocar los valores por defectoooo TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
+
+		finding := &domain.Finding{
 			FindingID:         findingID,
 			Status:            "OPEN",
 			FirstSeen:         now,
+			LastSeen:          &now,
 			ImpactScore:       vCopy.BaseScore,
 			Likelihood:        0.5,
 			RemediationFactor: 1.0,
 			RiskScore:         vCopy.BaseScore * 0.5,
 		}
 
-		if err := o.findingPort.Save(ctx, finding); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
-			return fmt.Errorf("error al guardar el hallazgo para la vulnerabilidad %s: %w", vCopy.CVEID, err)
+		_, created, err := o.findingPort.EnsureForInstallationAndCVE(ctx, installationID, vCopy.CVEID, finding)
+		if err != nil {
+			return fmt.Errorf("error asegurando finding para instalación %s y CVE %s: %w", installationID, vCopy.CVEID, err)
 		}
 
-		// Establecer las relaciones en Neo4j
-		if err := o.relationshipPort.LinkInstallationToFinding(ctx, installationID, finding.FindingID); err != nil {
-			return fmt.Errorf("error al enlazar la instalación al finding: %w", err)
-		}
-		if err := o.relationshipPort.LinkFindingToVulnerability(ctx, finding.FindingID, vCopy.CVEID); err != nil {
-			return fmt.Errorf("error al enlazar el finding a la vulnerabilidad: %w", err)
-		}
+		_ = created
+
 	}
 
 	return nil
@@ -1192,7 +1187,7 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 	if o.scoutPort == nil {
 		return errors.New("scoutPort is not initialized")
 	}
-	
+
 	// 1. Llamar a Docker Scout
 	vulns, err := o.scoutPort.ScanImage(ctx, imageName)
 	if err != nil {
@@ -1224,7 +1219,7 @@ func (o *Orchestrator) SyncScoutDaily(ctx context.Context) error {
 	if o.scoutPort == nil {
 		return errors.New("scoutPort is not initialized, cannot run SyncScoutDaily")
 	}
-	
+
 	images, err := o.containerPort.GetAllContainerImages(ctx)
 	if err != nil {
 		return fmt.Errorf("error obteniendo imagenes de contenedor: %w", err)
@@ -1238,7 +1233,7 @@ func (o *Orchestrator) SyncScoutDaily(ctx context.Context) error {
 		if img.Tag != "" && img.Tag != "latest" {
 			imageName = fmt.Sprintf("%s:%s", img.Name, img.Tag)
 		}
-		
+
 		fmt.Printf("[Scout Sync] Escaneando imagen: %s (ID: %s)\n", imageName, img.ImageID)
 		err := o.ScanAndSaveContainerImage(ctx, imageName, img.ImageID)
 		if err != nil {
@@ -1341,6 +1336,7 @@ func (o *Orchestrator) DeleteNodeByID(ctx context.Context, id string) error {
 	`
 	return o.dbHelper.ExecuteWrite(ctx, query, map[string]any{"id": id})
 }
+
 // ExportProjectGraph orquesta la exportación nativa de un proyecto desde Neo4j.
 func (o *Orchestrator) ExportProjectGraph(ctx context.Context, projectID int64) (*domain.GraphData, error) {
 	if o.projectPort == nil {
@@ -1390,4 +1386,3 @@ func (o *Orchestrator) SyncATTACKCatalog(ctx context.Context) (int, error) {
 
 	return len(ttps), nil
 }
-

@@ -33,7 +33,7 @@ func main() {
 	defer driver.Close(ctx)
 
 	// 3. Inicializar repositorios
-	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, _, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo , _ := neo4j.NewRepository(driver)
+	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, _, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo, _ := neo4j.NewRepository(driver)
 	infraRepo := neo4j.NewInfrastructureRepository(driver)
 
 	// Limpiar base de datos
