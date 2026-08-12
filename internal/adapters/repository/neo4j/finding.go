@@ -167,8 +167,6 @@ func (r *findingRepo) EnsureForInstallationAndCVE(ctx context.Context, installat
 			n._ensure_created = true
 		ON MATCH SET
 			n.last_seen = $now,
-			n.status = CASE WHEN n.status IN ['CLOSED', 'PATCHED', 'RESOLVED', 'REMEDIATED'] THEN 'OPEN' ELSE n.status END,
-			n.resolved_at = CASE WHEN n.status IN ['CLOSED', 'PATCHED', 'RESOLVED', 'REMEDIATED'] THEN null ELSE n.resolved_at END,
 			n._ensure_created = false
 		MERGE (si)-[:HAS_FINDING]->(n)
 		MERGE (n)-[:OF_VULNERABILITY]->(v)
