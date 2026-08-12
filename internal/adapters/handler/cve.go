@@ -564,15 +564,17 @@ func (h *OrchestratorHandler) GetAppliedPatchHistory(w http.ResponseWriter, r *h
 }
 
 
-// createNetworkRequest es el DTO de entrada para POST /api/networks.
-// Ya no lleva endpoint_id: la red se crea de forma independiente y el orchestrator
-// enlaza automáticamente los endpoints compatibles por CIDR + VLAN.
+// createNetworkRequest es el DTO de entrada para POST /api/networks y PUT /api/networks/{id}.
+// ProjectID identifica el proyecto activo en el frontend en el momento de crear/editar la
+// red: si la red no coincide con ningún endpoint, se usa para anclarla como huérfana de
+// ese proyecto únicamente (ver Orchestrator.CreateNetwork/UpdateNetwork).
 type createNetworkRequest struct {
 	Nombre      string `json:"nombre"`
 	CIDR        string `json:"cidr"`
 	Gateway     string `json:"gateway"`
 	VLANID      int64  `json:"vlan_id"`
 	Descripcion string `json:"descripcion"`
+	ProjectID   int64  `json:"project_id"`
 }
 
 // POST /api/networks
@@ -598,7 +600,7 @@ func (h *OrchestratorHandler) CreateNetwork(w http.ResponseWriter, r *http.Reque
 		Descripcion: req.Descripcion,
 	}
 
-	networkID, linked, err := h.orchestrator.CreateNetwork(r.Context(), &network)
+	networkID, linked, err := h.orchestrator.CreateNetwork(r.Context(), &network, req.ProjectID)
 	if err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -693,7 +695,7 @@ func (h *OrchestratorHandler) UpdateNetwork(w http.ResponseWriter, r *http.Reque
 		VLANID:      req.VLANID,
 		Descripcion: req.Descripcion,
 	}
-	linked, err := h.orchestrator.UpdateNetwork(r.Context(), &network)
+	linked, err := h.orchestrator.UpdateNetwork(r.Context(), &network, req.ProjectID)
 	if err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return

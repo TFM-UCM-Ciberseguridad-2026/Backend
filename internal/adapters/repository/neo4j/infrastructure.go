@@ -38,7 +38,7 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 			id: elementId(n), 
 			labels: labels(n), 
 			properties: n {.*, ttps: cleanTTPs}, 
-			vulnCount: COUNT { (n)-[:OF_VULNERABILITY]->(:Vulnerability) }
+			hasVuln: COUNT { (n)-[:OF_VULNERABILITY]->(:Vulnerability) } > 0
 		}) AS nodes
 		OPTIONAL MATCH (s)-[rel]->(t)
 		WHERE NOT (startNode(rel):ThreatActor OR startNode(rel):TTP OR startNode(rel):IPAddress OR endNode(rel):ThreatActor OR endNode(rel):TTP OR endNode(rel):IPAddress)
@@ -101,8 +101,8 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 					}
 				}
 				if isFinding {
-					if vulnCount, ok := nodeMap["vulnCount"].(int64); ok {
-						props["vulnerability_count"] = vulnCount
+					if hasVuln, ok := nodeMap["hasVuln"].(bool); ok && hasVuln {
+						props["has_vulnerabilities"] = true
 					}
 				}
 				graphData.Nodes = append(graphData.Nodes, domain.GraphNode{

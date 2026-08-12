@@ -96,6 +96,7 @@ type NetworkPort interface {
 	DeleteByID(ctx context.Context, id int64) error
 	LinkMatchingEndpoints(ctx context.Context, networkID int64, cidr string, vlanID int64) (int, error)
 	LinkEndpointToMatchingNetworks(ctx context.Context, endpointID int64, ips []domain.EndpointIP) (int, error)
+	LinkNetworkToProjectIfOrphan(ctx context.Context, networkID int64, projectID int64) error
 }
 
 type PatchPort interface {

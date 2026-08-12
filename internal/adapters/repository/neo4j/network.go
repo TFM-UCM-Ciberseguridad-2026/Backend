@@ -121,16 +121,22 @@ func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64
 			vlanVal, _ := rec.Get("vlan_id")
 			epVlan := getInt64Any(vlanVal)
 
-			matched := false
-			if vlanID > 0 && epVlan == vlanID {
-				matched = true
-			} else if ipNet != nil {
-				if parsedIP := net.ParseIP(getStringAny(ipVal)); parsedIP != nil && ipNet.Contains(parsedIP) {
-					if vlanID == 0 || epVlan == vlanID {
-						matched = true
-					}
+			// Evaluamos con condición AND estricta:
+			matched := true
+
+			// Condición 1: Si se especificó VLAN (> 0), DEBE coincidir
+			if vlanID > 0 && epVlan != vlanID {
+				matched = false
+			}
+
+			// Condición 2: Si se especificó CIDR, la IP DEBE estar dentro del rango
+			if ipNet != nil {
+				parsedIP := net.ParseIP(getStringAny(ipVal))
+				if parsedIP == nil || !ipNet.Contains(parsedIP) {
+					matched = false
 				}
 			}
+
 			if matched {
 				matches = append(matches, candidate{endpointID: getInt64Any(endpointIDVal)})
 			}
@@ -271,21 +277,25 @@ func (r *networkRepo) LinkEndpointToMatchingNetworks(ctx context.Context, endpoi
 	for _, cand := range candidates {
 		matched := false
 		for _, ipEntry := range ips {
-			// Coincidencia estricta por VLAN (si ambos tienen la misma VLAN definida)
-			if cand.vlanID > 0 && ipEntry.VLANID == cand.vlanID {
+			ipMatch := true
+
+			// 1. Si la red exige VLAN, la IP debe coincidir en VLAN
+			if cand.vlanID > 0 && ipEntry.VLANID != cand.vlanID {
+				ipMatch = false
+			}
+
+			// 2. Si la red exige CIDR, la IP debe estar en el rango CIDR
+			if cand.cidr != "" {
+				_, ipNet, err := net.ParseCIDR(cand.cidr)
+				parsedIP := net.ParseIP(ipEntry.IP)
+				if err != nil || parsedIP == nil || !ipNet.Contains(parsedIP) {
+					ipMatch = false
+				}
+			}
+
+			if ipMatch {
 				matched = true
 				break
-			}
-			// Coincidencia por CIDR si es una red sin VLAN obligatoria o si coincide con la VLAN de la IP
-			if cand.cidr != "" {
-				if _, ipNet, err := net.ParseCIDR(cand.cidr); err == nil {
-					if parsedIP := net.ParseIP(ipEntry.IP); parsedIP != nil && ipNet.Contains(parsedIP) {
-						if cand.vlanID == 0 || ipEntry.VLANID == cand.vlanID {
-							matched = true
-							break
-						}
-					}
-				}
 			}
 		}
 		if matched {
@@ -308,7 +318,8 @@ func (r *networkRepo) LinkEndpointToMatchingNetworks(ctx context.Context, endpoi
 				  AND (toInteger(n.id) = toInteger($network_id) OR toString(n.id) = toString($network_id))
 				MERGE (e)-[:CONNECTED_TO]->(n)
 				WITH e, n
-				OPTIONAL MATCH (e)-[:BELONGS_TO]->(p:Project)
+				OPTIONAL MATCH (p:Project)-[:HAS_ENDPOINT]->(e)
+				WITH n, p
 				FOREACH (proj IN CASE WHEN p IS NOT NULL THEN [p] ELSE [] END |
 					MERGE (proj)-[:CONTAINS_NETWORK]->(n)
 				)
@@ -326,4 +337,22 @@ func (r *networkRepo) LinkEndpointToMatchingNetworks(ctx context.Context, endpoi
 	}
 
 	return len(matchingNetworkIDs), nil
+}
+
+// LinkNetworkToProjectIfOrphan ver comentario en ports.NetworkPort.
+func (r *networkRepo) LinkNetworkToProjectIfOrphan(ctx context.Context, networkID int64, projectID int64) error {
+	query := `
+		MATCH (n:Network)
+		WHERE (toInteger(n.id) = toInteger($network_id) OR toString(n.id) = toString($network_id) OR elementId(n) = toString($network_id))
+		  AND NOT EXISTS((:Project)-[:CONTAINS_NETWORK]->(n))
+		  AND NOT EXISTS((:Endpoint)-[:CONNECTED_TO]->(n))
+		WITH n
+		MATCH (p:Project)
+		WHERE toInteger(p.id) = toInteger($project_id) OR toString(p.id) = toString($project_id) OR elementId(p) = toString($project_id)
+		MERGE (p)-[:CONTAINS_NETWORK]->(n)
+	`
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{
+		"network_id": networkID,
+		"project_id": projectID,
+	})
 }
