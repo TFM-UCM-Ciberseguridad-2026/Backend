@@ -124,8 +124,8 @@ func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64
 			// Evaluamos con condición AND estricta:
 			matched := true
 
-			// Condición 1: La VLAN del endpoint debe coincidir exactamente con la de la red (incluso si es 0/vacía)
-			if epVlan != vlanID {
+			// Condición 1: Si se especificó VLAN (> 0), DEBE coincidir
+			if vlanID > 0 && epVlan != vlanID {
 				matched = false
 			}
 
@@ -279,8 +279,8 @@ func (r *networkRepo) LinkEndpointToMatchingNetworks(ctx context.Context, endpoi
 		for _, ipEntry := range ips {
 			ipMatch := true
 
-			// 1. La VLAN de la IP debe coincidir exactamente con la de la red (incluso si es 0/vacía)
-			if ipEntry.VLANID != cand.vlanID {
+			// 1. Si la red exige VLAN, la IP debe coincidir en VLAN
+			if cand.vlanID > 0 && ipEntry.VLANID != cand.vlanID {
 				ipMatch = false
 			}
 
