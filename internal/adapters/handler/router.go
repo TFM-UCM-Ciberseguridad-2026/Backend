@@ -60,6 +60,9 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* GET /api/infrastructure/top-apts: Obtiene los actores de amenazas (APTs) que afectan la infraestructura auditada. */
 	mux.HandleFunc("GET /api/infrastructure/top-apts", h.GetTopAPTs)
 
+	/* GET /api/infrastructure/mitre-ttp-count: Obtiene el numero total de TTPs en el catalogo MITRE. */
+	mux.HandleFunc("GET /api/infrastructure/mitre-ttp-count", h.GetMitreTTPCount)
+
 	/* GET /api/infrastructure/exploitation-paths: Obtiene las rutas de explotación calculadas en la infraestructura. */
 	mux.HandleFunc("GET /api/infrastructure/exploitation-paths", h.GetExploitationPaths)
 
@@ -93,6 +96,9 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 
 	/* GET /api/installations/{id}/applied-patches: Histórico de parches aplicados sobre la instalación. */
 	mux.HandleFunc("GET /api/installations/{id}/applied-patches", h.GetAppliedPatchHistory)
+
+	/* GET /api/patch-queue: Cola de parcheo ordenada por prioridad, opcionalmente filtrada por proyecto. */
+	mux.HandleFunc("GET /api/patch-queue", h.GetPatchQueue)
 
 	// Rutas CRUD para Edición y Borrado de Activos
 	mux.HandleFunc("GET /api/endpoints/{id}/ips", h.GetEndpointIPs)

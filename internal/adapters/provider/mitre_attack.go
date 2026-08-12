@@ -38,6 +38,8 @@ type mitreObjectDTO struct {
 	Description        string                   `json:"description"`
 	ExternalReferences []mitreExternalRefDTO    `json:"external_references"`
 	KillChainPhases    []mitreKillChainPhaseDTO `json:"kill_chain_phases"`
+	XMitreDeprecated   bool                     `json:"x_mitre_deprecated"`
+	Revoked            bool                     `json:"revoked"`
 }
 
 type mitreBundleDTO struct {
@@ -90,6 +92,9 @@ func (p *MitreAttackSTIXProvider) FetchATTACKBundle(ctx context.Context) ([]doma
 
 	for _, obj := range bundle.Objects {
 		if obj.Type != "attack-pattern" {
+			continue
+		}
+		if obj.XMitreDeprecated || obj.Revoked {
 			continue
 		}
 

@@ -244,6 +244,29 @@ func (r *softwareInstallationRepo) GetByID(ctx context.Context, id string) (*dom
 	return installation, nil
 }
 
+// GetInstalledSoftware devuelve el Software del que la instalación es instancia,
+// o (nil, nil) si no tiene ninguno asociado.
+func (r *softwareInstallationRepo) GetInstalledSoftware(ctx context.Context, installationID string) (*domain.Software, error) {
+	query := `
+		MATCH (:SoftwareInstallation {id: $installation_id})-[:INSTANCE_OF]->(s:Software)
+		RETURN properties(s) AS props
+		LIMIT 1
+	`
+	props, err := executeReadHelper(ctx, r.driver, query, map[string]any{"installation_id": installationID})
+	if err != nil || props == nil {
+		return nil, err
+	}
+
+	return &domain.Software{
+		SoftwareID: getInt64(props, "id"),
+		Name:       getString(props, "name"),
+		Version:    getString(props, "version"),
+		Vendor:     getString(props, "vendor"),
+		Type:       getString(props, "type"),
+		CPE:        getString(props, "cpe"),
+	}, nil
+}
+
 func (r *softwareInstallationRepo) DeleteByID(ctx context.Context, id string) error {
 	query := `
 		MATCH (n:SoftwareInstallation)

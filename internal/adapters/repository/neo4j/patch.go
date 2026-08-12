@@ -12,11 +12,9 @@ type patchRepo struct {
 	driver neo4j.DriverWithContext
 }
 
-// SaveApplication declara que un parche se ha aplicado sobre una instalación.
-//
-// Usa MERGE sobre la relación para que volver a declarar el mismo parche en la misma
-// instalación actualice la arista en lugar de duplicarla: una instalación tiene una
-// única situación actual respecto a un parche dado.
+// SaveApplication declara un parche como aplicado sobre una instalación. MERGE sobre la
+// relación: una instalación tiene una única situación actual respecto a un parche, así que
+// redeclarar actualiza la arista en vez de duplicarla.
 func (r *patchRepo) SaveApplication(ctx context.Context, a *domain.AppliedPatch) error {
 	query := `
 		MATCH (p:Patch {id: $patch_id})
@@ -27,30 +25,41 @@ func (r *patchRepo) SaveApplication(ctx context.Context, a *domain.AppliedPatch)
 		    rel.remediation_level  = $remediation_level,
 		    rel.remediation_factor = $remediation_factor,
 		    rel.cve_id             = $cve_id,
-		    rel.notes              = $notes
+		    rel.notes              = $notes,
+		    rel.verified           = $verified,
+		    rel.verification_conclusive = $verification_conclusive,
+		    rel.verification_reason     = $verification_reason,
+		    rel.installed_version       = $installed_version,
+		    rel.expected_version        = $expected_version,
+		    rel.matched_package         = $matched_package
 	`
-	// Sin RETURN: executeWriteUpdateHelper añade el suyo para detectar si el MATCH
-	// encontró algo, y dos RETURN seguidos son un error de sintaxis en Cypher.
+	// Sin RETURN propio: executeWriteUpdateHelper añade el suyo y dos seguidos son
+	// error de sintaxis.
 
 	params := map[string]any{
-		"patch_id":           a.PatchID,
-		"installation_id":    a.InstallationID,
-		"applied_at":         a.AppliedAt,
-		"applied_by":         a.AppliedBy,
-		"remediation_level":  string(a.RemediationLevel),
-		"remediation_factor": a.RemediationFactor,
-		"cve_id":             a.CVEID,
-		"notes":              a.Notes,
+		"patch_id":                a.PatchID,
+		"installation_id":         a.InstallationID,
+		"applied_at":              a.AppliedAt,
+		"applied_by":              a.AppliedBy,
+		"remediation_level":       string(a.RemediationLevel),
+		"remediation_factor":      a.RemediationFactor,
+		"cve_id":                  a.CVEID,
+		"notes":                   a.Notes,
+		"verified":                a.Verification.Verified,
+		"verification_conclusive": a.Verification.Conclusive,
+		"verification_reason":     a.Verification.Reason,
+		"installed_version":       a.Verification.InstalledVersion,
+		"expected_version":        a.Verification.ExpectedVersion,
+		"matched_package":         a.Verification.MatchedPackage,
 	}
 
-	// executeWriteUpdateHelper falla si el MATCH no encuentra el parche o la
-	// instalación, que es justo lo que queremos: declarar sobre algo inexistente
-	// es un error, no una operación silenciosa.
+	// El helper falla si el MATCH no encuentra parche o instalación, que es lo deseado:
+	// declarar sobre algo inexistente no debe pasar en silencio.
 	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
-// GetApplicationsByInstallation devuelve el histórico de parches aplicados sobre una
-// instalación, del más reciente al más antiguo.
+// GetApplicationsByInstallation devuelve el histórico de una instalación, del más
+// reciente al más antiguo.
 func (r *patchRepo) GetApplicationsByInstallation(ctx context.Context, installationID string) ([]domain.AppliedPatch, error) {
 	query := `
 		MATCH (p:Patch)-[rel:APPLIED_TO]->(:SoftwareInstallation {id: $installation_id})
@@ -62,7 +71,13 @@ func (r *patchRepo) GetApplicationsByInstallation(ctx context.Context, installat
 		       rel.remediation_level  AS remediation_level,
 		       rel.remediation_factor AS remediation_factor,
 		       rel.cve_id             AS cve_id,
-		       rel.notes              AS notes
+		       rel.notes              AS notes,
+		       rel.verified                AS verified,
+		       rel.verification_conclusive AS verification_conclusive,
+		       rel.verification_reason     AS verification_reason,
+		       rel.installed_version       AS installed_version,
+		       rel.expected_version        AS expected_version,
+		       rel.matched_package         AS matched_package
 		ORDER BY applied_at DESC
 	`
 
@@ -93,8 +108,16 @@ func (r *patchRepo) GetApplicationsByInstallation(ctx context.Context, installat
 				RemediationLevel:  domain.RemediationLevel(getString(props, "remediation_level")),
 				RemediationFactor: getFloat64(props, "remediation_factor"),
 				Notes:             getString(props, "notes"),
-				PatchURL:          getString(props, "patch_url"),
-				PatchDescription:  getString(props, "patch_description"),
+				Verification: domain.PatchVerification{
+					Verified:         getBool(props, "verified"),
+					Conclusive:       getBool(props, "verification_conclusive"),
+					Reason:           getString(props, "verification_reason"),
+					InstalledVersion: getString(props, "installed_version"),
+					ExpectedVersion:  getString(props, "expected_version"),
+					MatchedPackage:   getString(props, "matched_package"),
+				},
+				PatchURL:         getString(props, "patch_url"),
+				PatchDescription: getString(props, "patch_description"),
 			})
 		}
 

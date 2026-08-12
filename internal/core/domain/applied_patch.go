@@ -1,43 +1,26 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
-/*
-Este archivo define la declaración de un parche aplicado sobre una instalación concreta.
-
-Propósito arquitectónico y teórico:
-1. Ubicación en Arquitectura Hexagonal: Se sitúa en `internal/core/domain`.
-2. Distinción disponible/aplicado: (Patch)-[:FIXES]->(Vulnerability) indica que un parche
-   existe para un CVE; (Patch)-[:APPLIED_TO]->(SoftwareInstallation) indica que además se
-   ha aplicado en un activo concreto. Son hechos distintos y el grafo los separa.
-3. Base del histórico: cada declaración deja una arista con su fecha, de modo que una misma
-   instalación puede acumular varias aplicaciones a lo largo del tiempo.
-*/
+// Declaración de un parche aplicado sobre una instalación concreta.
+//
+// (Patch)-[:FIXES]->(Vulnerability) dice que el parche existe para un CVE;
+// (Patch)-[:APPLIED_TO]->(SoftwareInstallation) dice que además se ha aplicado aquí.
 
 // RemediationLevel expresa hasta qué punto una declaración corrige la vulnerabilidad.
-// Los nombres siguen la métrica Remediation Level (RL) de CVSS 3.1 para no inventar
-// vocabulario, aunque los factores son los del modelo de riesgo de este proyecto.
+// Los nombres siguen la métrica Remediation Level de CVSS 3.1.
 type RemediationLevel string
 
 const (
-	// RemediationLevelOfficialFix es el parche oficial del fabricante: elimina la
-	// vulnerabilidad.
-	RemediationLevelOfficialFix RemediationLevel = "OFFICIAL_FIX"
-
-	// RemediationLevelTemporaryFix es una corrección provisional (hotfix, backport no
-	// oficial): reduce mucho el riesgo pero la vulnerabilidad sigue presente.
-	RemediationLevelTemporaryFix RemediationLevel = "TEMPORARY_FIX"
-
-	// RemediationLevelWorkaround es una mitigación de configuración (deshabilitar un
-	// módulo, filtrar en el firewall): reduce el riesgo sin tocar el software.
-	RemediationLevelWorkaround RemediationLevel = "WORKAROUND"
-
-	// RemediationLevelUnavailable indica que no hay remediación aplicable. Se admite
-	// para poder revertir una declaración previa dejando constancia.
-	RemediationLevelUnavailable RemediationLevel = "UNAVAILABLE"
+	RemediationLevelOfficialFix  RemediationLevel = "OFFICIAL_FIX"  // parche del fabricante
+	RemediationLevelTemporaryFix RemediationLevel = "TEMPORARY_FIX" // hotfix o backport
+	RemediationLevelWorkaround   RemediationLevel = "WORKAROUND"    // mitigación de configuración
+	RemediationLevelUnavailable  RemediationLevel = "UNAVAILABLE"   // sin remediación, revierte una previa
 )
 
-// IsValid indica si el nivel es uno de los reconocidos.
 func (r RemediationLevel) IsValid() bool {
 	switch r {
 	case RemediationLevelOfficialFix, RemediationLevelTemporaryFix,
@@ -48,29 +31,21 @@ func (r RemediationLevel) IsValid() bool {
 	}
 }
 
-// FullyRemediates indica si el nivel elimina la vulnerabilidad por completo. Solo el
-// parche oficial lo hace: el resto son mitigaciones que dejan riesgo residual.
+// FullyRemediates: solo el parche oficial elimina la vulnerabilidad; el resto son
+// mitigaciones que dejan riesgo residual.
 func (r RemediationLevel) FullyRemediates() bool {
 	return r == RemediationLevelOfficialFix
 }
 
-// Estados del nodo Remediation. Reflejan en qué situación está la solución planteada
-// para un finding, y se sincronizan al declarar un parche aplicado.
+// Estados del nodo Remediation.
 const (
-	// RemediationStatusOpen indica que la remediación está pendiente de aplicar.
-	RemediationStatusOpen = "OPEN"
-
-	// RemediationStatusPartial indica que se ha aplicado una mitigación que reduce el
-	// riesgo pero no elimina la vulnerabilidad.
+	RemediationStatusOpen    = "OPEN"
 	RemediationStatusPartial = "PARTIAL"
-
-	// RemediationStatusApplied indica que se ha aplicado el parche oficial.
 	RemediationStatusApplied = "APPLIED"
 )
 
-// RemediationStatus traduce el nivel declarado al estado del nodo Remediation.
-// UNAVAILABLE devuelve el estado abierto porque sirve para revertir una declaración
-// previa y dejar la remediación de nuevo como pendiente.
+// RemediationStatus traduce el nivel al estado del nodo Remediation. UNAVAILABLE vuelve
+// a OPEN porque sirve para revertir una declaración previa.
 func (r RemediationLevel) RemediationStatus() string {
 	switch r {
 	case RemediationLevelOfficialFix:
@@ -82,34 +57,56 @@ func (r RemediationLevel) RemediationStatus() string {
 	}
 }
 
-// AppliedPatch representa la declaración de que un parche se ha aplicado sobre una
-// instalación de software concreta. Se materializa como la relación
-// (Patch)-[:APPLIED_TO]->(SoftwareInstallation) con sus propiedades.
+// AppliedPatch es la relación (Patch)-[:APPLIED_TO]->(SoftwareInstallation) y sus
+// propiedades. CVEID y RemediationFactor se guardan en la arista para reconstruir el
+// histórico sin recorrer el grafo ni recalcular nada.
 type AppliedPatch struct {
 	PatchID        int64  `json:"patch_id"`
 	InstallationID string `json:"installation_id"`
-
-	// CVEID es el CVE que el parche corrige. Se guarda en la arista para poder
-	// reconstruir el histórico sin recorrer el grafo hacia la vulnerabilidad.
-	CVEID string `json:"cve_id"`
+	CVEID          string `json:"cve_id"`
 
 	AppliedAt time.Time `json:"applied_at"`
+	AppliedBy string    `json:"applied_by"` // texto libre: no hay modelo de usuarios
 
-	// AppliedBy identifica a quien declara la aplicación (operador, sistema de
-	// despliegue...). Es texto libre: el proyecto no tiene modelo de usuarios.
-	AppliedBy string `json:"applied_by"`
+	RemediationLevel  RemediationLevel `json:"remediation_level"`
+	RemediationFactor float64          `json:"remediation_factor"`
+	Notes             string           `json:"notes"`
 
-	RemediationLevel RemediationLevel `json:"remediation_level"`
+	Verification PatchVerification `json:"verification"`
 
-	// RemediationFactor es el factor resultante que se propagó a los findings
-	// afectados. Se persiste en la arista para dejar constancia de con qué criterio
-	// se recalculó el riesgo en su momento.
-	RemediationFactor float64 `json:"remediation_factor"`
-
-	Notes string `json:"notes"`
-
-	// PatchURL y PatchDescription se rellenan al leer el histórico, para no obligar a
-	// consultar el nodo Patch por separado.
+	// Se rellenan al leer el histórico, para no consultar el nodo Patch aparte.
 	PatchURL         string `json:"patch_url,omitempty"`
 	PatchDescription string `json:"patch_description,omitempty"`
+}
+
+// ParseFixedVersions reconstruye las versiones corregidas desde la cadena
+// "paquete@versión, ..." que persiste Remediation.fixed_version. Las entradas sin "@"
+// se toman como versión suelta.
+func ParseFixedVersions(raw string) []FixedVersion {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+
+	parts := strings.Split(raw, ",")
+	versions := make([]FixedVersion, 0, len(parts))
+
+	for _, part := range parts {
+		entry := strings.TrimSpace(part)
+		if entry == "" {
+			continue
+		}
+
+		if idx := strings.LastIndex(entry, "@"); idx > 0 {
+			versions = append(versions, FixedVersion{
+				Package: strings.TrimSpace(entry[:idx]),
+				Version: strings.TrimSpace(entry[idx+1:]),
+			})
+			continue
+		}
+
+		versions = append(versions, FixedVersion{Version: entry})
+	}
+
+	return versions
 }

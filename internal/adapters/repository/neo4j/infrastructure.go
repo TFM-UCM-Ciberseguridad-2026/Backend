@@ -331,11 +331,36 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 	return graphData, nil
 }
 
+func (r *infrastructureRepo) GetTotalMitreTTPs(ctx context.Context) (int, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `MATCH (t:TTP) RETURN count(t) AS total`
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, query, nil)
+		if err != nil {
+			return 0, err
+		}
+		if result.Next(ctx) {
+			record := result.Record()
+			total, _ := record.Get("total")
+			if t, ok := total.(int64); ok {
+				return int(t), nil
+			}
+		}
+		return 0, nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return res.(int), nil
+}
+
 
 // GetTopAPTsByInfrastructureTTPs recorre el grafo completo desde la infraestructura del usuario
 // hasta los actores de amenaza, calculando qué APTs cubren más TTPs vinculadas a las CVEs detectadas.
 // Cadena de traversal: Project → Endpoint → SoftwareInstallation → Finding → Vulnerability ← TTP ← ThreatActor
-func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int) ([]domain.APTThreatResult, error) {
+func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int, projectID int64) ([]domain.APTThreatResult, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
@@ -344,15 +369,19 @@ func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context,
 	// 2. Para cada ThreatActor, cuenta cuántas de esas TTPs utiliza
 	// 3. Calcula el porcentaje de cobertura y ordena descendentemente
 	query := `
-		// Paso 1: Obtener todas las TTPs únicas que apuntan a CVEs de la infraestructura
+		// Paso 1: Obtener todas las TTPs únicas que apuntan a CVEs de la infraestructura a través de CWE y CAPEC
 		MATCH (p:Project)-[:HAS_ENDPOINT]->(e:Endpoint)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
-		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)<-[:TARGETS_VULN]-(ttp:TTP)
+		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE $project_id = 0 OR p.id = $project_id
+		MATCH (c:CAPEC)-[:MAPS_TO_CWE]->(w:CWE)
+		WHERE (v)-[:HAS_CWE]->(w) OR w.cwe_id IN v.cwe
+		MATCH (c)-[:MAPS_TO_TTP]->(ttp:TTP)
 		WITH collect(DISTINCT ttp) AS infraTTPs
 
 		// Paso 2: Para cada ThreatActor, calcular solapamiento con las TTPs de la infraestructura
 		UNWIND infraTTPs AS infraTTP
 		WITH infraTTPs, infraTTP
-		MATCH (ta:ThreatActor)-[:USES_TTP]->(infraTTP)
+		MATCH (ta:ThreatActor)-[:USES]->(infraTTP)
 		WITH ta, infraTTPs,
 		     collect(DISTINCT infraTTP) AS matchedTTPs
 
@@ -362,10 +391,10 @@ func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context,
 		     size(matchedTTPs) AS matchedCount,
 		     [t IN matchedTTPs | t.name] AS matchedNames,
 		     [t IN matchedTTPs | coalesce(t.ttp_id, t.id)] AS matchedIDs
-		RETURN ta.id AS actor_id,
-		       ta.name AS actor_name,
-		       ta.origin AS origin,
-		       ta.motivation AS motivation,
+		RETURN coalesce(ta.actor_id, ta.id, 'UNKNOWN') AS actor_id,
+		       coalesce(ta.name, 'Unknown') AS actor_name,
+		       coalesce(ta.origin, 'Unknown') AS origin,
+		       coalesce(ta.motivation, 'Unknown') AS motivation,
 		       matchedCount AS matched_ttp_count,
 		       totalInfraTTPs AS total_infra_ttps,
 		       round(toFloat(matchedCount) / totalInfraTTPs * 10000) / 100 AS coverage_percent,
@@ -376,7 +405,7 @@ func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context,
 	`
 
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
-		result, err := tx.Run(ctx, query, map[string]any{"limit": limit})
+		result, err := tx.Run(ctx, query, map[string]any{"limit": limit, "project_id": projectID})
 		if err != nil {
 			return nil, err
 		}
