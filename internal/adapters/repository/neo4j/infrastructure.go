@@ -551,11 +551,17 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 			WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
 			RETURN si, f, elementId(f) AS f_id, v, true AS is_container, ep AS container, 1 AS priority
 			UNION
-			// Caso 5: ep es Container directamente enrutado, con vuln en imagen
+			// Caso 5a: ep es Container directamente enrutado, con vuln en imagen (con nodo Finding)
+			WITH ep
+			MATCH (ep:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+			WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
+			RETURN null AS si, f, elementId(f) AS f_id, v, true AS is_container, ep AS container, 0 AS priority
+			UNION
+			// Caso 5b: ep es Container, con vuln directa sin nodo Finding
 			WITH ep
 			MATCH (ep:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
 			WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
-			RETURN null AS si, {risk_score: 9.8} AS f, "" AS f_id, v, true AS is_container, ep AS container, 2 AS priority
+			RETURN null AS si, {risk_score: coalesce(v.base_score, 9.8), title: "Vulnerabilidad en Imagen (" + v.cve_id + ")", severity: coalesce(v.severity, "CRITICAL"), status: "OPEN"} AS f, elementId(v) AS f_id, v, true AS is_container, ep AS container, 0 AS priority
 			UNION
 			// Caso 6: Endpoint (host) atravesado por HOSTS - solo aplica a Endpoints, no a Containers
 			WITH ep, path
@@ -571,9 +577,9 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 		// Ordenar: primero por prioridad ASC (1=mejor), luego por risk_score DESC dentro de esa prioridad
 		WITH path, e1, indexed, ie, ep, si, f, f_id, v, is_container, container, priority ORDER BY priority ASC, coalesce(f.risk_score, 0.0) DESC
 		
-		WITH path, e1, indexed, ie, ep, collect({si: si, f: f, f_id: f_id, v: v, is_container: is_container, container: container})[0] AS bestNet
+		WITH path, e1, indexed, ie, ep, collect({si: si, f: f, f_id: f_id, v: v, is_container: is_container, container: container}) AS allNets
 		
-		WITH path, e1, indexed, ie, ep, bestNet,
+		WITH path, e1, indexed, ie, ep, allNets,
 		  EXISTS { MATCH (ep)-[:CONNECTED_TO]->(:Network)<-[:CONNECTED_TO]-(lastNode) WHERE lastNode = last(nodes(path)) } AS canReachTargetDirectly,
 		  EXISTS {
 		    MATCH (ep)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(vLocal:Vulnerability)
@@ -605,14 +611,14 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 		       OR toLower(vHostLocal.description) CONTAINS 'escape' OR toLower(vHostLocal.description) CONTAINS 'privilege escalation'
 		  } AS hasParentHostLPE
 		
-		WITH path, e1, indexed, ie, ep, bestNet, 
+		WITH path, e1, indexed, ie, ep, allNets, 
 		  CASE 
 		    WHEN ep:Container THEN
 		      CASE 
 		        WHEN ie.index + 1 < size(indexed) AND "Network" IN labels(indexed[ie.index + 1].asset) THEN false
 		        ELSE (hasDirectContLPE OR hasDirectImageContLPE OR hasParentHostLPE)
 		      END
-		    WHEN bestNet.is_container THEN (hasContLPE OR hasImageContLPE)
+		    WHEN size(allNets) > 0 AND allNets[0].is_container THEN (hasContLPE OR hasImageContLPE)
 		    ELSE (hasHostLPE OR hasContLPE OR hasImageContLPE)
 		  END AS hasLPE
 		ORDER BY ie.index ASC
@@ -620,12 +626,8 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 		WITH path, e1, collect({
 		    index: ie.index,
 		    endpoint: ep,
-		    software: bestNet.si,
-		    finding: bestNet.f,
-		    finding_id: bestNet.f_id,
-		    vuln: bestNet.v,
-		    is_container: bestNet.is_container,
-		    container: bestNet.container,
+		    allNets: allNets,
+		    is_container: (size(allNets) > 0 AND allNets[0].is_container),
 		    hasLPE: hasLPE
 		}) AS steps
 		
@@ -707,40 +709,47 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 			}
 			pathCounter++
 
-			var prevEndpoint string = "Internet"
-			var offset int = 0
-			var justEscaped bool = false   // flag: la iteración anterior inyectó un Container Escape
+			type activePathState struct {
+				Path         domain.ExploitationPath
+				PrevEndpoint string
+				Offset       int
+				JustEscaped  bool
+			}
+
+			activePaths := []activePathState{
+				{
+					Path:         ep,
+					PrevEndpoint: "Internet",
+					Offset:       0,
+					JustEscaped:  false,
+				},
+			}
 
 			for _, stepAny := range stepsList {
 				stepMap := getMap(stepAny)
-				if stepMap == nil { continue }
+				if stepMap == nil {
+					continue
+				}
 
-				index := getIntLocal(stepMap["index"]) + int64(offset)
+				allNetsRaw, _ := stepMap["allNets"].([]any)
+				if len(allNetsRaw) == 0 {
+					continue
+				}
+
+				index := getIntLocal(stepMap["index"])
 				endpointProps := getNodeProps(stepMap["endpoint"])
-				softwareProps := getNodeProps(stepMap["software"])
-				findingProps := getNodeProps(stepMap["finding"])
-				vulnProps := getNodeProps(stepMap["vuln"])
-				if vulnProps == nil && stepMap["vuln"] != nil {
-					fmt.Printf("DEBUG: stepMap[\"vuln\"] is not nil, type is %T\n", stepMap["vuln"])
-				}
 				hasLPE := getBoolLocal(stepMap["hasLPE"])
-				isContainer := getBoolLocal(stepMap["is_container"])
-
-				var containerID, containerName string
-				if isContainer {
-					containerProps := getNodeProps(stepMap["container"])
-					containerID = getStringLocal(containerProps["id"])
-					containerName = getStringLocal(containerProps["name"])
-				}
 
 				hostname := getStringLocal(endpointProps["hostname"])
-				cvss := getStringLocal(vulnProps["cvss_vector"])
-				risk := getFloatLocal(findingProps["risk_score"])
-
 				targetName := hostname
 				targetID := getIntLocal(endpointProps["id"])
+
+				// Determinar si es contenedor basado en el primer allNets (todos comparten el endpoint)
+				firstNetMap := getMap(allNetsRaw[0])
+				isContainer := getBoolLocal(firstNetMap["is_container"])
 				if isContainer {
-					targetName = containerName
+					containerProps := getNodeProps(firstNetMap["container"])
+					targetName = getStringLocal(containerProps["name"])
 					targetID = 0
 				} else if targetName == "" {
 					targetName = getStringLocal(endpointProps["name"])
@@ -749,97 +758,142 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 					}
 				}
 
-				// Si la iteración anterior inyectó un Container Escape, este nodo es el host al que
-				// llegamos por LPE. Rellenamos el TargetEndpoint del paso LPE y saltamos añadir
-				// su vulnerabilidad de red (Log4Shell, etc.) porque ya estamos dentro por el escape.
-				if justEscaped {
-					justEscaped = false
-					// Parchear el TargetEndpoint del último paso LPE inyectado con el nombre real del host
-					if len(ep.Steps) > 0 {
-						last := &ep.Steps[len(ep.Steps)-1]
-						if last.Vulnerability == "Container Escape (LPE)" {
-							last.TargetEndpoint = targetName
-							last.TargetEndpointID = targetID
+				var nextActivePaths []activePathState
+
+				for _, state := range activePaths {
+					if state.JustEscaped {
+						// Parchear el TargetEndpoint del último paso LPE
+						if len(state.Path.Steps) > 0 {
+							last := &state.Path.Steps[len(state.Path.Steps)-1]
+							if last.Vulnerability == "Container Escape (LPE)" {
+								last.TargetEndpoint = targetName
+								last.TargetEndpointID = targetID
+							}
 						}
+						state.PrevEndpoint = targetName
+						state.Offset--
+						state.JustEscaped = false
+						nextActivePaths = append(nextActivePaths, state)
+						continue
 					}
-					prevEndpoint = targetName
-					offset--
-					continue
-				}
 
-				// Evitar pasos redundantes al mismo host (ej. tras un Escape de Contenedor)
-				if targetName == prevEndpoint {
-					offset--
-					continue
-				}
+					if targetName == state.PrevEndpoint {
+						state.Offset--
+						nextActivePaths = append(nextActivePaths, state)
+						continue
+					}
 
-				// Lógica de RCE
-				isRCE := false
-				cwes := getStringSlice(vulnProps, "cwe")
-				for _, cwe := range cwes {
-					if cwe == "CWE-94" || cwe == "CWE-78" || cwe == "CWE-77" {
-						isRCE = true
-						break
+					for netIdx, netAny := range allNetsRaw {
+						netMap := getMap(netAny)
+						if netMap == nil {
+							continue
+						}
+
+						softwareProps := getNodeProps(netMap["si"])
+						findingProps := getNodeProps(netMap["f"])
+						vulnProps := getNodeProps(netMap["v"])
+
+						var containerID, containerName string
+						if isContainer {
+							containerProps := getNodeProps(netMap["container"])
+							containerID = getStringLocal(containerProps["id"])
+							containerName = getStringLocal(containerProps["name"])
+						}
+
+						cvss := getStringLocal(vulnProps["cvss_vector"])
+						risk := getFloatLocal(findingProps["risk_score"])
+
+						isRCE := false
+						cwes := getStringSlice(vulnProps, "cwe")
+						for _, cwe := range cwes {
+							if cwe == "CWE-94" || cwe == "CWE-78" || cwe == "CWE-77" {
+								isRCE = true
+								break
+							}
+						}
+						if getBoolLocal(vulnProps["exploit"]) {
+							isRCE = true
+						}
+
+						rootObtained := hasLPE
+						if cvss != "" && strings.Contains(cvss, "C:H") && strings.Contains(cvss, "I:H") && strings.Contains(cvss, "A:H") {
+							if !isContainer {
+								rootObtained = true
+							}
+						}
+
+						findingElementID := getStringLocal(netMap["f_id"])
+						vulnCVE := getStringLocal(vulnProps["cve_id"])
+
+						// Clonar la ruta actual
+						clonedPath := domain.ExploitationPath{
+							PathID:          state.Path.PathID,
+							InitialEndpoint: state.Path.InitialEndpoint,
+							TotalRiskScore:  state.Path.TotalRiskScore,
+							Steps:           make([]domain.AttackStep, len(state.Path.Steps)),
+						}
+						copy(clonedPath.Steps, state.Path.Steps)
+
+						if netIdx > 0 {
+							clonedPath.PathID = fmt.Sprintf("%s-branch-%d-%d", state.Path.PathID, index, netIdx)
+						}
+
+						clonedPath.Steps = append(clonedPath.Steps, domain.AttackStep{
+							StepIndex:        int(index) + state.Offset,
+							SourceEndpoint:   state.PrevEndpoint,
+							TargetEndpoint:   targetName,
+							TargetEndpointID: targetID,
+							IsContainer:      isContainer,
+							ContainerID:      containerID,
+							ContainerName:    containerName,
+							FindingID:        findingElementID,
+							Vulnerability:    vulnCVE,
+							SoftwareAffected: getStringLocal(softwareProps["install_path"]),
+							RiskScore:        risk,
+							RCE:              isRCE,
+							RootObtained:     rootObtained,
+							Exploitable:      getBoolLocal(vulnProps["exploit"]) || getBoolLocal(vulnProps["kev"]),
+							CVSSVector:       cvss,
+						})
+
+						clonedPath.TotalRiskScore += risk
+
+						newState := activePathState{
+							Path:         clonedPath,
+							PrevEndpoint: targetName,
+							Offset:       state.Offset,
+							JustEscaped:  false,
+						}
+
+						if isContainer && hasLPE && int(index) < len(stepsList)-1 {
+							newState.Offset++
+							newState.Path.Steps = append(newState.Path.Steps, domain.AttackStep{
+								StepIndex:        int(index) + newState.Offset,
+								SourceEndpoint:   targetName,
+								TargetEndpoint:   "", // se rellena en la siguiente iteración
+								TargetEndpointID: 0,
+								IsContainer:      false,
+								Vulnerability:    "Container Escape (LPE)",
+								SoftwareAffected: "Container Runtime/Kernel",
+								RiskScore:        8.8,
+								RCE:              true,
+								RootObtained:     true,
+								Exploitable:      true,
+								CVSSVector:       "AV:L/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+							})
+							newState.Path.TotalRiskScore += 8.8
+							newState.JustEscaped = true
+						}
+
+						nextActivePaths = append(nextActivePaths, newState)
 					}
 				}
-				if getBoolLocal(vulnProps["exploit"]) {
-					isRCE = true
-				}
-				// Lógica de RootObtained
-				rootObtained := hasLPE
-				if cvss != "" && strings.Contains(cvss, "C:H") && strings.Contains(cvss, "I:H") && strings.Contains(cvss, "A:H") {
-					if !isContainer {
-						rootObtained = true
-					}
-				}
-
-				findingElementID := getStringLocal(stepMap["finding_id"])
-
-				ep.Steps = append(ep.Steps, domain.AttackStep{
-					StepIndex:        int(index),
-					SourceEndpoint:   prevEndpoint,
-					TargetEndpoint:   targetName,
-					TargetEndpointID: targetID,
-					IsContainer:      isContainer,
-					ContainerID:      containerID,
-					ContainerName:    containerName,
-					FindingID:        findingElementID,
-					Vulnerability:    getStringLocal(vulnProps["cve_id"]),
-					SoftwareAffected: getStringLocal(softwareProps["install_path"]),
-					RiskScore:        risk,
-					RCE:              isRCE,
-					RootObtained:     rootObtained,
-					Exploitable:      getBoolLocal(vulnProps["exploit"]) || getBoolLocal(vulnProps["kev"]),
-					CVSSVector:       cvss,
-				})
-
-				ep.TotalRiskScore += risk
-
-				if isContainer && hasLPE && int(index) < len(stepsList)-1 {
-					offset++
-					// El TargetEndpoint se rellenará en la siguiente iteración con el nombre real del host
-					ep.Steps = append(ep.Steps, domain.AttackStep{
-						StepIndex:        int(index) + 1,
-						SourceEndpoint:   targetName,
-						TargetEndpoint:   "",   // se rellena en la siguiente iteración
-						TargetEndpointID: 0,
-						IsContainer:      false,
-						Vulnerability:    "Container Escape (LPE)",
-						SoftwareAffected: "Container Runtime/Kernel",
-						RiskScore:        8.8,
-						RCE:              true,
-						RootObtained:     true,
-						Exploitable:      true,
-						CVSSVector:       "AV:L/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
-					})
-					ep.TotalRiskScore += 8.8
-					justEscaped = true
-				}
-
-				prevEndpoint = targetName
+				activePaths = nextActivePaths
 			}
 
-			paths = append(paths, ep)
+			for _, state := range activePaths {
+				paths = append(paths, state.Path)
+			}
 		}
 
 		return paths, result.Err()
