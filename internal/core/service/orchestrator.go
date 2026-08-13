@@ -1285,17 +1285,25 @@ func (o *Orchestrator) SyncScoutDaily(ctx context.Context) error {
 // UpdateEndpoint actualiza los datos y re-enlaza las IPs de un Endpoint en Neo4j.
 func (o *Orchestrator) UpdateEndpoint(ctx context.Context, endpoint *domain.Endpoint) error {
 	if err := o.endpointPort.Update(ctx, endpoint); err != nil {
-		return err
+		return fmt.Errorf("error actualizando endpoint: %w", err)
 	}
-	// Siempre sincronizamos IPs (para poder borrar VLANs o quitar todas las IPs de un endpoint)
+
 	if err := o.endpointPort.SaveIPs(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
-		return fmt.Errorf("error actualizando IPs del endpoint: %w", err)
+		return fmt.Errorf("error actualizando IPs del endpoint %d: %w", endpoint.EndpointID, err)
 	}
+
 	if o.networkPort != nil {
 		if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
-			return fmt.Errorf("error re-enlazando endpoint a las redes coincidentes: %w", err)
+			return fmt.Errorf("error actualizando relaciones endpoint-red para endpoint %d: %w", endpoint.EndpointID, err)
 		}
 	}
+
+	if o.riskPort != nil {
+		if err := o.ComputeEndpointRisk(ctx, endpoint.EndpointID); err != nil {
+			return fmt.Errorf("endpoint actualizado, pero falló el recálculo de riesgo: %w", err)
+		}
+	}
+
 	return nil
 }
 
