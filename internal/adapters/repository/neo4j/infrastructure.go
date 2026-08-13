@@ -533,18 +533,6 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 			WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
 			RETURN si, f, elementId(f) AS f_id, v, false AS is_container, null AS container, 1 AS priority
 			UNION
-			// Caso 2: ep es Endpoint y la vuln está en un software de un container alojado
-			WITH ep
-			MATCH (ep:Endpoint)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-			WHERE toLower(c.state) = 'running' AND (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A')
-			RETURN si, f, elementId(f) AS f_id, v, true AS is_container, c AS container, 2 AS priority
-			UNION
-			// Caso 3: ep es Endpoint y la vuln está en la imagen de un container alojado
-			WITH ep
-			MATCH (ep:Endpoint)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
-			WHERE toLower(c.state) = 'running' AND (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A')
-			RETURN null AS si, {risk_score: 9.8} AS f, "" AS f_id, v, true AS is_container, c AS container, 3 AS priority
-			UNION
 			// Caso 4: ep es Container directamente enrutado, con vuln en software (AV:N RCE - MAYOR PRIORIDAD PARA CONTENEDORES)
 			WITH ep
 			MATCH (ep:Container)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
@@ -577,7 +565,8 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 		// Ordenar: primero por prioridad ASC (1=mejor), luego por risk_score DESC dentro de esa prioridad
 		WITH path, e1, indexed, ie, ep, si, f, f_id, v, is_container, container, priority ORDER BY priority ASC, coalesce(f.risk_score, 0.0) DESC
 		
-		WITH path, e1, indexed, ie, ep, collect({si: si, f: f, f_id: f_id, v: v, is_container: is_container, container: container}) AS allNets
+		WITH path, e1, indexed, ie, ep, collect({si: si, f: f, f_id: f_id, v: v, is_container: is_container, container: container}) AS allNetsRaw
+		WITH path, e1, indexed, ie, ep, [net IN allNetsRaw WHERE ie.index > 0 OR net.v.cvss_vector CONTAINS 'AV:N' OR net.v.nvd_vector CONTAINS 'AV:N' OR net.v.cvss_vector CONTAINS 'AV:A'] AS allNets
 		
 		WITH path, e1, indexed, ie, ep, allNets,
 		  EXISTS { MATCH (ep)-[:CONNECTED_TO]->(:Network)<-[:CONNECTED_TO]-(lastNode) WHERE lastNode = last(nodes(path)) } AS canReachTargetDirectly,
@@ -631,8 +620,15 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 		    hasLPE: hasLPE
 		}) AS steps
 		
-		WHERE size(steps) < 2 OR all(i IN range(0, size(steps)-2) WHERE 
+		WHERE (size(steps) < 2 OR all(i IN range(0, size(steps)-2) WHERE 
 		    (NOT steps[i].is_container) OR (steps[i].hasLPE) OR (steps[i].endpoint:Container)
+		))
+		AND size(steps) > 0
+		AND size(steps[0].allNets) > 0
+		AND (
+		    steps[0].allNets[0].v.cvss_vector CONTAINS 'AV:N' OR 
+		    steps[0].allNets[0].v.nvd_vector CONTAINS 'AV:N' OR 
+		    steps[0].allNets[0].v.cvss_vector CONTAINS 'AV:A'
 		)
 
 		RETURN e1.id AS entry_id, steps
