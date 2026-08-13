@@ -96,6 +96,7 @@ type NetworkPort interface {
 	DeleteByID(ctx context.Context, id int64) error
 	LinkMatchingEndpoints(ctx context.Context, networkID int64, cidr string, vlanID int64) (int, error)
 	LinkEndpointToMatchingNetworks(ctx context.Context, endpointID int64, ips []domain.EndpointIP) (int, error)
+	LinkContainerToMatchingNetworks(ctx context.Context, containerID string, ips []domain.EndpointIP) (int, error)
 	LinkNetworkToProjectIfOrphan(ctx context.Context, networkID int64, projectID int64) error
 }
 
@@ -214,6 +215,7 @@ type ContainerPort interface {
 	SaveContainer(ctx context.Context, container *domain.Container) error
 	GetContainer(ctx context.Context, containerID string) (*domain.Container, error)
 	LinkVulnerabilityToImage(ctx context.Context, imageID string, cveID string) error
+	SaveIPs(ctx context.Context, containerID string, ips []domain.EndpointIP) error
 }
 
 // ContainerScannerPort define las operaciones para escanear imágenes de contenedores en busca de vulnerabilidades (ej. Docker Scout).

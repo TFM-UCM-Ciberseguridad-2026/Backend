@@ -289,6 +289,41 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 	return o.relationshipPort.LinkInstallationToSoftware(ctx, installation.InstallationID, software.SoftwareID)
 }
 
+// RegisterContainerSoftwareInstallation guarda la definición del software, la instancia instalada,
+// asocia la instancia al contenedor y el software genérico a la instancia instalada.
+func (o *Orchestrator) RegisterContainerSoftwareInstallation(ctx context.Context, containerID string, software *domain.Software, installation *domain.SoftwareInstallation) error {
+	if strings.TrimSpace(software.Vendor) == "" {
+		return fmt.Errorf("el fabricante (vendor) es obligatorio para registrar el software y consultar vulnerabilidades en NIST")
+	}
+
+	if software.SoftwareID == 0 {
+		swID, err := o.nextNodeID(ctx, "Software")
+		if err != nil {
+			return fmt.Errorf("error generando ID de software: %w", err)
+		}
+		software.SoftwareID = swID
+	}
+
+	if installation.InstallationID == "" {
+		installation.InstallationID = o.nextInstallationID()
+	}
+
+	if strings.TrimSpace(software.CPE) == "" || software.CPE == "N/A" {
+		software.CPE = domain.GenerateCPE23(software.Type, software.Vendor, software.Name, software.Version)
+	}
+
+	if err := o.softwarePort.Save(ctx, software); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+		return err
+	}
+	if err := o.softwareInstPort.Save(ctx, installation); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+		return err
+	}
+	if err := o.relationshipPort.LinkContainerToInstallation(ctx, containerID, installation.InstallationID); err != nil {
+		return err
+	}
+	return o.relationshipPort.LinkInstallationToSoftware(ctx, installation.InstallationID, software.SoftwareID)
+}
+
 // GenerateFinding registra un hallazgo de vulnerabilidad (Finding) a una instalación específica.
 func (o *Orchestrator) GenerateFinding(ctx context.Context, installationID string, finding *domain.Finding) error {
 	if finding.FindingID == 0 {
@@ -1210,6 +1245,48 @@ func (o *Orchestrator) SyncScoutDaily(ctx context.Context) error {
 		return fmt.Errorf("SyncScoutDaily completado con %d errores: %v", len(errs), errs)
 	}
 
+	return nil
+}
+
+// AddContainerToEndpoint guarda un contenedor y lo vincula a un host (endpoint)
+func (o *Orchestrator) AddContainerToEndpoint(ctx context.Context, hostID int64, container *domain.Container) error {
+	if container.ContainerID == "" {
+		// En principio el frontend genera UUID, pero si no...
+		container.ContainerID = fmt.Sprintf("container-%d", time.Now().UnixNano())
+	}
+	container.HostID = hostID
+
+	if err := o.containerPort.SaveContainer(ctx, container); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+		return err
+	}
+
+	if len(container.IPs) > 0 {
+		if err := o.containerPort.SaveIPs(ctx, container.ContainerID, container.IPs); err != nil {
+			return fmt.Errorf("error guardando IPs del contenedor: %w", err)
+		}
+		if o.networkPort != nil {
+			if _, err := o.networkPort.LinkContainerToMatchingNetworks(ctx, container.ContainerID, container.IPs); err != nil {
+				return fmt.Errorf("error enlazando contenedor a las redes coincidentes: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// UpdateContainer actualiza los datos de un contenedor y sus IPs.
+func (o *Orchestrator) UpdateContainer(ctx context.Context, container *domain.Container) error {
+	if err := o.containerPort.SaveContainer(ctx, container); err != nil {
+		return err
+	}
+	
+	if err := o.containerPort.SaveIPs(ctx, container.ContainerID, container.IPs); err != nil {
+		return fmt.Errorf("error actualizando IPs del contenedor: %w", err)
+	}
+	if o.networkPort != nil {
+		if _, err := o.networkPort.LinkContainerToMatchingNetworks(ctx, container.ContainerID, container.IPs); err != nil {
+			return fmt.Errorf("error re-enlazando contenedor a redes coincidentes: %w", err)
+		}
+	}
 	return nil
 }
 

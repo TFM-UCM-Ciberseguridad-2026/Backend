@@ -140,6 +140,26 @@ func (h *OrchestratorHandler) RegisterSoftwareInstallation(w http.ResponseWriter
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
 }
 
+// POST /api/containers/{id}/installations
+func (h *OrchestratorHandler) RegisterContainerSoftwareInstallation(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	
+	var req struct {
+		Software     domain.Software             `json:"software"`
+		Installation domain.SoftwareInstallation `json:"installation"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendError(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.orchestrator.RegisterContainerSoftwareInstallation(r.Context(), idStr, &req.Software, &req.Installation); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
+}
+
 // POST /api/installations/{id}/findings
 func (h *OrchestratorHandler) GenerateFinding(w http.ResponseWriter, r *http.Request) {
 	instID := r.PathValue("id")
@@ -846,4 +866,50 @@ func (h *OrchestratorHandler) DeleteNode(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	sendJSON(w, map[string]any{"status": "success", "message": "Nodo eliminado con éxito"}, http.StatusOK)
+}
+
+// POST /api/endpoints/{id}/containers
+func (h *OrchestratorHandler) AddContainerToEndpoint(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	endpointID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		sendError(w, "Invalid endpoint ID", http.StatusBadRequest)
+		return
+	}
+
+	var container domain.Container
+	if err := json.NewDecoder(r.Body).Decode(&container); err != nil {
+		sendError(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.orchestrator.AddContainerToEndpoint(r.Context(), endpointID, &container); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
+}
+
+// PUT /api/containers/{id}
+func (h *OrchestratorHandler) UpdateContainer(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	
+	var container domain.Container
+	if err := json.NewDecoder(r.Body).Decode(&container); err != nil {
+		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	container.ContainerID = idStr
+
+	if err := h.orchestrator.UpdateContainer(r.Context(), &container); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]any{"status": "success", "message": "Contenedor actualizado con éxito"}, http.StatusOK)
+}
+
+// DELETE /api/containers/{id}
+func (h *OrchestratorHandler) DeleteContainer(w http.ResponseWriter, r *http.Request) {
+	// Se puede delegar en el borrado genérico o tener lógica específica si hace falta
+	h.DeleteNode(w, r)
 }

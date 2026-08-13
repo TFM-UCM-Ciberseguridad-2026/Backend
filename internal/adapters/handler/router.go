@@ -113,6 +113,13 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	mux.HandleFunc("DELETE /api/software/{id}", h.DeleteSoftware)
 	mux.HandleFunc("PUT /api/installations/{id}", h.UpdateSoftwareInstallation)
 	mux.HandleFunc("DELETE /api/installations/{id}", h.DeleteSoftwareInstallation)
+	
+	// Contenedores CRUD
+	mux.HandleFunc("POST /api/endpoints/{id}/containers", h.AddContainerToEndpoint)
+	mux.HandleFunc("PUT /api/containers/{id}", h.UpdateContainer)
+	mux.HandleFunc("DELETE /api/containers/{id}", h.DeleteContainer)
+	mux.HandleFunc("POST /api/containers/{id}/installations", h.RegisterContainerSoftwareInstallation)
+	
 	mux.HandleFunc("DELETE /api/nodes/{id}", h.DeleteNode)
 
 	return mux
