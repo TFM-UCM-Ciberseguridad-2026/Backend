@@ -808,3 +808,41 @@ func (r *riskRepo) GetAllProjectIDs(ctx context.Context) ([]int64, error) {
 	}
 	return res.([]int64), nil
 }
+
+// GetProjectIDByEndpoint devuelve el ID del proyecto asociado a un endpoint activo.
+func (r *riskRepo) GetProjectIDByEndpoint(ctx context.Context, endpointID int64) (int64, error) {
+	query := `
+			MATCH (p:Project)-[:HAS_ENDPOINT]->(e:Endpoint {id: $endpoint_id})
+			RETURN p.id AS project_id
+			LIMIT 1
+	`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{
+			"endpoint_id": endpointID,
+		})
+		if err != nil {
+			return int64(0), err
+		}
+
+		if result.Next(ctx) {
+			projectID, _ := result.Record().Get("project_id")
+			return toInt64(projectID), result.Err()
+		}
+
+		if err := result.Err(); err != nil {
+			return int64(0), err
+		}
+
+		return int64(0), nil
+	})
+
+	if err != nil {
+		return 0, err
+	}
+
+	return res.(int64), nil
+}

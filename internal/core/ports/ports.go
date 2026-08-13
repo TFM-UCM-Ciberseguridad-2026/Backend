@@ -302,6 +302,9 @@ type RiskPort interface {
 	// GetEndpointIDsByProject devuelve los IDs de todos los endpoints asociados a un proyecto.
 	GetEndpointIDsByProject(ctx context.Context, projectID int64) ([]int64, error)
 
+	// GetProjectIDByEndpoint devuelve el ID del proyecto al que pertenece un endpoint.
+	GetProjectIDByEndpoint(ctx context.Context, endpointID int64) (int64, error)
+
 	// GetEndpointRiskSummariesByProject devuelve un resumen de riesgo de todos los endpoints asociados a un proyecto.
 	GetEndpointRiskSummariesByProject(ctx context.Context, projectID int64) ([]domain.EndpointRiskSummary, error)
 

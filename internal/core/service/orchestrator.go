@@ -1111,74 +1111,7 @@ func (o *Orchestrator) ComputeProjectRisk(ctx context.Context, projectID int64) 
 		}
 	}
 
-	summaries, err := o.riskPort.GetEndpointRiskSummariesByProject(ctx, projectID)
-	if err != nil {
-		return fmt.Errorf("error obteniendo resumen de endpoints del proyecto %d: %w", projectID, err)
-	}
-
-	if len(summaries) == 0 {
-		return o.riskPort.UpdateProjectRiskAndPriority(
-			ctx,
-			projectID,
-			0.0,
-			"LOW",
-			0.0,
-			"LOW",
-			0,
-			"",
-			0.0,
-			"",
-			"",
-			0,
-			"",
-			0.0,
-			"",
-			"",
-			0,
-		)
-	}
-
-	riskScores := make([]float64, 0, len(summaries))
-	priorityScores := make([]float64, 0, len(summaries))
-	for _, summary := range summaries {
-		riskScores = append(riskScores, summary.RiskScore)
-		priorityScores = append(priorityScores, summary.PriorityScore)
-	}
-
-	projectRisk := AggregateInfrastructureRisk(riskScores)
-	projectRiskTier := ClassifyRiskTier(projectRisk)
-
-	projectPriority := AggregateInfrastructurePriority(priorityScores)
-	projectPriorityTier := ClassifyRiskTier(projectPriority)
-
-	technicalDriver, hasTechnicalDriver := findDriverEndpointByRisk(summaries)
-	priorityDriver, hasPriorityDriver := findDriverEndpointByPriority(summaries)
-	if !hasTechnicalDriver {
-		technicalDriver = domain.EndpointRiskSummary{}
-	}
-	if !hasPriorityDriver {
-		priorityDriver = domain.EndpointRiskSummary{}
-	}
-
-	return o.riskPort.UpdateProjectRiskAndPriority(
-		ctx,
-		projectID,
-		projectRisk,
-		projectRiskTier,
-		projectPriority,
-		projectPriorityTier,
-		technicalDriver.EndpointID,
-		technicalDriver.Hostname,
-		technicalDriver.RiskScore,
-		technicalDriver.TechnicalDriverSoftwareName,
-		technicalDriver.TechnicalDriverCVEID,
-		priorityDriver.EndpointID,
-		priorityDriver.Hostname,
-		priorityDriver.PriorityScore,
-		priorityDriver.PriorityDriverSoftwareName,
-		priorityDriver.PriorityDriverCVEID,
-		countRiskyEndpoints(summaries),
-	)
+	return o.AggregateProjectRiskFromCurrentEndpointScores(ctx, projectID)
 }
 
 // ComputeAllProjectsRisk recorre todos los proyectos y recalcula su riesgo agregado.
@@ -1285,39 +1218,39 @@ func (o *Orchestrator) SyncScoutDaily(ctx context.Context) error {
 // UpdateEndpoint actualiza los datos y re-enlaza las IPs de un Endpoint en Neo4j.
 func (o *Orchestrator) UpdateEndpoint(ctx context.Context, endpoint *domain.Endpoint) error {
 	if err := o.endpointPort.Update(ctx, endpoint); err != nil {
-			return fmt.Errorf("error actualizando endpoint: %w", err)
+		return fmt.Errorf("error actualizando endpoint: %w", err)
 	}
 
 	if err := o.endpointPort.SaveIPs(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
-			return fmt.Errorf("error actualizando IPs del endpoint %d: %w", endpoint.EndpointID, err)
+		return fmt.Errorf("error actualizando IPs del endpoint %d: %w", endpoint.EndpointID, err)
 	}
 
 	if o.networkPort != nil {
-			if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
-					return fmt.Errorf("error actualizando relaciones endpoint-red para endpoint %d: %w", endpoint.EndpointID, err)
-			}
+		if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
+			return fmt.Errorf("error actualizando relaciones endpoint-red para endpoint %d: %w", endpoint.EndpointID, err)
+		}
 	}
 
 	if o.riskPort != nil {
-			projectID, err := o.riskPort.GetProjectIDByEndpoint(ctx, endpoint.EndpointID)
-			if err != nil {
-					return fmt.Errorf("endpoint actualizado, pero falló la búsqueda del proyecto para recalcular riesgo: %w", err)
-			}
+		if err := o.ComputeEndpointRisk(ctx, endpoint.EndpointID); err != nil {
+			return fmt.Errorf("endpoint actualizado, pero falló el recálculo de riesgo del endpoint %d: %w",
+				endpoint.EndpointID, err)
+		}
 
-			if projectID != 0 {
-					if err := o.ComputeProjectRisk(ctx, projectID); err != nil {
-							return fmt.Errorf("endpoint actualizado, pero falló el recálculo de riesgo del proyecto %d: %w", projectID, err)
-					}
-			} else {
-					if err := o.ComputeEndpointRisk(ctx, endpoint.EndpointID); err != nil {
-							return fmt.Errorf("endpoint actualizado, pero falló el recálculo de riesgo del endpoint: %w", err)
-					}
+		projectID, err := o.riskPort.GetProjectIDByEndpoint(ctx, endpoint.EndpointID)
+		if err != nil {
+			return fmt.Errorf("endpoint actualizado, pero falló la búsqueda del proyecto para recalcular riesgo: %w", err)
+		}
+
+		if projectID != 0 {
+			if err := o.AggregateProjectRiskFromCurrentEndpointScores(ctx, projectID); err != nil {
+				return fmt.Errorf("endpoint actualizado, pero falló la agregación de riesgo del proyecto %d: %w", projectID, err)
 			}
+		}
 	}
 
 	return nil
 }
-
 
 // DeleteEndpoint elimina un Endpoint por su ID.
 func (o *Orchestrator) DeleteEndpoint(ctx context.Context, endpointID int64) error {
@@ -1444,4 +1377,78 @@ func (o *Orchestrator) SyncATTACKCatalog(ctx context.Context) (int, error) {
 	}
 
 	return len(ttps), nil
+}
+
+// AggregateProjectRiskFromCurrentEndpointScores recalcula el riesgo agregado de un proyecto completo, basado en los scores actuales de sus endpoints asociados.
+func (o *Orchestrator) AggregateProjectRiskFromCurrentEndpointScores(ctx context.Context, projectID int64) error {
+	summaries, err := o.riskPort.GetEndpointRiskSummariesByProject(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("error obteniendo resumen de endpoints del proyecto %d: %w", projectID, err)
+	}
+
+	if len(summaries) == 0 {
+		return o.riskPort.UpdateProjectRiskAndPriority(
+			ctx,
+			projectID,
+			0.0,
+			"LOW",
+			0.0,
+			"LOW",
+			0,
+			"",
+			0.0,
+			"",
+			"",
+			0,
+			"",
+			0.0,
+			"",
+			"",
+			0,
+		)
+	}
+
+	riskScores := make([]float64, 0, len(summaries))
+	priorityScores := make([]float64, 0, len(summaries))
+
+	for _, summary := range summaries {
+		riskScores = append(riskScores, summary.RiskScore)
+		priorityScores = append(priorityScores, summary.PriorityScore)
+	}
+
+	projectRisk := AggregateInfrastructureRisk(riskScores)
+	projectRiskTier := ClassifyRiskTier(projectRisk)
+
+	projectPriority := AggregateInfrastructurePriority(priorityScores)
+	projectPriorityTier := ClassifyRiskTier(projectPriority)
+
+	technicalDriver, hasTechnicalDriver := findDriverEndpointByRisk(summaries)
+	priorityDriver, hasPriorityDriver := findDriverEndpointByPriority(summaries)
+
+	if !hasTechnicalDriver {
+		technicalDriver = domain.EndpointRiskSummary{}
+	}
+	if !hasPriorityDriver {
+		priorityDriver = domain.EndpointRiskSummary{}
+	}
+
+	return o.riskPort.UpdateProjectRiskAndPriority(
+		ctx,
+		projectID,
+		projectRisk,
+		projectRiskTier,
+		projectPriority,
+		projectPriorityTier,
+		technicalDriver.EndpointID,
+		technicalDriver.Hostname,
+		technicalDriver.RiskScore,
+		technicalDriver.TechnicalDriverSoftwareName,
+		technicalDriver.TechnicalDriverCVEID,
+		priorityDriver.EndpointID,
+		priorityDriver.Hostname,
+		priorityDriver.PriorityScore,
+		priorityDriver.PriorityDriverSoftwareName,
+		priorityDriver.PriorityDriverCVEID,
+		countRiskyEndpoints(summaries),
+	)
 }
