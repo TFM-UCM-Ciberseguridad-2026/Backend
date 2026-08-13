@@ -204,7 +204,6 @@ func (h *OrchestratorHandler) GetFindingVulnerabilities(w http.ResponseWriter, r
 	}, http.StatusOK)
 }
 
-
 // GET /api/infrastructure
 func (h *OrchestratorHandler) GetInfrastructure(w http.ResponseWriter, r *http.Request) {
 	graph, err := h.orchestrator.GetInfrastructure(r.Context())
@@ -283,11 +282,13 @@ func (h *OrchestratorHandler) ScanSoftwareVulnerabilities(w http.ResponseWriter,
 		sendError(w, "Missing software_id query parameter", http.StatusBadRequest)
 		return
 	}
+
 	swID, err := strconv.ParseInt(swIDStr, 10, 64)
 	if err != nil {
 		sendError(w, "Invalid software_id", http.StatusBadRequest)
 		return
 	}
+
 	limit := 100
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		parsedLimit, err := strconv.Atoi(limitStr)
@@ -300,11 +301,13 @@ func (h *OrchestratorHandler) ScanSoftwareVulnerabilities(w http.ResponseWriter,
 		}
 	}
 
-	if err := h.orchestrator.AutoScanAndRegisterVulnerabilities(r.Context(), instID, swID, limit); err != nil {
+	result, err := h.orchestrator.AutoScanAndRegisterVulnerabilities(r.Context(), instID, swID, limit)
+	if err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	sendJSON(w, map[string]string{"status": "success"}, http.StatusOK)
+
+	sendJSON(w, result, http.StatusOK)
 }
 
 // POST /api/endpoints/{id}/compute-risk
@@ -562,7 +565,6 @@ func (h *OrchestratorHandler) GetAppliedPatchHistory(w http.ResponseWriter, r *h
 		"applied_patches": history,
 	}, http.StatusOK)
 }
-
 
 // createNetworkRequest es el DTO de entrada para POST /api/networks y PUT /api/networks/{id}.
 // ProjectID identifica el proyecto activo en el frontend en el momento de crear/editar la
@@ -845,5 +847,3 @@ func (h *OrchestratorHandler) DeleteNode(w http.ResponseWriter, r *http.Request)
 	}
 	sendJSON(w, map[string]any{"status": "success", "message": "Nodo eliminado con éxito"}, http.StatusOK)
 }
-
-

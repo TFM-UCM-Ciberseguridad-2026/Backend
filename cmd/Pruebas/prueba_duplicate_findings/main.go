@@ -114,7 +114,7 @@ func main() {
 	fmt.Println("    ✓ Infraestructura creada")
 
 	fmt.Println("\n[3/6] Ejecutando primer AutoScan...")
-	if err := orchestrator.AutoScanAndRegisterVulnerabilities(ctx, installationID, softwareID, 20); err != nil {
+	if _, err := orchestrator.AutoScanAndRegisterVulnerabilities(ctx, installationID, softwareID, 20); err != nil {
 		log.Fatalf("Primer scan: %v", err)
 	}
 
@@ -135,7 +135,7 @@ func main() {
 	}
 
 	fmt.Println("\n[4/6] Ejecutando segundo AutoScan sobre la misma instalación...")
-	if err := orchestrator.AutoScanAndRegisterVulnerabilities(ctx, installationID, softwareID, 20); err != nil {
+	if _, err := orchestrator.AutoScanAndRegisterVulnerabilities(ctx, installationID, softwareID, 20); err != nil {
 		log.Fatalf("Segundo scan: %v", err)
 	}
 
@@ -163,7 +163,7 @@ func main() {
 	}
 	fmt.Printf("    CVE marcada como PATCHED: %s\n", patchedCVE)
 
-	if err := orchestrator.AutoScanAndRegisterVulnerabilities(ctx, installationID, softwareID, 20); err != nil {
+	if _, err := orchestrator.AutoScanAndRegisterVulnerabilities(ctx, installationID, softwareID, 20); err != nil {
 		log.Fatalf("Tercer scan: %v", err)
 	}
 

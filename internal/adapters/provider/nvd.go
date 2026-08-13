@@ -16,6 +16,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -102,6 +105,23 @@ type NistAPIAdapter struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
+
+	minInterval time.Duration
+	lastRequest time.Time
+	rateMu      sync.Mutex
+
+	cacheTTL time.Duration
+	cacheMu  sync.RWMutex
+	cpeCache map[string]nvdCacheEntry
+}
+
+// nvdMaxRetries define el número máximo de reintentos para llamadas a la API del NIST en caso de errores.
+const nvdMaxRetries = 3
+
+// nvdCacheEntry representa una entrada en caché de vulnerabilidades obtenidas de NVD, junto con su fecha de expiración.
+type nvdCacheEntry struct {
+	vulnerabilities []domain.Vulnerability
+	expiresAt       time.Time
 }
 
 // NewNistAPIAdapter inicializa el adaptador de infraestructura
@@ -109,29 +129,60 @@ func NewNistAPIAdapter(baseURL string, apiKey string, timeoutSeconds int) *NistA
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 90
 	}
+
+	minInterval := 6 * time.Second
+	if strings.TrimSpace(apiKey) != "" {
+		minInterval = 1200 * time.Millisecond
+	}
+
 	return &NistAPIAdapter{
-		baseURL: baseURL,
-		apiKey:  apiKey,
+		baseURL:     baseURL,
+		apiKey:      apiKey,
+		minInterval: minInterval,
+		cacheTTL:    24 * time.Hour,
+		cpeCache:    make(map[string]nvdCacheEntry),
 		httpClient: &http.Client{
 			Timeout: time.Duration(timeoutSeconds) * time.Second,
 		},
 	}
 }
 
-// FetchVulnerabilities consume la API de NIST y parsea los resultados al dominio
-func (a *NistAPIAdapter) FetchVulnerabilities(ctx context.Context, limit int, offset int) ([]domain.Vulnerability, error) {
+// waitTurn implementa un mecanismo de rate limiting para cumplir con las restricciones de la API del NIST.
+func (a *NistAPIAdapter) waitTurn(ctx context.Context) error {
+	a.rateMu.Lock()
+	defer a.rateMu.Unlock()
+
+	if !a.lastRequest.IsZero() {
+		elapsed := time.Since(a.lastRequest)
+		wait := a.minInterval - elapsed
+		if wait > 0 {
+			timer := time.NewTimer(wait)
+			defer timer.Stop()
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+
+	a.lastRequest = time.Now()
+	return nil
+}
+
+// FetchVulnerabilities consume la API de NIST y parsea los resultados al dominio.
+func (a *NistAPIAdapter) FetchVulnerabilities(ctx context.Context, limit int, offset int) ([]domain.Vulnerability,
+	error) {
 	reqURL := fmt.Sprintf("%s?resultsPerPage=%d&startIndex=%d", a.baseURL, limit, offset)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error creando request para NIST: %w", err)
-	}
-
-	if a.apiKey != "" {
-		req.Header.Set("apiKey", a.apiKey)
-	}
-
-	resp, err := a.httpClient.Do(req)
+	resp, err := a.doRequestWithRetry(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("error creando request para NIST: %w", err)
+		}
+		return req, nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("error ejecutando llamada HTTP a NIST: %w", err)
 	}
@@ -141,6 +192,9 @@ func (a *NistAPIAdapter) FetchVulnerabilities(ctx context.Context, limit int, of
 		if resp.StatusCode == http.StatusNotFound {
 			return []domain.Vulnerability{}, nil
 		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return nil, fmt.Errorf("api nist rate limit: status 429 tras reintentos")
+		}
 		return nil, fmt.Errorf("api nist devolvió status code inválido: %d", resp.StatusCode)
 	}
 
@@ -149,13 +203,148 @@ func (a *NistAPIAdapter) FetchVulnerabilities(ctx context.Context, limit int, of
 		return nil, fmt.Errorf("error decodificando JSON de NIST: %w", err)
 	}
 
-	// Mapeo de DTOs externos a Entidades de Dominio Puras
-	var vulnerabilities []domain.Vulnerability
+	vulnerabilities := make([]domain.Vulnerability, 0, len(apiResponse.Vulnerabilities))
 	for _, item := range apiResponse.Vulnerabilities {
 		vulnerabilities = append(vulnerabilities, toDomainEntity(item))
 	}
 
 	return vulnerabilities, nil
+}
+
+// doRequestWithRetry realiza la solicitud HTTP con reintentos en caso de errores transitorios o límites de tasa.
+func (a *NistAPIAdapter) doRequestWithRetry(ctx context.Context, reqFactory func() (*http.Request, error)) (*http.Response, error) {
+	var lastErr error
+
+	for attempt := 0; attempt <= nvdMaxRetries; attempt++ {
+		if err := a.waitTurn(ctx); err != nil {
+			return nil, err
+		}
+
+		req, err := reqFactory()
+		if err != nil {
+			return nil, err
+		}
+
+		if strings.TrimSpace(a.apiKey) != "" {
+			req.Header.Set("apiKey", a.apiKey)
+		}
+
+		resp, err := a.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			if attempt == nvdMaxRetries {
+				return nil, err
+			}
+			if waitErr := sleepBackoff(ctx, attempt, 0); waitErr != nil {
+				return nil, waitErr
+			}
+			continue
+		}
+
+		if !isRetryableNVDStatus(resp.StatusCode) {
+			return resp, nil
+		}
+
+		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+		resp.Body.Close()
+
+		if attempt == nvdMaxRetries {
+			return resp, nil
+		}
+
+		if waitErr := sleepBackoff(ctx, attempt, retryAfter); waitErr != nil {
+			return nil, waitErr
+		}
+	}
+
+	return nil, lastErr
+}
+
+// isRetryableNVDStatus determina si un código de estado HTTP de NVD es elegible para reintento.
+func isRetryableNVDStatus(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+// parseRetryAfter analiza el valor del encabezado "Retry-After" y devuelve la duración de espera correspondiente.
+func parseRetryAfter(value string) time.Duration {
+	if value == "" {
+		return 0
+	}
+
+	seconds, err := strconv.Atoi(value)
+	if err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+
+	if when, err := http.ParseTime(value); err == nil {
+		wait := time.Until(when)
+		if wait > 0 {
+			return wait
+		}
+	}
+
+	return 0
+}
+
+// sleepBackoff implementa un backoff exponencial con jitter para reintentos de solicitudes HTTP a NVD.
+func sleepBackoff(ctx context.Context, attempt int, retryAfter time.Duration) error {
+	wait := retryAfter
+	if wait <= 0 {
+		wait = time.Duration(1<<attempt) * 2 * time.Second
+	}
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// getCPECache obtiene las vulnerabilidades en caché para un CPE dado, si existen y no han expirado.
+func (a *NistAPIAdapter) getCPECache(cpe string) ([]domain.Vulnerability, bool) {
+	a.cacheMu.RLock()
+	entry, ok := a.cpeCache[cpe]
+	a.cacheMu.RUnlock()
+
+	if !ok {
+		return nil, false
+	}
+
+	if time.Now().After(entry.expiresAt) {
+		a.cacheMu.Lock()
+		delete(a.cpeCache, cpe)
+		a.cacheMu.Unlock()
+		return nil, false
+	}
+
+	out := make([]domain.Vulnerability, len(entry.vulnerabilities))
+	copy(out, entry.vulnerabilities)
+	return out, true
+}
+
+func (a *NistAPIAdapter) setCPECache(cpe string, vulns []domain.Vulnerability) {
+	copyVulns := make([]domain.Vulnerability, len(vulns))
+	copy(copyVulns, vulns)
+
+	a.cacheMu.Lock()
+	a.cpeCache[cpe] = nvdCacheEntry{
+		vulnerabilities: copyVulns,
+		expiresAt:       time.Now().Add(a.cacheTTL),
+	}
+	a.cacheMu.Unlock()
 }
 
 /*
@@ -166,19 +355,20 @@ FetchByCPE consulta la API REST oficial de NIST NVD v2.0 usando un CPE (Common P
 4. Envía la solicitud y decodifica la respuesta JSON en DTOs, mapeando el resultado a entidades limpias de dominio.
 */
 func (a *NistAPIAdapter) FetchByCPE(ctx context.Context, cpe string) ([]domain.Vulnerability, error) {
+	if vulns, ok := a.getCPECache(cpe); ok {
+		return vulns, nil
+	}
+
 	escapedCPE := url.QueryEscape(cpe)
 	reqURL := fmt.Sprintf("%s?cpeName=%s&resultsPerPage=100", a.baseURL, escapedCPE)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error creando request para NIST por CPE: %w", err)
-	}
-
-	if a.apiKey != "" {
-		req.Header.Set("apiKey", a.apiKey)
-	}
-
-	resp, err := a.httpClient.Do(req)
+	resp, err := a.doRequestWithRetry(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("error creando request para NIST por CPE: %w", err)
+		}
+		return req, nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("error ejecutando llamada HTTP a NIST por CPE: %w", err)
 	}
@@ -186,10 +376,14 @@ func (a *NistAPIAdapter) FetchByCPE(ctx context.Context, cpe string) ([]domain.V
 
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusNotFound {
-			// NIST NVD v2.0 devuelve HTTP 404 cuando el CPE no existe en su base de datos o no coincide con ninguna vulnerabilidad.
-			return []domain.Vulnerability{}, nil
+			empty := []domain.Vulnerability{}
+			a.setCPECache(cpe, empty)
+			return empty, nil
 		}
-		return nil, fmt.Errorf("api nist devolvió status code inválido por CPE: %d", resp.StatusCode)
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return nil, fmt.Errorf("api nist rate limit por CPE %s: status 429 tras reintentos", cpe)
+		}
+		return nil, fmt.Errorf("api nist devolvió status code inválido por CPE %s: %d", cpe, resp.StatusCode)
 	}
 
 	var apiResponse NistResponseDTO
@@ -197,35 +391,36 @@ func (a *NistAPIAdapter) FetchByCPE(ctx context.Context, cpe string) ([]domain.V
 		return nil, fmt.Errorf("error decodificando JSON de NIST por CPE: %w", err)
 	}
 
-	var vulnerabilities []domain.Vulnerability
+	vulnerabilities := make([]domain.Vulnerability, 0, len(apiResponse.Vulnerabilities))
 	for _, item := range apiResponse.Vulnerabilities {
 		vulnerabilities = append(vulnerabilities, toDomainEntity(item))
 	}
 
+	a.setCPECache(cpe, vulnerabilities)
 	return vulnerabilities, nil
 }
 
-/*
-FetchByDate consulta la API REST oficial de NIST NVD v2.0 usando fechas de modificación.
-Usa lastModStartDate y lastModEndDate. Las fechas deben estar en formato ISO 8601 (YYYY-MM-DDTHH:MM:SS.000).
-*/
-func (a *NistAPIAdapter) FetchByDate(ctx context.Context, startDate, endDate time.Time) ([]domain.Vulnerability, error) {
-	// Formato ISO 8601: 2021-08-04T13:00:00.000
+// FetchByDate consulta la API REST oficial de NIST NVD v2.0 usando fechas de modificación.
+// Usa lastModStartDate y lastModEndDate. Las fechas deben estar en formato ISO 8601.
+func (a *NistAPIAdapter) FetchByDate(ctx context.Context, startDate, endDate time.Time) ([]domain.Vulnerability,
+	error) {
 	startStr := startDate.UTC().Format("2006-01-02T15:04:05.000")
 	endStr := endDate.UTC().Format("2006-01-02T15:04:05.000")
 
-	reqURL := fmt.Sprintf("%s?lastModStartDate=%s&lastModEndDate=%s", a.baseURL, url.QueryEscape(startStr), url.QueryEscape(endStr))
+	reqURL := fmt.Sprintf(
+		"%s?lastModStartDate=%s&lastModEndDate=%s",
+		a.baseURL,
+		url.QueryEscape(startStr),
+		url.QueryEscape(endStr),
+	)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error creando request para NIST por fecha: %w", err)
-	}
-
-	if a.apiKey != "" {
-		req.Header.Set("apiKey", a.apiKey)
-	}
-
-	resp, err := a.httpClient.Do(req)
+	resp, err := a.doRequestWithRetry(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("error creando request para NIST por fecha: %w", err)
+		}
+		return req, nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("error ejecutando llamada HTTP a NIST por fecha: %w", err)
 	}
@@ -235,6 +430,9 @@ func (a *NistAPIAdapter) FetchByDate(ctx context.Context, startDate, endDate tim
 		if resp.StatusCode == http.StatusNotFound {
 			return []domain.Vulnerability{}, nil
 		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return nil, fmt.Errorf("api nist rate limit por fecha: status 429 tras reintentos")
+		}
 		return nil, fmt.Errorf("api nist devolvió status code inválido por fecha: %d", resp.StatusCode)
 	}
 
@@ -243,7 +441,7 @@ func (a *NistAPIAdapter) FetchByDate(ctx context.Context, startDate, endDate tim
 		return nil, fmt.Errorf("error decodificando JSON de NIST por fecha: %w", err)
 	}
 
-	var vulnerabilities []domain.Vulnerability
+	vulnerabilities := make([]domain.Vulnerability, 0, len(apiResponse.Vulnerabilities))
 	for _, item := range apiResponse.Vulnerabilities {
 		vulnerabilities = append(vulnerabilities, toDomainEntity(item))
 	}
