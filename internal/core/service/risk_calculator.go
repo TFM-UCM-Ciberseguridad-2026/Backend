@@ -275,7 +275,7 @@ func AggregateEndpointPriority(scores []float64) float64 {
 // CalculateSoftwareCriticalityMultiplier convierte LOW/STANDARD/HIGH/CRITICAL
 // en un multiplicador de prioridad de software.
 func CalculateSoftwareCriticalityMultiplier(level string) float64 {
-	switch strings.ToUpper(strings.TrimSpace(level)) {
+	switch NormalizeSoftwareCriticalityLevel(level) {
 	case "LOW":
 		return 0.75
 	case "HIGH":
@@ -295,4 +295,18 @@ func AggregateInfrastructureRisk(scores []float64) float64 {
 // AggregateInfrastructurePriority combina los scores de prioridad de todos los endpoints asociados a un proyecto
 func AggregateInfrastructurePriority(scores []float64) float64 {
 	return AggregateRiskScores(scores)
+}
+
+// NormalizeSoftwareCriticalityLevel normaliza el nivel de criticidad de software a los valores esperados por el sistema.
+func NormalizeSoftwareCriticalityLevel(level string) string {
+	switch strings.ToUpper(strings.TrimSpace(level)) {
+	case "LOW":
+		return "LOW"
+	case "HIGH":
+		return "HIGH"
+	case "CRITICAL":
+		return "CRITICAL"
+	default:
+		return "STANDARD"
+	}
 }
