@@ -356,3 +356,130 @@ func (r *networkRepo) LinkNetworkToProjectIfOrphan(ctx context.Context, networkI
 		"project_id": projectID,
 	})
 }
+
+// LinkContainerToMatchingNetworks vincula un contenedor a las redes compatibles con sus IPs.
+func (r *networkRepo) LinkContainerToMatchingNetworks(ctx context.Context, containerID string, ips []domain.EndpointIP) (int, error) {
+	writeSession := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer writeSession.Close(ctx)
+
+	// 1. Desconectar de redes previas por si se alteró o borró la VLAN / IP
+	_, _ = writeSession.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		_, err := tx.Run(ctx, `
+			MATCH (c:Container)-[r:CONNECTED_TO]->(n:Network)
+			WHERE c.id = $container_id OR toString(c.id) = toString($container_id)
+			WITH c, r, n
+			OPTIONAL MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(c)
+			WITH c, r, n, p
+			FOREACH (proj IN CASE WHEN p IS NOT NULL THEN [p] ELSE [] END |
+				MERGE (proj)-[:CONTAINS_NETWORK]->(n)
+			)
+			WITH c, r
+			DELETE r
+		`, map[string]any{"container_id": containerID})
+		return nil, err
+	})
+
+	if len(ips) == 0 {
+		return 0, nil
+	}
+
+	readSession := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer readSession.Close(ctx)
+
+	type networkCandidate struct {
+		networkID int64
+		cidr      string
+		vlanID    int64
+	}
+
+	res, err := readSession.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, "MATCH (n:Network) RETURN n.id AS network_id, n.cidr AS cidr, n.vlan_id AS vlan_id", nil)
+		if err != nil {
+			return nil, err
+		}
+
+		var candidates []networkCandidate
+		for result.Next(ctx) {
+			rec := result.Record()
+			netIDVal, _ := rec.Get("network_id")
+			cidrVal, _ := rec.Get("cidr")
+			vlanVal, _ := rec.Get("vlan_id")
+
+			candidates = append(candidates, networkCandidate{
+				networkID: getInt64Any(netIDVal),
+				cidr:      getStringAny(cidrVal),
+				vlanID:    getInt64Any(vlanVal),
+			})
+		}
+		return candidates, result.Err()
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	candidates, _ := res.([]networkCandidate)
+	if len(candidates) == 0 {
+		return 0, nil
+	}
+
+	var matchingNetworkIDs []int64
+	for _, cand := range candidates {
+		matched := false
+		for _, ipEntry := range ips {
+			// Coincidencia estricta por VLAN
+			if cand.vlanID > 0 && ipEntry.VLANID == cand.vlanID {
+				matched = true
+				break
+			}
+			// Coincidencia por CIDR
+			if cand.cidr != "" {
+				if _, ipNet, err := net.ParseCIDR(cand.cidr); err == nil {
+					if parsedIP := net.ParseIP(ipEntry.IP); parsedIP != nil && ipNet.Contains(parsedIP) {
+						if cand.vlanID == 0 || ipEntry.VLANID == cand.vlanID {
+							matched = true
+							break
+						}
+					}
+				}
+			}
+		}
+		if matched {
+			matchingNetworkIDs = append(matchingNetworkIDs, cand.networkID)
+		}
+	}
+
+	if len(matchingNetworkIDs) == 0 {
+		return 0, nil
+	}
+
+	writeSession2 := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer writeSession2.Close(ctx)
+
+	_, err = writeSession2.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		for _, netID := range matchingNetworkIDs {
+			if _, err := tx.Run(ctx, `
+				MATCH (c:Container), (n:Network)
+				WHERE (c.id = $container_id OR toString(c.id) = toString($container_id))
+				  AND (toInteger(n.id) = toInteger($network_id) OR toString(n.id) = toString($network_id))
+				MERGE (c)-[:CONNECTED_TO]->(n)
+				WITH c, n
+				OPTIONAL MATCH (p:Project)-[:HAS_ENDPOINT]->(e:Endpoint)-[:HOSTS]->(c)
+				WITH n, p
+				FOREACH (proj IN CASE WHEN p IS NOT NULL THEN [p] ELSE [] END |
+					MERGE (proj)-[:CONTAINS_NETWORK]->(n)
+				)
+			`, map[string]any{
+				"container_id": containerID,
+				"network_id":  netID,
+			}); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	return len(matchingNetworkIDs), nil
+}

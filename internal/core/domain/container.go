@@ -14,7 +14,9 @@ type Container struct {
 	ContainerID string  `json:"container_id"`
 	Name        string  `json:"name"`
 	State       string  `json:"state"`
-	ImageID     string  `json:"image_id"`
-	HostID      int64   `json:"host_id"` // ID del Endpoint donde corre
-	RiskScore   float64 `json:"risk_score"`
+	ImageID     string       `json:"image_id"`
+	HostID      int64        `json:"host_id"` // ID del Endpoint donde corre
+	RiskScore   float64      `json:"risk_score"`
+	InternetExposed bool         `json:"internet_exposed"`
+	IPs         []EndpointIP `json:"ips,omitempty"` // IPs asociadas al contenedor (opcional)
 }
