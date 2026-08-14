@@ -74,7 +74,7 @@ func main() {
 
 	// Ejecutar GetExploitationPaths
 	fmt.Println("\n[*] Ejecutando algoritmo de Path de Explotación (GetExploitationPaths)...")
-	paths, err := infraRepo.GetExploitationPaths(ctx)
+	paths, err := infraRepo.GetExploitationPaths(ctx, 0)
 	if err != nil {
 		log.Fatalf("Error calculando paths: %v", err)
 	}
@@ -112,7 +112,7 @@ func main() {
 	}
 
 	fmt.Println("[*] Recalculando paths de explotación tras el escape de contenedor...")
-	paths, err = infraRepo.GetExploitationPaths(ctx)
+	paths, err = infraRepo.GetExploitationPaths(ctx, 0)
 	if err != nil {
 		log.Fatalf("Error calculando paths (Fase 2): %v", err)
 	}

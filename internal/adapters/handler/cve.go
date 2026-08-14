@@ -278,9 +278,19 @@ func (h *OrchestratorHandler) GetMitreTTPCount(w http.ResponseWriter, r *http.Re
 	sendJSON(w, map[string]int{"count": count}, http.StatusOK)
 }
 
-// GET /api/infrastructure/exploitation-paths
+// GET /api/infrastructure/exploitation-paths?project_id={id}
 func (h *OrchestratorHandler) GetExploitationPaths(w http.ResponseWriter, r *http.Request) {
-	paths, err := h.orchestrator.GenerateExploitationPaths(r.Context())
+	projectIDStr := r.URL.Query().Get("project_id")
+	var projectID int64
+	if projectIDStr != "" {
+		var err error
+		projectID, err = strconv.ParseInt(projectIDStr, 10, 64)
+		if err != nil {
+			sendError(w, "Invalid project_id", http.StatusBadRequest)
+			return
+		}
+	}
+	paths, err := h.orchestrator.GenerateExploitationPaths(r.Context(), projectID)
 	if err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return

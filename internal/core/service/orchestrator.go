@@ -1165,9 +1165,10 @@ func (o *Orchestrator) ComputeAllProjectsRisk(ctx context.Context) error {
 	return nil
 }
 
-// GenerateExploitationPaths devuelve las rutas de explotación calculadas desde el motor de grafos.
-func (o *Orchestrator) GenerateExploitationPaths(ctx context.Context) ([]domain.ExploitationPath, error) {
-	return o.infraPort.GetExploitationPaths(ctx)
+// GenerateExploitationPaths devuelve las rutas de explotación calculadas desde el motor de grafos,
+// filtradas por proyecto si se indica un projectID > 0.
+func (o *Orchestrator) GenerateExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error) {
+	return o.infraPort.GetExploitationPaths(ctx, projectID)
 }
 
 // SaveContainerImage registra una imagen de contenedor en Neo4j.
