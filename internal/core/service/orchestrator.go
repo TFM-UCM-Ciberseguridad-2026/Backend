@@ -273,6 +273,9 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 		installation.InstallationID = o.nextInstallationID()
 	}
 
+	installation.CriticalityLevel = NormalizeSoftwareCriticalityLevel(installation.CriticalityLevel)
+	installation.CriticalityMultiplier = CalculateSoftwareCriticalityMultiplier(installation.CriticalityLevel)
+
 	if strings.TrimSpace(software.CPE) == "" || software.CPE == "N/A" {
 		software.CPE = domain.GenerateCPE23(software.Type, software.Vendor, software.Name, software.Version)
 	}
@@ -307,6 +310,9 @@ func (o *Orchestrator) RegisterContainerSoftwareInstallation(ctx context.Context
 	if installation.InstallationID == "" {
 		installation.InstallationID = o.nextInstallationID()
 	}
+
+	installation.CriticalityLevel = NormalizeSoftwareCriticalityLevel(installation.CriticalityLevel)
+	installation.CriticalityMultiplier = CalculateSoftwareCriticalityMultiplier(installation.CriticalityLevel)
 
 	if strings.TrimSpace(software.CPE) == "" || software.CPE == "N/A" {
 		software.CPE = domain.GenerateCPE23(software.Type, software.Vendor, software.Name, software.Version)
@@ -1278,7 +1284,7 @@ func (o *Orchestrator) UpdateContainer(ctx context.Context, container *domain.Co
 	if err := o.containerPort.SaveContainer(ctx, container); err != nil {
 		return err
 	}
-	
+
 	if err := o.containerPort.SaveIPs(ctx, container.ContainerID, container.IPs); err != nil {
 		return fmt.Errorf("error actualizando IPs del contenedor: %w", err)
 	}
@@ -1385,7 +1391,46 @@ func (o *Orchestrator) DeleteSoftware(ctx context.Context, softwareID int64) err
 
 // UpdateSoftwareInstallation actualiza los datos de una instalación de software.
 func (o *Orchestrator) UpdateSoftwareInstallation(ctx context.Context, installation *domain.SoftwareInstallation) error {
-	return o.softwareInstPort.Update(ctx, installation)
+	installation.CriticalityLevel = NormalizeSoftwareCriticalityLevel(installation.CriticalityLevel)
+
+	if err := o.softwareInstPort.Update(ctx, installation); err != nil {
+		return fmt.Errorf("error actualizando instalación de software %s: %w", installation.InstallationID, err)
+	}
+
+	if o.riskPort == nil {
+		return nil
+	}
+
+	endpointIDs, err := o.riskPort.GetEndpointIDsByInstallation(ctx, installation.InstallationID)
+	if err != nil {
+		return fmt.Errorf("instalación actualizada, pero falló la búsqueda de endpoints afectados: %w", err)
+	}
+
+	if len(endpointIDs) == 0 {
+		if _, err := o.ComputeSoftwareInstallationRisk(ctx, installation.InstallationID); err != nil {
+			return fmt.Errorf("instalación actualizada, pero falló el recálculo de riesgo de la instalación %s: %w", installation.InstallationID, err)
+		}
+		return nil
+	}
+
+	for _, endpointID := range endpointIDs {
+		if err := o.ComputeEndpointRisk(ctx, endpointID); err != nil {
+			return fmt.Errorf("instalación actualizada, pero falló el recálculo de riesgo del endpoint %d: %w", endpointID, err)
+		}
+
+		projectID, err := o.riskPort.GetProjectIDByEndpoint(ctx, endpointID)
+		if err != nil {
+			return fmt.Errorf("instalación actualizada, pero falló la búsqueda del proyecto del endpoint %d: %w", endpointID, err)
+		}
+
+		if projectID != 0 {
+			if err := o.AggregateProjectRiskFromCurrentEndpointScores(ctx, projectID); err != nil {
+				return fmt.Errorf("instalación actualizada, pero falló la agregación de riesgo del proyecto %d: %w", projectID, err)
+			}
+		}
+	}
+
+	return nil
 }
 
 // DeleteSoftwareInstallation elimina una instalación por su ID.
