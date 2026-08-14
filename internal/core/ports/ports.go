@@ -124,6 +124,7 @@ type PatchPort interface {
 type ProjectPort interface {
 	Save(ctx context.Context, project *domain.Project) error
 	Update(ctx context.Context, project *domain.Project) error
+	RenameProject(ctx context.Context, id int64, newName string) error
 	GetByID(ctx context.Context, id int64) (*domain.Project, error)
 	DeleteByID(ctx context.Context, id int64) error
 	ExportGraph(ctx context.Context, id int64) (*domain.GraphData, error)
@@ -203,7 +204,7 @@ type InfrastructurePort interface {
 	GetGraphData(ctx context.Context) (*domain.GraphData, error)
 	GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int, projectID int64) ([]domain.APTThreatResult, error)
 	GetTotalMitreTTPs(ctx context.Context) (int, error)
-	GetExploitationPaths(ctx context.Context) ([]domain.ExploitationPath, error)
+	GetExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error)
 	ImportGraphData(ctx context.Context, data *domain.GraphData) error
 }
 

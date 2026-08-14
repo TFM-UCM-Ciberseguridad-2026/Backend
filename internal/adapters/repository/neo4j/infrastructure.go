@@ -473,20 +473,24 @@ func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context,
 // Una ruta de ataque comienza en un Endpoint expuesto a internet y con un
 // servicio vulnerable a ejecución remota de código (RCE). A partir de ahí,
 // simula el movimiento lateral a través de la red explotando otras vulnerabilidades.
-func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain.ExploitationPath, error) {
+// Si projectID > 0, filtra solo los endpoints pertenecientes a ese proyecto.
+func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
 	// La consulta busca:
-	// 1. Punto de entrada (e1): Expuesto a internet.
+	// 1. Punto de entrada (e1): Expuesto a internet, perteneciente al proyecto (si projectID > 0).
 	// 2. Movimiento lateral sin límite de saltos: Buscando cualquier camino hasta otro endpoint.
 	// 3. Condición de salto: Todos los Endpoints intermedios deben tener vulnerabilidades de red (AV:N o AV:A).
 	// 4. Privilegios (Root): Si la vuln de red tiene C:H, I:H, A:H, o si hay una vuln local (AV:L) con impacto alto.
 	query := `
-		MATCH path = (e1)-[:CONNECTED_TO|HOSTS*1..8]-(eTarget)
+		MATCH path = (e1)-[:CONNECTED_TO|HOSTS*1..5]-(eTarget)
 		WHERE (e1:Endpoint OR (e1:Container AND toLower(e1.state) = 'running')) AND e1.internet_exposed = true
 		  AND (eTarget:Endpoint OR (eTarget:Container AND toLower(eTarget.state) = 'running'))
 		  AND e1.id <> coalesce(eTarget.id, "0")
+		  AND ($projectID = 0 OR 
+		    EXISTS { MATCH (proj:Project {id: $projectID})-[:HAS_ENDPOINT]->(e1) } OR
+		    (e1:Container AND EXISTS { MATCH (proj:Project {id: $projectID})-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(e1) }))
 		  AND all(n IN nodes(path) WHERE 
 		    (n:Network) OR 
 		    (n:Endpoint AND (
@@ -635,12 +639,13 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 	`
 
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
-		result, err := tx.Run(ctx, query, nil)
+		result, err := tx.Run(ctx, query, map[string]any{"projectID": projectID})
 		if err != nil {
 			return nil, err
 		}
 
 		paths := make([]domain.ExploitationPath, 0)
+		bestPathPerTarget := make(map[string]domain.ExploitationPath)
 		pathCounter := 1
 
 		getBoolLocal := func(val any) bool {
@@ -695,6 +700,12 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 			initialEndpointName := getStringLocal(firstEndpointProps["hostname"])
 			if initialEndpointName == "" {
 				initialEndpointName = getStringLocal(firstEndpointProps["name"])
+			}
+			if initialEndpointName == "" {
+				initialEndpointName = getStringLocal(firstEndpointProps["nombre"])
+			}
+			if initialEndpointName == "" {
+				initialEndpointName = "Unknown"
 			}
 
 			ep := domain.ExploitationPath{
@@ -758,7 +769,6 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 
 				for _, state := range activePaths {
 					if state.JustEscaped {
-						// Parchear el TargetEndpoint del último paso LPE
 						if len(state.Path.Steps) > 0 {
 							last := &state.Path.Steps[len(state.Path.Steps)-1]
 							if last.Vulnerability == "Container Escape (LPE)" {
@@ -888,8 +898,21 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 			}
 
 			for _, state := range activePaths {
-				paths = append(paths, state.Path)
+				if len(state.Path.Steps) == 0 {
+					continue
+				}
+				lastStep := state.Path.Steps[len(state.Path.Steps)-1]
+				targetKey := fmt.Sprintf("%d-%s", lastStep.TargetEndpointID, lastStep.TargetEndpoint)
+				
+				existing, ok := bestPathPerTarget[targetKey]
+				if !ok || state.Path.TotalRiskScore > existing.TotalRiskScore {
+					bestPathPerTarget[targetKey] = state.Path
+				}
 			}
+		}
+
+		for _, p := range bestPathPerTarget {
+			paths = append(paths, p)
 		}
 
 		return paths, result.Err()
@@ -968,23 +991,60 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 
 			props := normalizeProperties(node.Properties)
 
-			// Asegurar que existe una clave ID única
+			// Seleccionar la clave canónica de MERGE según el tipo de nodo,
+			// para respetar las constraints UNIQUE existentes en la BD.
 			var matchKey string
 			var matchVal interface{}
 
-			if idVal, exists := props["id"]; exists && idVal != nil {
-				matchKey = "id"
-				matchVal = idVal
-			} else if cveVal, exists := props["cve_id"]; exists && cveVal != nil {
-				matchKey = "cve_id"
-				matchVal = cveVal
-			} else if ttpVal, exists := props["ttp_id"]; exists && ttpVal != nil {
-				matchKey = "ttp_id"
-				matchVal = ttpVal
-			} else if actorVal, exists := props["actor_id"]; exists && actorVal != nil {
-				matchKey = "actor_id"
-				matchVal = actorVal
-			} else {
+			switch primaryLabel {
+			case "Vulnerability":
+				if cveVal, exists := props["cve_id"]; exists && cveVal != nil {
+					matchKey = "cve_id"
+					matchVal = cveVal
+				} else if idVal, exists := props["id"]; exists && idVal != nil {
+					matchKey = "id"
+					matchVal = idVal
+				}
+			case "TTP":
+				if ttpVal, exists := props["ttp_id"]; exists && ttpVal != nil {
+					matchKey = "ttp_id"
+					matchVal = ttpVal
+				} else if idVal, exists := props["id"]; exists && idVal != nil {
+					matchKey = "id"
+					matchVal = idVal
+				}
+			case "ThreatActor":
+				if actorVal, exists := props["actor_id"]; exists && actorVal != nil {
+					matchKey = "actor_id"
+					matchVal = actorVal
+				} else if idVal, exists := props["id"]; exists && idVal != nil {
+					matchKey = "id"
+					matchVal = idVal
+				}
+			case "CWE":
+				if cweVal, exists := props["cwe_id"]; exists && cweVal != nil {
+					matchKey = "cwe_id"
+					matchVal = cweVal
+				} else if idVal, exists := props["id"]; exists && idVal != nil {
+					matchKey = "id"
+					matchVal = idVal
+				}
+			case "CAPEC":
+				if capecVal, exists := props["capec_id"]; exists && capecVal != nil {
+					matchKey = "capec_id"
+					matchVal = capecVal
+				} else if idVal, exists := props["id"]; exists && idVal != nil {
+					matchKey = "id"
+					matchVal = idVal
+				}
+			default:
+				if idVal, exists := props["id"]; exists && idVal != nil {
+					matchKey = "id"
+					matchVal = idVal
+				}
+			}
+
+			if matchKey == "" {
 				matchKey = "id"
 				matchVal = node.ID
 				props["id"] = node.ID

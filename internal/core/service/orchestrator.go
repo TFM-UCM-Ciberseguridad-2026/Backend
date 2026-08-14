@@ -173,6 +173,14 @@ func (o *Orchestrator) DeleteProject(ctx context.Context, projectID int64) error
 	return o.projectPort.DeleteByID(ctx, projectID)
 }
 
+// RenameProject actualiza el nombre de un proyecto.
+func (o *Orchestrator) RenameProject(ctx context.Context, projectID int64, newName string) error {
+	if newName == "" {
+		return fmt.Errorf("el nombre del proyecto no puede estar vacío")
+	}
+	return o.projectPort.RenameProject(ctx, projectID, newName)
+}
+
 // AddEndpointToProject guarda un nuevo endpoint y lo vincula a un proyecto.
 func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64, endpoint *domain.Endpoint) error {
 	if endpoint.EndpointID == 0 {
@@ -1171,9 +1179,10 @@ func (o *Orchestrator) ComputeAllProjectsRisk(ctx context.Context) error {
 	return nil
 }
 
-// GenerateExploitationPaths devuelve las rutas de explotación calculadas desde el motor de grafos.
-func (o *Orchestrator) GenerateExploitationPaths(ctx context.Context) ([]domain.ExploitationPath, error) {
-	return o.infraPort.GetExploitationPaths(ctx)
+// GenerateExploitationPaths devuelve las rutas de explotación calculadas desde el motor de grafos,
+// filtradas por proyecto si se indica un projectID > 0.
+func (o *Orchestrator) GenerateExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error) {
+	return o.infraPort.GetExploitationPaths(ctx, projectID)
 }
 
 // SaveContainerImage registra una imagen de contenedor en Neo4j.
