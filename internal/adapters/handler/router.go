@@ -27,6 +27,9 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* DELETE /api/projects/{id}: Elimina un proyecto y su infraestructura en cascada. */
 	mux.HandleFunc("DELETE /api/projects/{id}", h.DeleteProject)
 
+	/* PUT /api/projects/{id}: Renombra un proyecto existente. */
+	mux.HandleFunc("PUT /api/projects/{id}", h.RenameProject)
+
 	/* POST /api/projects/{id}/endpoints: Asocia un endpoint (host) a un proyecto por su ID. */
 	mux.HandleFunc("POST /api/projects/{id}/endpoints", h.AddEndpointToProject)
 

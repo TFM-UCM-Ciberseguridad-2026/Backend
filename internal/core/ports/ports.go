@@ -124,6 +124,7 @@ type PatchPort interface {
 type ProjectPort interface {
 	Save(ctx context.Context, project *domain.Project) error
 	Update(ctx context.Context, project *domain.Project) error
+	RenameProject(ctx context.Context, id int64, newName string) error
 	GetByID(ctx context.Context, id int64) (*domain.Project, error)
 	DeleteByID(ctx context.Context, id int64) error
 	ExportGraph(ctx context.Context, id int64) (*domain.GraphData, error)

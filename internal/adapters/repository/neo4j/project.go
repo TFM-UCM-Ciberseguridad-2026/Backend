@@ -125,6 +125,19 @@ func (r *projectRepo) Update(ctx context.Context, p *domain.Project) error {
 	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
+func (r *projectRepo) RenameProject(ctx context.Context, id int64, newName string) error {
+	query := `
+		MATCH (p:Project)
+		WHERE toString(p.id) = toString($id)
+		SET p.name = $name, p.nombre = $name
+	`
+	params := map[string]any{
+		"id":   id,
+		"name": newName,
+	}
+	return executeWriteUpdateHelper(ctx, r.driver, query, params)
+}
+
 func (r *projectRepo) GetByID(ctx context.Context, id int64) (*domain.Project, error) {
 	query := `MATCH (n:Project {id: $id}) RETURN properties(n) AS props`
 	props, err := executeReadHelper(ctx, r.driver, query, map[string]any{"id": id})
@@ -183,14 +196,16 @@ func (r *projectRepo) ExportGraph(ctx context.Context, id int64) (*domain.GraphD
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	// Utilizamos apoc.path.subgraphAll para extraer todo el grafo conexo desde el Proyecto,
-	// con un límite seguro (ej. 10 niveles) que cubrirá toda la infraestructura:
-	// Project -> Endpoint -> IPAddress / Network / Hardware / SoftwareInstallation
-	// SoftwareInstallation -> Vulnerability -> TTP -> ThreatActor
+	// Utilizamos apoc.path.subgraphAll con relationshipFilter para extraer todo el grafo conexo desde el Proyecto,
+	// pero asegurando que NUNCA navega hacia atrás desde nodos compartidos (Vulnerabilities, TTPs, CWEs),
+	// evitando así que se fusione con otros proyectos.
 	query := `
 		MATCH (p:Project)
 		WHERE toString(p.id) = toString($id) OR elementId(p) = toString($id)
-		CALL apoc.path.subgraphAll(p, {maxLevel: 10}) YIELD nodes, relationships
+		CALL apoc.path.subgraphAll(p, {
+			maxLevel: 10,
+			relationshipFilter: "HAS_ENDPOINT>|CONTAINS_NETWORK>|HAS_IP>|HAS_HARDWARE>|CONNECTED_TO>|HAS_INSTALLATION>|INSTANCE_OF>|HOSTS>|USES_IMAGE>|HAS_FINDING>|OF_VULNERABILITY>|HAS_EXPLOIT>|HAS_REMEDIATION>|USES_PATCH>|FIXES>|HAS_CWE>|EXPLOITS_VIA_TTP>|<MAPS_TO_CWE|<MAPS_TO_TTP|<USES"
+		}) YIELD nodes, relationships
 		
 		WITH 
 			[node IN nodes WHERE node IS NOT NULL | {id: elementId(node), labels: labels(node), properties: properties(node)}] AS exportedNodes,

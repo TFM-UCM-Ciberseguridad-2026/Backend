@@ -173,6 +173,14 @@ func (o *Orchestrator) DeleteProject(ctx context.Context, projectID int64) error
 	return o.projectPort.DeleteByID(ctx, projectID)
 }
 
+// RenameProject actualiza el nombre de un proyecto.
+func (o *Orchestrator) RenameProject(ctx context.Context, projectID int64, newName string) error {
+	if newName == "" {
+		return fmt.Errorf("el nombre del proyecto no puede estar vacío")
+	}
+	return o.projectPort.RenameProject(ctx, projectID, newName)
+}
+
 // AddEndpointToProject guarda un nuevo endpoint y lo vincula a un proyecto.
 func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64, endpoint *domain.Endpoint) error {
 	if endpoint.EndpointID == 0 {

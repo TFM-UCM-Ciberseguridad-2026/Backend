@@ -71,6 +71,31 @@ func (h *OrchestratorHandler) DeleteProject(w http.ResponseWriter, r *http.Reque
 	sendJSON(w, map[string]string{"status": "success", "message": "Proyecto eliminado con éxito"}, http.StatusOK)
 }
 
+// PUT /api/projects/{id}
+func (h *OrchestratorHandler) RenameProject(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	projectID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		sendError(w, "ID de proyecto inválido: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var payload struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		sendError(w, "Error decodificando payload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := h.orchestrator.RenameProject(r.Context(), projectID, payload.Name); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]string{"status": "success", "message": "Proyecto renombrado con éxito"}, http.StatusOK)
+}
+
 // POST /api/projects/{id}/endpoints
 func (h *OrchestratorHandler) AddEndpointToProject(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
