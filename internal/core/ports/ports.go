@@ -31,8 +31,8 @@ type VulnerabilityPort interface {
 	GetByID(ctx context.Context, cveID string) (*domain.Vulnerability, error)
 	DeleteByID(ctx context.Context, cveID string) error
 	LinkVulnerabilityToCWEs(ctx context.Context, cveID string, cwes []string) error
-	GetInferredTTPsByCVE(ctx context.Context, cveID string) ([]domain.TTP, error)
-	LinkInferredTTPsToVulnerability(ctx context.Context, cveID string) (int, error)
+	LinkTTPsToVulnerability(ctx context.Context, cveID, cweID string, ttps []string, confidence, source string) error
+	GetUnmappedVulnerabilities(ctx context.Context) ([]domain.Vulnerability, error)
 }
 
 type SoftwarePort interface {
@@ -186,7 +186,13 @@ type TTPPort interface {
 
 // MitreATTACKProvider obtiene el catálogo MITRE ATT&CK Enterprise desde el feed STIX 2.1.
 type MitreATTACKProvider interface {
-	FetchATTACKBundle(ctx context.Context) ([]domain.TTP, error)
+	FetchATTACKBundle(ctx context.Context) ([]domain.TTP, []domain.ThreatActor, []domain.ThreatActorTTPRelation, error)
+}
+
+type TTPMapper interface {
+	MapCWEToTTP(ctx context.Context, cwe string) ([]string, error)
+	MapCVEDescriptionToTTP(ctx context.Context, description string) ([]string, error)
+	MapCWEToTTPRaw(ctx context.Context, cwe string) ([]string, string, error)
 }
 
 type ThreatActorPort interface {
@@ -196,6 +202,8 @@ type ThreatActorPort interface {
 	DeleteByID(ctx context.Context, id string) error
 	RelateToTTP(ctx context.Context, actorID string, ttpID string) error
 	GetTopThreatActors(ctx context.Context, limit int) ([]domain.ThreatActorThreat, error)
+	SaveBatch(ctx context.Context, actors []domain.ThreatActor) error
+	SaveRelationshipsBatch(ctx context.Context, relations []domain.ThreatActorTTPRelation) error
 }
 
 type InfrastructurePort interface {

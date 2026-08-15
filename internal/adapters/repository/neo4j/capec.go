@@ -71,7 +71,7 @@ func (r *capecRepo) Save(ctx context.Context, capec *domain.CAPEC) error {
 		queryTTP := `
 			MATCH (c:CAPEC {capec_id: $capec_id})
 			UNWIND $ttps AS ttp_id
-			MERGE (t:TTP {ttp_id: ttp_id})
+			MATCH (t:TTP {ttp_id: ttp_id})
 			MERGE (c)-[rel:MAPS_TO_TTP]->(t)
 			SET rel.updated_at = timestamp()
 		`
@@ -141,7 +141,7 @@ func (r *capecRepo) SaveBatch(ctx context.Context, capecs []domain.CAPEC) error 
 		WITH item WHERE size(item.ttps) > 0
 		MATCH (c:CAPEC {capec_id: item.capec_id})
 		UNWIND item.ttps AS ttp_id
-		MERGE (t:TTP {ttp_id: ttp_id})
+		MATCH (t:TTP {ttp_id: ttp_id})
 		MERGE (c)-[rel:MAPS_TO_TTP]->(t)
 		SET rel.updated_at = timestamp()
 	`
@@ -188,7 +188,7 @@ func (r *capecRepo) LinkCAPECToCWE(ctx context.Context, capecID string, cweID st
 func (r *capecRepo) LinkCAPECToTTP(ctx context.Context, capecID string, ttpID string) error {
 	query := `
 		MERGE (c:CAPEC {capec_id: $capec_id})
-		MERGE (t:TTP {ttp_id: $ttp_id})
+		MATCH (t:TTP {ttp_id: $ttp_id})
 		MERGE (c)-[rel:MAPS_TO_TTP]->(t)
 		SET rel.updated_at = timestamp()
 	`

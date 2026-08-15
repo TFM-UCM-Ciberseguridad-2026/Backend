@@ -138,3 +138,54 @@ func (r *threatActorRepo) GetTopThreatActors(ctx context.Context, limit int) ([]
 
 	return actors, nil
 }
+
+func (r *threatActorRepo) SaveBatch(ctx context.Context, actors []domain.ThreatActor) error {
+	if len(actors) == 0 {
+		return nil
+	}
+
+	var actorMaps []map[string]any
+	for _, a := range actors {
+		actorMaps = append(actorMaps, map[string]any{
+			"actor_id":    a.ActorID,
+			"name":        a.Name,
+			"description": a.Description,
+			"aliases":     a.Aliases,
+		})
+	}
+
+	query := `
+		UNWIND $actors AS item
+		MERGE (a:ThreatActor {actor_id: item.actor_id})
+		SET a.name = item.name,
+		    a.description = item.description,
+		    a.aliases = item.aliases,
+		    a.updated_at = timestamp()
+	`
+
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{"actors": actorMaps})
+}
+
+func (r *threatActorRepo) SaveRelationshipsBatch(ctx context.Context, relations []domain.ThreatActorTTPRelation) error {
+	if len(relations) == 0 {
+		return nil
+	}
+
+	var relMaps []map[string]any
+	for _, rel := range relations {
+		relMaps = append(relMaps, map[string]any{
+			"actor_id": rel.ActorID,
+			"ttp_id":   rel.TTPID,
+		})
+	}
+
+	query := `
+		UNWIND $rels AS item
+		MATCH (a:ThreatActor {actor_id: item.actor_id})
+		MATCH (t:TTP {ttp_id: item.ttp_id})
+		MERGE (a)-[rel:USES]->(t)
+		SET rel.updated_at = timestamp()
+	`
+
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{"rels": relMaps})
+}

@@ -63,8 +63,14 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* GET /api/infrastructure/mitre-ttp-count: Obtiene el numero total de TTPs en el catalogo MITRE. */
 	mux.HandleFunc("GET /api/infrastructure/mitre-ttp-count", h.GetMitreTTPCount)
 
+	/* GET /api/infrastructure/ttp-sync-status: Obtiene el estado actual del mapeo de TTPs en segundo plano. */
+	mux.HandleFunc("GET /api/infrastructure/ttp-sync-status", h.GetTTPSyncStatus)
+
 	/* GET /api/infrastructure/exploitation-paths: Obtiene las rutas de explotación calculadas en la infraestructura. */
 	mux.HandleFunc("GET /api/infrastructure/exploitation-paths", h.GetExploitationPaths)
+
+	/* POST /api/infrastructure/map-ttps: Inicia manualmente el mapeo (directo e indirecto) de TTPs en background. */
+	mux.HandleFunc("POST /api/infrastructure/map-ttps", h.MapTTPsManually)
 
 
 	/* POST /api/installations/{id}/scan-vulns: Automatiza el escaneo y registro de vulnerabilidades por CPE/versión contra la API del NIST. */

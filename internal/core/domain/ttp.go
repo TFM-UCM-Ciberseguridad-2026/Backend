@@ -14,3 +14,9 @@ type TTP struct {
 	Tactic      string `json:"tactic"`      // e.g. "Execution"
 	Description string `json:"description"` // e.g. "Adversaries may abuse..."
 }
+
+// TTPMapping represents the inference mapping details from a Vulnerability to a TTP.
+type TTPMapping struct {
+	Confidence string `json:"confidence"` // "high" or "low"
+	Source     string `json:"source"`     // "cwe_mapping" or "cve_description_fallback"
+}

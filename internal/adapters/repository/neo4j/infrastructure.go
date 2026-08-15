@@ -30,9 +30,13 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 	query := `
 		MATCH (n)
 		WHERE NOT (n:ThreatActor OR n:TTP OR n:IPAddress)
-		OPTIONAL MATCH (c:CAPEC)-[:MAPS_TO_CWE]->(w:CWE) WHERE ("Vulnerability" IN labels(n)) AND ((n)-[:HAS_CWE]->(w) OR w.cwe_id IN n.cwe)
-		OPTIONAL MATCH (c)-[:MAPS_TO_TTP]->(t:TTP)
-		WITH n, collect(DISTINCT case when t.ttp_id is not null then {ttp_id: t.ttp_id, name: coalesce(t.name, ''), tactic: coalesce(t.tactic, ''), description: coalesce(t.description, '')} else null end) AS inferredTTPs
+		OPTIONAL MATCH (n)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t1:TTP) WHERE "Vulnerability" IN labels(n)
+		WITH n, collect(DISTINCT t1) AS t1List
+		OPTIONAL MATCH (n)-[:MAPS_TO]->(t2:TTP) WHERE "Vulnerability" IN labels(n)
+		WITH n, t1List, collect(DISTINCT t2) AS t2List
+		WITH n, t1List + t2List AS combinedTTPs
+		UNWIND case when size(combinedTTPs) > 0 then combinedTTPs else [null] end AS t
+		WITH n, collect(DISTINCT case when t is not null and t.ttp_id is not null then {ttp_id: t.ttp_id, name: coalesce(t.name, ''), tactic: coalesce(t.tactic, ''), description: coalesce(t.description, '')} else null end) AS inferredTTPs
 		WITH n, [x IN inferredTTPs WHERE x IS NOT NULL] AS cleanTTPs
 		WITH collect({
 			id: elementId(n), 
@@ -369,19 +373,25 @@ func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context,
 	// 2. Para cada ThreatActor, cuenta cuántas de esas TTPs utiliza
 	// 3. Calcula el porcentaje de cobertura y ordena descendentemente
 	query := `
-		// Paso 1: Obtener todas las TTPs únicas que apuntan a CVEs de la infraestructura a través de CWE y CAPEC
+		// Paso 1: Obtener todas las TTPs únicas que apuntan a CVEs de la infraestructura
 		MATCH (p:Project)-[:HAS_ENDPOINT]->(e:Endpoint)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
 		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE $project_id = 0 OR p.id = $project_id
-		MATCH (c:CAPEC)-[:MAPS_TO_CWE]->(w:CWE)
-		WHERE (v)-[:HAS_CWE]->(w) OR w.cwe_id IN v.cwe
-		MATCH (c)-[:MAPS_TO_TTP]->(ttp:TTP)
-		WITH collect(DISTINCT ttp) AS infraTTPs
+		
+		// Ruta A (Producción): Mapeos de Ollama directos o a través de CWE
+		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t1:TTP)
+		OPTIONAL MATCH (v)-[:MAPS_TO]->(t2:TTP)
+		
+		// Ruta B (Demo): Relaciones directas TTP -> Vulnerabilidad del script de pruebas
+		OPTIONAL MATCH (t3:TTP)-[:TARGETS_VULN]->(v)
+		
+		WITH collect(DISTINCT coalesce(t1, t2, t3)) AS rawTTPs
+		WITH [t IN rawTTPs WHERE t IS NOT NULL] AS infraTTPs
 
 		// Paso 2: Para cada ThreatActor, calcular solapamiento con las TTPs de la infraestructura
 		UNWIND infraTTPs AS infraTTP
 		WITH infraTTPs, infraTTP
-		MATCH (ta:ThreatActor)-[:USES]->(infraTTP)
+		MATCH (ta:ThreatActor)-[:USES|USES_TTP]->(infraTTP)
 		WITH ta, infraTTPs,
 		     collect(DISTINCT infraTTP) AS matchedTTPs
 

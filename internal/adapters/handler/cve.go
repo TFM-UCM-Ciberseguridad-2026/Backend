@@ -846,4 +846,13 @@ func (h *OrchestratorHandler) DeleteNode(w http.ResponseWriter, r *http.Request)
 	sendJSON(w, map[string]any{"status": "success", "message": "Nodo eliminado con éxito"}, http.StatusOK)
 }
 
+func (h *OrchestratorHandler) GetTTPSyncStatus(w http.ResponseWriter, r *http.Request) {
+	status := h.orchestrator.GetTTPSyncStatus()
+	sendJSON(w, status, http.StatusOK)
+}
 
+// POST /api/infrastructure/map-ttps
+func (h *OrchestratorHandler) MapTTPsManually(w http.ResponseWriter, r *http.Request) {
+	go h.orchestrator.StartBackgroundTTPMapping()
+	sendJSON(w, map[string]any{"status": "success", "message": "Mapeo de TTPs iniciado en segundo plano"}, http.StatusOK)
+}
