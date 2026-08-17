@@ -297,8 +297,8 @@ func (r *containerRepo) LinkVulnerabilityToImage(ctx context.Context, imageID st
 	query := `
 		MATCH (ci:ContainerImage {id: $image_id})
 		MATCH (v:Vulnerability {cve_id: $cve_id})
-		MERGE (f:Finding {id: 'finding-' + $image_id + '-' + $cve_id})
-		ON CREATE SET f.title = 'Vulnerabilidad en Imagen (' + $cve_id + ')',
+		MERGE (f:Finding {unique_ref: 'finding-' + $image_id + '-' + $cve_id})
+		ON CREATE SET f.id = id(f),
 		              f.status = 'OPEN',
 		              f.severity = coalesce(v.severity, 'CRITICAL'),
 		              f.risk_score = coalesce(v.base_score / 10.0, 0.98),

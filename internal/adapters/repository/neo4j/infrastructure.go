@@ -554,7 +554,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			WITH ep
 			MATCH (ep:Endpoint)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
 			WHERE toLower(c.state) = 'running' AND (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A')
-			RETURN null AS si, ci, {risk_score: coalesce(v.base_score / 10.0, 0.98), title: "Vulnerabilidad en Imagen (" + v.cve_id + ")", severity: coalesce(v.severity, "CRITICAL"), status: "OPEN"} AS f, elementId(v) AS f_id, v, true AS is_container, c AS container, 4 AS priority
+			RETURN null AS si, ci, {risk_score: coalesce(v.base_score / 10.0, 0.98), severity: coalesce(v.severity, "CRITICAL"), status: "OPEN"} AS f, elementId(v) AS f_id, v, true AS is_container, c AS container, 4 AS priority
 			UNION
 			// Caso 4: ep es Container directamente enrutado, con vuln en software (AV:N RCE - MAYOR PRIORIDAD PARA CONTENEDORES)
 			WITH ep
@@ -572,7 +572,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			WITH ep
 			MATCH (ep:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
 			WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
-			RETURN null AS si, ci, {risk_score: coalesce(v.base_score / 10.0, 0.98), title: "Vulnerabilidad en Imagen (" + v.cve_id + ")", severity: coalesce(v.severity, "CRITICAL"), status: "OPEN"} AS f, elementId(v) AS f_id, v, true AS is_container, ep AS container, 2 AS priority
+			RETURN null AS si, ci, {risk_score: coalesce(v.base_score / 10.0, 0.98), severity: coalesce(v.severity, "CRITICAL"), status: "OPEN"} AS f, elementId(v) AS f_id, v, true AS is_container, ep AS container, 2 AS priority
 			UNION
 			// Caso 6: Endpoint (host) atravesado por HOSTS - solo aplica a Endpoints, no a Containers
 			WITH ep, path
@@ -842,9 +842,34 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 						continue
 					}
 
+					var chosenNets []any
 					if len(allNetsRaw) > 0 {
-						netAny := allNetsRaw[0]
-						
+						if isContainer {
+							var bestSoftware, bestImage any
+							for _, netAny := range allNetsRaw {
+								netMap := getMap(netAny)
+								if netMap != nil {
+									if netMap["si"] != nil && bestSoftware == nil {
+										bestSoftware = netAny
+									}
+									if netMap["ci"] != nil && bestImage == nil {
+										bestImage = netAny
+									}
+								}
+							}
+							if bestSoftware != nil {
+								chosenNets = append(chosenNets, bestSoftware)
+							}
+							if bestImage != nil {
+								chosenNets = append(chosenNets, bestImage)
+							}
+						}
+						if len(chosenNets) == 0 {
+							chosenNets = append(chosenNets, allNetsRaw[0])
+						}
+					}
+
+					for _, netAny := range chosenNets {
 						netMap := getMap(netAny)
 						if netMap != nil {
 							softwareProps := getNodeProps(netMap["si"])
@@ -951,6 +976,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 					continue
 				}
 				lastStep := state.Path.Steps[len(state.Path.Steps)-1]
+				firstStep := state.Path.Steps[0]
 
 				vectorType := "Endpoint"
 				if lastStep.IsContainer {
@@ -961,7 +987,16 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 					}
 				}
 
-				targetKey := fmt.Sprintf("%s-TO-%d-%s-VIA-%s", state.Path.InitialEndpoint, lastStep.TargetEndpointID, lastStep.TargetEndpoint, vectorType)
+				initialVectorType := "Endpoint"
+				if firstStep.IsContainer {
+					if firstStep.SoftwareAffected != "" {
+						initialVectorType = "Software"
+					} else {
+						initialVectorType = "Image"
+					}
+				}
+
+				targetKey := fmt.Sprintf("%s-VIA-%s-TO-%d-%s-VIA-%s", state.Path.InitialEndpoint, initialVectorType, lastStep.TargetEndpointID, lastStep.TargetEndpoint, vectorType)
 
 				existing, ok := bestPathPerTarget[targetKey]
 				if !ok || state.Path.TotalRiskScore > existing.TotalRiskScore {
