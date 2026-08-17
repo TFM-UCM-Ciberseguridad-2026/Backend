@@ -181,56 +181,61 @@ func (c *OllamaClient) doGenerate(ctx context.Context, prompt string) ([]string,
 	return ttps, genResp.Response, nil
 }
 
-func (c *OllamaClient) buildCWEPrompt(cwe string) string {
-	return fmt.Sprintf(`Given the following CWE (Common Weakness Enumeration), identify the most likely MITRE ATT&CK TTP IDs (Tactics, Techniques, and Procedures) that could exploit this weakness. You MUST return ONLY a JSON object with a single key "ttps" containing an array of strings representing the TTP IDs. Example: {"ttps": ["T1190", "T1059.001"]}. CWE: %s`, cwe)
-}
-
 // MapCWEToTTP mapea un CWE a TTPs, con caché.
 func (c *OllamaClient) MapCWEToTTP(ctx context.Context, cwe string) ([]string, error) {
-	if ttps, found := c.cache.Get(cwe); found {
-		return ttps, nil
-	}
-
-	prompt := c.buildCWEPrompt(cwe)
-
-	ttps, _, err := c.generateTTPs(ctx, prompt)
+	ttps, _, err := c.MapEnrichedToTTPRaw(ctx, cwe, "", "")
 	if err != nil {
 		log.Printf("[Ollama] MapCWEToTTP error for CWE %s: %v", cwe, err)
 		return nil, err
 	}
-
-	c.cache.Set(cwe, ttps)
 	return ttps, nil
 }
 
-// MapCWEToTTPRaw mapea un CWE a TTPs devolviendo también la respuesta cruda, con caché (para tests).
-func (c *OllamaClient) MapCWEToTTPRaw(ctx context.Context, cwe string) ([]string, string, error) {
-	if ttps, found := c.cache.Get(cwe); found {
-		return ttps, "[CACHE HIT - NO RAW RESPONSE]", nil
+func (c *OllamaClient) buildEnrichedPrompt(cwe, description, cvssVector string) string {
+	var sb strings.Builder
+	sb.WriteString("You are a cybersecurity expert mapping vulnerabilities to MITRE ATT&CK.\n\n")
+	sb.WriteString("Given the following vulnerability details, identify the MITRE ATT&CK TTP IDs (Techniques) ")
+	sb.WriteString("that an attacker would use to exploit this specific weakness. Consider the attack vector, ")
+	sb.WriteString("the affected component, and the exploitation conditions described.\n\n")
+
+	if cwe != "" {
+		sb.WriteString(fmt.Sprintf("CWE: %s\n", cwe))
+	}
+	if cvssVector != "" {
+		sb.WriteString(fmt.Sprintf("CVSS Vector: %s\n", cvssVector))
+	}
+	if description != "" {
+		sb.WriteString(fmt.Sprintf("Vulnerability Description: %s\n", description))
 	}
 
-	prompt := c.buildCWEPrompt(cwe)
+	sb.WriteString("\nYou MUST return ONLY a JSON object with a single key \"ttps\" containing an array of TTP ID strings.\n")
+	sb.WriteString("Example: {\"ttps\": [\"T1190\", \"T1059.001\"]}")
 
+	return sb.String()
+}
+
+func (c *OllamaClient) MapEnrichedToTTPRaw(ctx context.Context, cwe, description, cvssVector string) ([]string, string, error) {
+	// Estrategia de Caché Híbrida:
+	// Solo cacheamos si es una consulta simple (CWE sin descripción ni CVSS, ej. tests).
+	// Si tiene contexto enriquecido de producción, evitamos el cacheo para garantizar máxima precisión.
+	isSimpleQuery := description == "" && cvssVector == ""
+	if isSimpleQuery && cwe != "" {
+		if ttps, found := c.cache.Get(cwe); found {
+			return ttps, "[CACHE HIT - NO RAW RESPONSE]", nil
+		}
+	}
+
+	prompt := c.buildEnrichedPrompt(cwe, description, cvssVector)
 	ttps, raw, err := c.generateTTPs(ctx, prompt)
 	if err != nil {
 		return nil, "", err
 	}
 
-	c.cache.Set(cwe, ttps)
-	return ttps, raw, nil
-}
-
-// MapCVEDescriptionToTTP mapea una descripción de CVE directamente a TTPs (fallback).
-func (c *OllamaClient) MapCVEDescriptionToTTP(ctx context.Context, description string) ([]string, error) {
-	prompt := fmt.Sprintf(`Given the following vulnerability description, identify the most likely MITRE ATT&CK TTP IDs (Tactics, Techniques, and Procedures) that could exploit it. You MUST return ONLY a JSON object with a single key "ttps" containing an array of strings representing the TTP IDs. Example: {"ttps": ["T1190", "T1059.001"]}. Description: %s`, description)
-
-	ttps, _, err := c.generateTTPs(ctx, prompt)
-	if err != nil {
-		log.Printf("[Ollama] MapCVEDescriptionToTTP error: %v", err)
-		return nil, err
+	if isSimpleQuery && cwe != "" {
+		c.cache.Set(cwe, ttps)
 	}
 
-	return ttps, nil
+	return ttps, raw, nil
 }
 
 // InvalidateCache limpia la caché para un CWE específico (útil para pruebas).

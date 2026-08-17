@@ -191,8 +191,7 @@ type MitreATTACKProvider interface {
 
 type TTPMapper interface {
 	MapCWEToTTP(ctx context.Context, cwe string) ([]string, error)
-	MapCVEDescriptionToTTP(ctx context.Context, description string) ([]string, error)
-	MapCWEToTTPRaw(ctx context.Context, cwe string) ([]string, string, error)
+	MapEnrichedToTTPRaw(ctx context.Context, cwe, description, cvssVector string) ([]string, string, error)
 }
 
 type ThreatActorPort interface {
@@ -251,6 +250,7 @@ type CAPECPort interface {
 	LinkCAPECToCWE(ctx context.Context, capecID string, cweID string) error
 	LinkCAPECToTTP(ctx context.Context, capecID string, ttpID string) error
 	SaveBatch(ctx context.Context, capecs []domain.CAPEC) error
+	GetTTPsByCWE(ctx context.Context, cweID string) ([]string, error)
 }
 
 // PatchProvider obtiene información de remediación (parches publicados y versiones
