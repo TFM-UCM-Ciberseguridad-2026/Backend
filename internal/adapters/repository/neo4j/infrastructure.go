@@ -598,7 +598,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		    WHERE vLocal.cvss_vector CONTAINS 'AV:L' AND vLocal.cvss_vector CONTAINS 'C:H' AND vLocal.cvss_vector CONTAINS 'I:H'
 		  } AS hasHostLPE,
 		  EXISTS {
-		    MATCH (ep)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(vContLocal:Vulnerability)
+		    MATCH (ep)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(vContLocal:Vulnerability)
 		    WHERE toLower(c.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation')
 		  } AS hasContLPE,
 		  EXISTS {
@@ -606,7 +606,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		    WHERE toLower(c.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation')
 		  } AS hasImageContLPE,
 		  EXISTS {
-		    MATCH (ep:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(vContLocal:Vulnerability)
+		    MATCH (ep:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(vContLocal:Vulnerability)
 		    WHERE toLower(ep.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation')
 		  } AS hasDirectContLPE,
 		  EXISTS {
@@ -642,9 +642,9 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		    size(steps) = 0 OR 
 		    e1.privileged = true OR
 		    (
-		      EXISTS { MATCH (e1)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(v1) WHERE (toLower(v1.description) CONTAINS 'escape' OR toLower(v1.description) CONTAINS 'privilege escalation') }
+		      EXISTS { MATCH (e1)-[:HAS_INSTALLATION]->()-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(v1:Vulnerability) WHERE (toLower(v1.description) CONTAINS 'escape' OR toLower(v1.description) CONTAINS 'privilege escalation') }
 		      OR
-		      EXISTS { MATCH (e1)-[:USES_IMAGE]->()-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(v2) WHERE (toLower(v2.description) CONTAINS 'escape' OR toLower(v2.description) CONTAINS 'privilege escalation') }
+		      EXISTS { MATCH (e1)-[:USES_IMAGE]->()-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(v2:Vulnerability) WHERE (toLower(v2.description) CONTAINS 'escape' OR toLower(v2.description) CONTAINS 'privilege escalation') }
 		    )
 		)
 		AND size(steps) > 0
