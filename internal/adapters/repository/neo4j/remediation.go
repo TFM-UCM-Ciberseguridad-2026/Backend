@@ -130,14 +130,20 @@ func (r *remediationRepo) ApplyByInstallationAndCVE(ctx context.Context, install
 	return int(res.(int64)), nil
 }
 
-// UpdateFixedVersionByCVE fija la versión corregida en todas las remediaciones asociadas
-// a findings del CVE indicado, recorriendo
-// (Vulnerability)<-[:OF_VULNERABILITY]-(Finding)-[:HAS_REMEDIATION]->(Remediation).
+// UpdateFixedVersionByCVE fija la versión corregida en el nodo Vulnerability y,
+// si existen, en todas las remediaciones asociadas a findings del CVE indicado.
+// Algunos findings creados por el autoscan aún no tienen nodo Remediation, así
+// que Vulnerability.fixed_version actúa como fallback para vistas como Patch Queue.
 // Devuelve el número de remediaciones actualizadas.
 func (r *remediationRepo) UpdateFixedVersionByCVE(ctx context.Context, cveID string, fixedVersion string) (int, error) {
 	query := `
-		MATCH (:Vulnerability {cve_id: $cve_id})<-[:OF_VULNERABILITY]-(:Finding)-[:HAS_REMEDIATION]->(rem:Remediation)
-		SET rem.fixed_version = $fixed_version
+		MATCH (v:Vulnerability {cve_id: $cve_id})
+		SET v.fixed_version = $fixed_version
+		WITH v
+		OPTIONAL MATCH (v)<-[:OF_VULNERABILITY]-(:Finding)-[:HAS_REMEDIATION]->(rem:Remediation)
+		FOREACH (_ IN CASE WHEN rem IS NULL THEN [] ELSE [1] END |
+			SET rem.fixed_version = $fixed_version
+		)
 		RETURN count(rem) AS updated
 	`
 

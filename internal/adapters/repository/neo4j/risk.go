@@ -420,7 +420,7 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, projectID *int64, limit in
 		       si.id               AS installation_id,
 		       s.name              AS software_name,
 		       s.version           AS software_version,
-		       rem.fixed_version   AS fixed_version,
+		       coalesce(rem.fixed_version, v.fixed_version) AS fixed_version,
 		       e.id                AS endpoint_id,
 		       e.hostname          AS hostname,
 		       e.environment       AS environment,
