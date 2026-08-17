@@ -406,7 +406,7 @@ func (o *Orchestrator) GetTotalMitreTTPs(ctx context.Context) (int, error) {
 // GetVulnerabilitiesForFinding devuelve los CVEs asociados a un finding concreto. Se usa
 // desde el botón "Ver CVEs" del inspector de nodos, ya que los nodos Vulnerability no
 // viajan en el grafo general.
-func (o *Orchestrator) GetVulnerabilitiesForFinding(ctx context.Context, findingID int64) ([]domain.Vulnerability, error) {
+func (o *Orchestrator) GetVulnerabilitiesForFinding(ctx context.Context, findingID any) ([]domain.Vulnerability, error) {
 	return o.findingPort.GetVulnerabilitiesByFinding(ctx, findingID)
 }
 
@@ -1223,6 +1223,28 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		if err != nil {
 			return fmt.Errorf("error enlazando CVE %s a imagen %s: %w", v.CVEID, imageID, err)
 		}
+
+		// Crear un Finding (Hallazgo) para esta imagen y vulnerabilidad
+		now := time.Now().UTC()
+		findingID, err := o.nextNodeID(ctx, "Finding")
+		if err != nil {
+			findingID = int64(rand.Int31n(1000000) + 1)
+		}
+		finding := &domain.Finding{
+			FindingID:         findingID,
+			Status:            "OPEN",
+			FirstSeen:         now,
+			LastSeen:          &now,
+			ImpactScore:       v.BaseScore,
+			Likelihood:        0.5,
+			RemediationFactor: 1.0,
+			RiskScore:         v.BaseScore * 0.5,
+		}
+
+		_, _, err = o.findingPort.EnsureForContainerImageAndCVE(ctx, imageID, v.CVEID, finding)
+		if err != nil {
+			return fmt.Errorf("error creando finding para imagen %s y CVE %s: %w", imageID, v.CVEID, err)
+		}
 	}
 
 	return nil
@@ -1242,14 +1264,15 @@ func (o *Orchestrator) SyncScoutDaily(ctx context.Context) error {
 
 	var errs []error
 	for _, img := range images {
-		// Para Scout el nombre es el Tag si es que está disponible, o simplemente name
-		// Por ejemplo: nginx:latest
-		imageName := img.Name
-		if img.Tag != "" && img.Tag != "latest" {
-			imageName = fmt.Sprintf("%s:%s", img.Name, img.Tag)
+		// Usar el ImageID directamente como nombre canónico de la imagen.
+		// El ImageID ya contiene el nombre completo (ej: "nginx:1.19", "httpd:2.4.49").
+		// No recomponemos Name+Tag para evitar duplicados como "httpd:2.4.49:latest".
+		imageName := img.ImageID
+		if imageName == "" {
+			imageName = img.Name
 		}
 
-		fmt.Printf("[Scout Sync] Escaneando imagen: %s (ID: %s)\n", imageName, img.ImageID)
+		fmt.Printf("[Scout Sync] Escaneando imagen: %s\n", imageName)
 		err := o.ScanAndSaveContainerImage(ctx, imageName, img.ImageID)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("fallo al escanear %s: %v", imageName, err))
@@ -1455,7 +1478,11 @@ func (o *Orchestrator) DeleteNodeByID(ctx context.Context, id string) error {
 	query := `
 		MATCH (n)
 		WHERE toString(n.id) = toString($id) OR toString(n.cve_id) = toString($id) OR toString(n.ttp_id) = toString($id) OR toString(n.installation_id) = toString($id) OR elementId(n) = $id
+		OPTIONAL MATCH (n)-[:USES_IMAGE]->(old_i:ContainerImage)
 		DETACH DELETE n
+		WITH old_i
+		WHERE old_i IS NOT NULL AND NOT ()-[:USES_IMAGE]->(old_i)
+		DETACH DELETE old_i
 	`
 	return o.dbHelper.ExecuteWrite(ctx, query, map[string]any{"id": id})
 }

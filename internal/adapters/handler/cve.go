@@ -12,7 +12,9 @@ Propósito arquitectónico y teórico:
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -165,6 +167,46 @@ func (h *OrchestratorHandler) RegisterSoftwareInstallation(w http.ResponseWriter
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
 }
 
+// POST /api/containers/images/{id}/scan-vulns
+func (h *OrchestratorHandler) ScanContainerImageVulnerabilities(w http.ResponseWriter, r *http.Request) {
+	imageID, err := url.PathUnescape(r.PathValue("id"))
+	if err != nil || imageID == "" {
+		imageID = r.PathValue("id")
+	}
+
+	if imageID == "" {
+		sendError(w, "Invalid Image ID", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		ImageName string `json:"image_name"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	imageName := req.ImageName
+	if imageName == "" {
+		imageName = imageID
+	}
+
+	// Ejecutar el escaneo de forma síncrona (bloqueante)
+	// Gracias al timeout de 5 minutos en Vite, no debería dar 502 con imágenes grandes.
+	if err := h.orchestrator.ScanAndSaveContainerImage(r.Context(), imageName, imageID); err != nil {
+		fmt.Printf("[ScanContainerImage] Error escaneando %s: %v\n", imageName, err)
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	
+	fmt.Printf("[ScanContainerImage] Escaneo completado para %s\n", imageName)
+
+	// Responder con éxito una vez terminado
+	sendJSON(w, map[string]string{
+		"status":  "success",
+		"message": fmt.Sprintf("Escaneo de '%s' completado.", imageName),
+	}, http.StatusOK)
+}
+
+
 // POST /api/containers/{id}/installations
 func (h *OrchestratorHandler) RegisterContainerSoftwareInstallation(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
@@ -230,10 +272,12 @@ func (h *OrchestratorHandler) AssociateVulnerabilitiesAndRemediations(w http.Res
 // GET /api/findings/{id}/vulnerabilities
 func (h *OrchestratorHandler) GetFindingVulnerabilities(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
-	findingID, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		sendError(w, "Invalid finding ID", http.StatusBadRequest)
-		return
+	
+	var findingID any
+	if idInt, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+		findingID = idInt
+	} else {
+		findingID = idStr
 	}
 
 	vulns, err := h.orchestrator.GetVulnerabilitiesForFinding(r.Context(), findingID)

@@ -20,10 +20,12 @@ func NewRiskRepository(driver neo4j.DriverWithContext) ports.RiskPort {
 // Devuelve el contexto completo de cada finding abierto para calcular su riesgo.
 func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID int64) ([]domain.FindingRiskContext, error) {
 	query := `
-		// El software cuelga del endpoint o de un contenedor que este aloja; el recorrido
+		// El software o imagen cuelga del endpoint o de un contenedor que este aloja; el recorrido
 		// variable cubre ambos caminos.
-		MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
-		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		MATCH (e:Endpoint {id: $endpoint_id})
+		MATCH path = (e)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)
+		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset))
+		MATCH (asset)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
 		  AND NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
 		RETURN
@@ -407,19 +409,21 @@ func (r *riskRepo) GetSoftwareCriticalityLevel(ctx context.Context, installation
 // recorre toda la infraestructura.
 func (r *riskRepo) GetPatchQueue(ctx context.Context, projectID *int64, limit int) ([]domain.PatchQueueItem, error) {
 	query := `
-		MATCH (e:Endpoint)-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
-		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		MATCH (e:Endpoint)
+		MATCH path = (e)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)
+		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset))
+		MATCH (asset)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
 		  AND ($project_id IS NULL OR EXISTS { (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e) })
-		OPTIONAL MATCH (si)-[:INSTANCE_OF]->(s:Software)
-		OPTIONAL MATCH (c:Container)-[:HAS_INSTALLATION]->(si)
+		OPTIONAL MATCH (asset)-[:INSTANCE_OF]->(s:Software)
+		OPTIONAL MATCH (c:Container)-[:HAS_INSTALLATION|USES_IMAGE]->(asset)
 		OPTIONAL MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
 		RETURN f.id                AS finding_id,
 		       f.status            AS status,
 		       v.cve_id            AS cve_id,
-		       si.id               AS installation_id,
-		       s.name              AS software_name,
-		       s.version           AS software_version,
+		       asset.id            AS installation_id,
+		       coalesce(s.name, asset.name, asset.id) AS software_name,
+		       coalesce(s.version, 'N/A') AS software_version,
 		       rem.fixed_version   AS fixed_version,
 		       e.id                AS endpoint_id,
 		       e.hostname          AS hostname,

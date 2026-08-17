@@ -122,6 +122,7 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	mux.HandleFunc("PUT /api/containers/{id}", h.UpdateContainer)
 	mux.HandleFunc("DELETE /api/containers/{id}", h.DeleteContainer)
 	mux.HandleFunc("POST /api/containers/{id}/installations", h.RegisterContainerSoftwareInstallation)
+	mux.HandleFunc("POST /api/containers/images/{id}/scan-vulns", h.ScanContainerImageVulnerabilities)
 	
 	mux.HandleFunc("DELETE /api/nodes/{id}", h.DeleteNode)
 
