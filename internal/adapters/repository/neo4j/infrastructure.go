@@ -47,8 +47,8 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 			target: elementId(endNode(rel)),
 			properties: properties(rel)
 		}) AS cleanRels
-		OPTIONAL MATCH (n)-[:HAS_IP]->(ip:IPAddress) WHERE n:Endpoint OR n:Container
-		WITH nodes, cleanRels, collect(case when n is null or ip is null then null else {node_id: elementId(n), ip: coalesce(ip.ip, ""), vlan_id: coalesce(ip.vlan_id, 0)} end) AS ipMaps
+		OPTIONAL MATCH (e:Endpoint)-[:HAS_IP]->(ip:IPAddress)
+		WITH nodes, cleanRels, collect(case when e is null or ip is null then null else {endpoint_id: elementId(e), ip: coalesce(ip.ip, ""), vlan_id: coalesce(ip.vlan_id, 0)} end) AS ipMaps
 		RETURN nodes, cleanRels AS relationships, [] AS ttp_mappings, [i in ipMaps WHERE i IS NOT NULL] AS ip_mappings
 	`
 
@@ -148,12 +148,12 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 		}
 	}
 
-	// Mapear direcciones IP y VLANs a las propiedades de los nodos Endpoint y Container
+	// Mapear direcciones IP y VLANs a las propiedades de los nodos Endpoint
 	if ipMapsRaw, ok := recordMap["ip_mappings"].([]interface{}); ok {
 		endpointToIPs := make(map[string][]map[string]interface{})
 		for _, rawMap := range ipMapsRaw {
 			if m, ok := rawMap.(map[string]interface{}); ok {
-				endpointID, _ := m["node_id"].(string)
+				endpointID, _ := m["endpoint_id"].(string)
 				ip, _ := m["ip"].(string)
 				var vlanID int64
 				switch v := m["vlan_id"].(type) {
@@ -234,7 +234,7 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 						if n.Properties == nil {
 							n.Properties = make(map[string]interface{})
 						}
-
+						
 						var existingIPs []map[string]interface{}
 						if ips, ok := n.Properties["ips"].([]map[string]interface{}); ok {
 							existingIPs = ips
@@ -347,6 +347,7 @@ func (r *infrastructureRepo) GetTotalMitreTTPs(ctx context.Context) (int, error)
 	return res.(int), nil
 }
 
+
 // GetTopAPTsByInfrastructureTTPs recorre el grafo completo desde la infraestructura del usuario
 // hasta los actores de amenaza, calculando qué APTs cubren más TTPs vinculadas a las CVEs detectadas.
 func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int, projectID int64) ([]domain.APTThreatResult, error) {
@@ -450,6 +451,7 @@ func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context,
 	return res.([]domain.APTThreatResult), nil
 }
 
+<<<<<<< HEAD
 // Structs auxiliares para el cómputo combinatorio en memoria Go
 type internalAsset struct {
 	ID              string
@@ -487,6 +489,7 @@ func getPathSignature(steps []domain.AttackStep) string {
 }
 
 // GetExploitationPaths extrae el subgrafo de Neo4j y calcula TODAS las combinaciones posibles de rutas en memoria (Go).
+
 func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
@@ -513,10 +516,9 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		       collect(DISTINCT {c_id: elementId(c), si: csi {.*}, f: cf {.*, elementId: elementId(cf)}, v: cv {.*, elementId: elementId(cv)}}) AS c_sw_vulns,
 		       collect(DISTINCT {c_id: elementId(c), ci: ci {.*}, f: cif {.*, elementId: elementId(cif)}, v: civ {.*, elementId: elementId(civ)}}) AS c_img_vulns,
 		       collect(DISTINCT {c_id: elementId(c), ci: ci2 {.*}, v: civ2 {.*, elementId: elementId(civ2)}}) AS c_direct_img_vulns
-	`
 
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
-		result, err := tx.Run(ctx, query, map[string]any{"projectID": projectID})
+		result, err := tx.Run(ctx, queryData, map[string]any{"projectID": projectID})
 		if err != nil {
 			return nil, err
 		}
@@ -907,6 +909,8 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 				if len(curr.Steps) >= 5 { // Límite de seguridad de 5 saltos topológicos
 					continue
 				}
+				endpoints[epID] = epData
+			}
 
 				currAsset := assets[curr.CurrentAssetID]
 
@@ -1001,7 +1005,6 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 							}
 						}
 					}
-				}
 
 				// Transición 3: Movimiento lateral vía Redes Conectadas
 				neighbors := networkNeighbors[curr.CurrentAssetID]
@@ -1094,7 +1097,6 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 							}
 						}
 					}
-				}
 
 				// Si el camino tiene al menos 1 salto válido, registrarlo
 				if len(curr.Steps) > 1 {
@@ -1128,15 +1130,191 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		return computedPaths, nil
 	})
 
-	if err != nil {
-		return nil, err
+	if err != nil || res == nil {
+		return []domain.ExploitationPath{}, err
 	}
 
-	if res == nil {
-		return []domain.ExploitationPath{}, nil
+	graphInfo := res.(struct {
+		Endpoints map[int64]*rawEndpointData
+		Adj       map[int64]setInt64
+	})
+
+	endpointsMap := graphInfo.Endpoints
+	adjMap := graphInfo.Adj
+
+	// 2. Definir Puntos de Entrada: Cada combinación (Endpoint Expuesto, CVE de Red) es un inicio distinto
+	type entryPointState struct {
+		Endpoint *rawEndpointData
+		Vuln     rawVulnInfo
 	}
 
-	return res.([]domain.ExploitationPath), nil
+	entryPoints := make([]entryPointState, 0)
+	for _, ep := range endpointsMap {
+		if ep.InternetExposed {
+			for _, v := range ep.NetworkVulns {
+				entryPoints = append(entryPoints, entryPointState{
+					Endpoint: ep,
+					Vuln:     v,
+				})
+			}
+		}
+	}
+
+	exploitationPaths := make([]domain.ExploitationPath, 0)
+	pathCounter := 1
+
+	// 3. Algoritmo DFS con Backtracking sobre pares (Endpoint, Vulnerabilidad/Finding)
+	var dfs func(currStep pathStepState, currentPath []pathStepState, visitedEndpoints map[int64]bool)
+	dfs = func(currStep pathStepState, currentPath []pathStepState, visitedEndpoints map[int64]bool) {
+		// Guardar como ruta de explotación cualquier combinación válida de >= 2 saltos (o ataques directos)
+		if len(currentPath) >= 2 {
+			pathObj := buildExploitationPath(pathCounter, currentPath, endpointsMap)
+			if len(pathObj.Steps) > 0 {
+				exploitationPaths = append(exploitationPaths, pathObj)
+				pathCounter++
+			}
+		}
+
+		// Límite conservador de seguridad (máximo 6 saltos y 250 rutas totales para acotar consumo)
+		if len(currentPath) >= 6 || len(exploitationPaths) >= 250 {
+			return
+		}
+
+		currEp := endpointsMap[currStep.EndpointID]
+		if currEp == nil {
+			return
+		}
+
+		// Si el paso actual ocurre dentro de un contenedor y NO tiene escape/LPE, no puede pivotar al resto del equipo/red
+		if currStep.Vuln.IsContainer && !hasLPEOrRoot(currEp) {
+			return
+		}
+
+		// Explorar vecinos de la subred
+		neighbors := adjMap[currStep.EndpointID]
+		for neighborID := range neighbors {
+			if visitedEndpoints[neighborID] {
+				continue // Evitar ciclos de equipos en la misma ruta
+			}
+
+			neighborEp := endpointsMap[neighborID]
+			if neighborEp == nil || len(neighborEp.NetworkVulns) == 0 {
+				continue // El equipo vecino debe tener vulnerabilidades de red para poder ser comprometido
+			}
+
+			// Cada vulnerabilidad de red del vecino genera una variante de ruta distinta
+			for _, nbrVuln := range neighborEp.NetworkVulns {
+				nextStep := pathStepState{
+					EndpointID: neighborID,
+					Vuln:       nbrVuln,
+				}
+
+				visitedEndpoints[neighborID] = true
+				dfs(nextStep, append(currentPath, nextStep), visitedEndpoints)
+				visitedEndpoints[neighborID] = false // Backtracking
+			}
+		}
+	}
+
+	for _, entry := range entryPoints {
+		startStep := pathStepState{
+			EndpointID: entry.Endpoint.ID,
+			Vuln:       entry.Vuln,
+		}
+
+		visited := map[int64]bool{entry.Endpoint.ID: true}
+		dfs(startStep, []pathStepState{startStep}, visited)
+	}
+
+	return exploitationPaths, nil
+}
+
+type setInt64 map[int64]struct{}
+
+func hasLPEOrRoot(ep *rawEndpointData) bool {
+	if len(ep.LPEVulns) > 0 {
+		return true
+	}
+	for _, v := range ep.NetworkVulns {
+		cvssUpper := strings.ToUpper(v.CVSSVector)
+		if strings.Contains(cvssUpper, "C:H") && strings.Contains(cvssUpper, "I:H") && strings.Contains(cvssUpper, "A:H") {
+			return true
+		}
+	}
+	return false
+}
+
+func getStringSliceFromMap(m map[string]any, key string) []string {
+	if val, ok := m[key]; ok && val != nil {
+		if slice, ok := val.([]any); ok {
+			res := make([]string, 0, len(slice))
+			for _, item := range slice {
+				if s, ok := item.(string); ok {
+					res = append(res, s)
+				}
+			}
+			return res
+		}
+	}
+	return []string{}
+}
+
+func buildExploitationPath(counter int, steps []pathStepState, endpointsMap map[int64]*rawEndpointData) domain.ExploitationPath {
+	firstEp := endpointsMap[steps[0].EndpointID]
+	initialHostname := ""
+	if firstEp != nil {
+		initialHostname = firstEp.Hostname
+	}
+	entryCVE := steps[0].Vuln.CVEID
+
+	pathObj := domain.ExploitationPath{
+		PathID:          fmt.Sprintf("path-cve-%s-route-%d", entryCVE, counter),
+		InitialEndpoint: initialHostname,
+		TotalRiskScore:  0.0,
+		Steps:           make([]domain.AttackStep, 0, len(steps)),
+	}
+
+	prevHostname := "Internet"
+
+	for idx, stepState := range steps {
+		ep := endpointsMap[stepState.EndpointID]
+		if ep == nil {
+			continue
+		}
+
+		vuln := stepState.Vuln
+		hasLPE := hasLPEOrRoot(ep)
+
+		rootObtained := hasLPE
+		cvssUpper := strings.ToUpper(vuln.CVSSVector)
+		if !vuln.IsContainer && strings.Contains(cvssUpper, "C:H") && strings.Contains(cvssUpper, "I:H") && strings.Contains(cvssUpper, "A:H") {
+			rootObtained = true
+		}
+
+		step := domain.AttackStep{
+			StepIndex:        idx,
+			SourceEndpoint:   prevHostname,
+			TargetEndpoint:   ep.Hostname,
+			TargetEndpointID: ep.ID,
+			IsContainer:      vuln.IsContainer,
+			ContainerID:      vuln.ContainerID,
+			ContainerName:    vuln.ContainerName,
+			FindingID:        vuln.FindingID,
+			Vulnerability:    vuln.CVEID,
+			SoftwareAffected: vuln.InstallPath,
+			RiskScore:        vuln.RiskScore,
+			RCE:              vuln.IsRCE,
+			RootObtained:     rootObtained,
+			Exploitable:      vuln.IsExploitable,
+			CVSSVector:       vuln.CVSSVector,
+		}
+
+		pathObj.Steps = append(pathObj.Steps, step)
+		pathObj.TotalRiskScore += vuln.RiskScore
+		prevHostname = ep.Hostname
+	}
+
+	return pathObj
 }
 
 type nodeMatchTarget struct {
@@ -1157,7 +1335,7 @@ func normalizeProperties(props map[string]interface{}) map[string]interface{} {
 				continue
 			}
 		}
-
+		
 		switch val := v.(type) {
 		case map[string]interface{}, []interface{}:
 			if b, err := json.Marshal(val); err == nil {
@@ -1198,59 +1376,22 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 			}
 
 			props := normalizeProperties(node.Properties)
-
 			var matchKey string
 			var matchVal interface{}
 
-			switch primaryLabel {
-			case "Vulnerability":
-				if cveVal, exists := props["cve_id"]; exists && cveVal != nil {
-					matchKey = "cve_id"
-					matchVal = cveVal
-				} else if idVal, exists := props["id"]; exists && idVal != nil {
-					matchKey = "id"
-					matchVal = idVal
-				}
-			case "TTP":
-				if ttpVal, exists := props["ttp_id"]; exists && ttpVal != nil {
-					matchKey = "ttp_id"
-					matchVal = ttpVal
-				} else if idVal, exists := props["id"]; exists && idVal != nil {
-					matchKey = "id"
-					matchVal = idVal
-				}
-			case "ThreatActor":
-				if actorVal, exists := props["actor_id"]; exists && actorVal != nil {
-					matchKey = "actor_id"
-					matchVal = actorVal
-				} else if idVal, exists := props["id"]; exists && idVal != nil {
-					matchKey = "id"
-					matchVal = idVal
-				}
-			case "CWE":
-				if cweVal, exists := props["cwe_id"]; exists && cweVal != nil {
-					matchKey = "cwe_id"
-					matchVal = cweVal
-				} else if idVal, exists := props["id"]; exists && idVal != nil {
-					matchKey = "id"
-					matchVal = idVal
-				}
-			case "CAPEC":
-				if capecVal, exists := props["capec_id"]; exists && capecVal != nil {
-					matchKey = "capec_id"
-					matchVal = capecVal
-				} else if idVal, exists := props["id"]; exists && idVal != nil {
-					matchKey = "id"
-					matchVal = idVal
-				}
-			default:
-				if idVal, exists := props["id"]; exists && idVal != nil {
-					matchKey = "id"
-					matchVal = idVal
-				}
-			}
-
-			if matchKey == "" {
+			if idVal, exists := props["id"]; exists && idVal != nil {
+				matchKey = "id"
+				matchVal = idVal
+			} else if cveVal, exists := props["cve_id"]; exists && cveVal != nil {
+				matchKey = "cve_id"
+				matchVal = cveVal
+			} else if ttpVal, exists := props["ttp_id"]; exists && ttpVal != nil {
+				matchKey = "ttp_id"
+				matchVal = ttpVal
+			} else if actorVal, exists := props["actor_id"]; exists && actorVal != nil {
+				matchKey = "actor_id"
+				matchVal = actorVal
+			} else {
 				matchKey = "id"
 				matchVal = node.ID
 				props["id"] = node.ID
@@ -1341,3 +1482,4 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 
 	return err
 }
+
