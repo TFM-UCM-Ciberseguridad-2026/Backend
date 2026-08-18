@@ -49,13 +49,14 @@ type FindingPort interface {
 	DeleteByID(ctx context.Context, id int64) error
 
 	EnsureForInstallationAndCVE(ctx context.Context, installationID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
+	EnsureForContainerImageAndCVE(ctx context.Context, imageID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
 
 	// ApplyRemediationByInstallationAndCVE fija factor y estado en los findings del CVE
 	// en esa instalación, y devuelve sus IDs. Con factor 0 pone también risk_score y
 	// priority_score a cero: el finding sale de las agregaciones y conservaría si no la
 	// última puntuación calculada.
 	ApplyRemediationByInstallationAndCVE(ctx context.Context, installationID, cveID string, remediationFactor float64, status string) ([]int64, error)
-	GetVulnerabilitiesByFinding(ctx context.Context, findingID int64) ([]domain.Vulnerability, error)
+	GetVulnerabilitiesByFinding(ctx context.Context, findingID any) ([]domain.Vulnerability, error)
 }
 
 type RemediationPort interface {

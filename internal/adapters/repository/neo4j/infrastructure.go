@@ -239,7 +239,7 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 						if n.Properties == nil {
 							n.Properties = make(map[string]interface{})
 						}
-						
+
 						var existingIPs []map[string]interface{}
 						if ips, ok := n.Properties["ips"].([]map[string]interface{}); ok {
 							existingIPs = ips
@@ -355,7 +355,6 @@ func (r *infrastructureRepo) GetTotalMitreTTPs(ctx context.Context) (int, error)
 	}
 	return res.(int), nil
 }
-
 
 // GetTopAPTsByInfrastructureTTPs recorre el grafo completo desde la infraestructura del usuario
 // hasta los actores de amenaza, calculando qué APTs cubren más TTPs vinculadas a las CVEs detectadas.
@@ -502,19 +501,21 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		        MATCH (n)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(v:Vulnerability)
 		        WHERE toLower(c.state) = 'running' AND (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A')
 		      } OR EXISTS {
-		        MATCH (n)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+		        MATCH (n)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(v:Vulnerability)
 		        WHERE toLower(c.state) = 'running' AND (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A')
 		      }
 		    )) OR
 		    (n:Container AND toLower(n.state) = 'running' AND (
 		      elementId(n) = elementId(e1)
+			  OR
+			  EXISTS { MATCH (ep:Endpoint)-[:HOSTS]->(n) WHERE ep IN nodes(path) }
 		      OR
 		      (EXISTS { MATCH (n)-[:CONNECTED_TO]->(:Network) } AND (
 		        EXISTS {
 		          MATCH (n)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(v:Vulnerability)
 		          WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
 		        } OR EXISTS {
-		          MATCH (n)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+		          MATCH (n)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(v:Vulnerability)
 		          WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
 		        }
 		      ))
@@ -535,41 +536,59 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			// Caso 1: ep es Endpoint y la vuln está en un software nativo
 			MATCH (ep:Endpoint)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 			WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
-			RETURN si, f, elementId(f) AS f_id, v, false AS is_container, null AS container, 1 AS priority
+			RETURN si, null AS ci, f, elementId(f) AS f_id, v, false AS is_container, null AS container, 1 AS priority
+			UNION
+			// Caso 2: ep es Endpoint, con vuln en software de un contenedor hosteado
+			WITH ep
+			MATCH (ep:Endpoint)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+			WHERE toLower(c.state) = 'running' AND (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A')
+			RETURN si, null AS ci, f, elementId(f) AS f_id, v, true AS is_container, c AS container, 2 AS priority
+			UNION
+			// Caso 3a: ep es Endpoint, con vuln en imagen de un contenedor hosteado (con nodo Finding)
+			WITH ep
+			MATCH (ep:Endpoint)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+			WHERE toLower(c.state) = 'running' AND (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A')
+			RETURN null AS si, ci, f, elementId(f) AS f_id, v, true AS is_container, c AS container, 3 AS priority
+			UNION
+			// Caso 3b: ep es Endpoint, con vuln directa en imagen de contenedor hosteado sin finding
+			WITH ep
+			MATCH (ep:Endpoint)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+			WHERE toLower(c.state) = 'running' AND (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A')
+			RETURN null AS si, ci, {risk_score: coalesce(v.base_score / 10.0, 0.98), severity: coalesce(v.severity, "CRITICAL"), status: "OPEN"} AS f, elementId(v) AS f_id, v, true AS is_container, c AS container, 4 AS priority
 			UNION
 			// Caso 4: ep es Container directamente enrutado, con vuln en software (AV:N RCE - MAYOR PRIORIDAD PARA CONTENEDORES)
 			WITH ep
 			MATCH (ep:Container)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 			WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
-			RETURN si, f, elementId(f) AS f_id, v, true AS is_container, ep AS container, 1 AS priority
+			RETURN si, null AS ci, f, elementId(f) AS f_id, v, true AS is_container, ep AS container, 1 AS priority
 			UNION
 			// Caso 5a: ep es Container directamente enrutado, con vuln en imagen (con nodo Finding)
 			WITH ep
 			MATCH (ep:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 			WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
-			RETURN null AS si, f, elementId(f) AS f_id, v, true AS is_container, ep AS container, 0 AS priority
+			RETURN null AS si, ci, f, elementId(f) AS f_id, v, true AS is_container, ep AS container, 1 AS priority
 			UNION
 			// Caso 5b: ep es Container, con vuln directa sin nodo Finding
 			WITH ep
 			MATCH (ep:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
 			WHERE v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A'
-			RETURN null AS si, {risk_score: coalesce(v.base_score, 9.8), title: "Vulnerabilidad en Imagen (" + v.cve_id + ")", severity: coalesce(v.severity, "CRITICAL"), status: "OPEN"} AS f, elementId(v) AS f_id, v, true AS is_container, ep AS container, 0 AS priority
+			RETURN null AS si, ci, {risk_score: coalesce(v.base_score / 10.0, 0.98), severity: coalesce(v.severity, "CRITICAL"), status: "OPEN"} AS f, elementId(v) AS f_id, v, true AS is_container, ep AS container, 2 AS priority
 			UNION
 			// Caso 6: Endpoint (host) atravesado por HOSTS - solo aplica a Endpoints, no a Containers
 			WITH ep, path
 			MATCH (ep:Endpoint)
 			WHERE EXISTS { MATCH (ep)-[:HOSTS]->(c2:Container) WHERE c2 IN nodes(path) }
-			RETURN null AS si, {risk_score: 8.8} AS f, "" AS f_id, {cve_id: "LPE / Movement", cvss_vector: "AV:L/AC:L", exploit: true} AS v, false AS is_container, null AS container, 99 AS priority
+			RETURN null AS si, null AS ci, {risk_score: 8.8} AS f, "" AS f_id, {cve_id: "LPE / Movement", cvss_vector: "AV:L/AC:L", exploit: true} AS v, false AS is_container, null AS container, 99 AS priority
 			UNION
 			// Caso 7: ep es Network, se usa para mostrar el paso por la red explícitamente
 			WITH ep
 			MATCH (ep:Network)
-			RETURN null AS si, {risk_score: 0.0} AS f, "" AS f_id, {cve_id: "Conexión de Red", cvss_vector: "AV:N/AC:L", exploit: false} AS v, false AS is_container, null AS container, 1 AS priority
+			RETURN null AS si, null AS ci, {risk_score: 0.0} AS f, "" AS f_id, {cve_id: "Conexión de Red", cvss_vector: "AV:N/AC:L", exploit: false} AS v, false AS is_container, null AS container, 1 AS priority
 		}
 		// Ordenar: primero por prioridad ASC (1=mejor), luego por risk_score DESC dentro de esa prioridad
-		WITH path, e1, indexed, ie, ep, si, f, f_id, v, is_container, container, priority ORDER BY priority ASC, coalesce(f.risk_score, 0.0) DESC
+		WITH path, e1, indexed, ie, ep, si, ci, f, f_id, v, is_container, container, priority ORDER BY priority ASC, coalesce(f.risk_score, 0.0) DESC
 		
-		WITH path, e1, indexed, ie, ep, collect({si: si, f: f, f_id: f_id, v: v, is_container: is_container, container: container}) AS allNetsRaw
+		WITH path, e1, indexed, ie, ep, collect({si: si, ci: ci, f: f, f_id: f_id, v: v, is_container: is_container, container: container}) AS allNetsRaw
 		WITH path, e1, indexed, ie, ep, [net IN allNetsRaw WHERE ie.index > 0 OR net.v.cvss_vector CONTAINS 'AV:N' OR net.v.nvd_vector CONTAINS 'AV:N' OR net.v.cvss_vector CONTAINS 'AV:A'] AS allNets
 		
 		WITH path, e1, indexed, ie, ep, allNets,
@@ -579,54 +598,55 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		    WHERE vLocal.cvss_vector CONTAINS 'AV:L' AND vLocal.cvss_vector CONTAINS 'C:H' AND vLocal.cvss_vector CONTAINS 'I:H'
 		  } AS hasHostLPE,
 		  EXISTS {
-		    MATCH (ep)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(vContLocal:Vulnerability)
-		    WHERE toLower(c.state) = 'running' AND ((vContLocal.cvss_vector CONTAINS 'AV:L' AND vContLocal.cvss_vector CONTAINS 'C:H' AND vContLocal.cvss_vector CONTAINS 'I:H') 
-		       OR toLower(vContLocal.description) CONTAINS 'escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation')
+		    MATCH (ep)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(vContLocal:Vulnerability)
+		    WHERE toLower(c.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation')
 		  } AS hasContLPE,
 		  EXISTS {
-		    MATCH (ep)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_VULNERABILITY]->(vContLocal:Vulnerability)
-		    WHERE toLower(c.state) = 'running' AND ((vContLocal.cvss_vector CONTAINS 'AV:L' AND vContLocal.cvss_vector CONTAINS 'C:H' AND vContLocal.cvss_vector CONTAINS 'I:H')
-		       OR toLower(vContLocal.description) CONTAINS 'escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation')
+		    MATCH (ep)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(vContLocal:Vulnerability)
+		    WHERE toLower(c.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation')
 		  } AS hasImageContLPE,
 		  EXISTS {
-		    MATCH (ep:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(vContLocal:Vulnerability)
-		    WHERE (vContLocal.cvss_vector CONTAINS 'AV:L' AND vContLocal.cvss_vector CONTAINS 'C:H' AND vContLocal.cvss_vector CONTAINS 'I:H') 
-		       OR toLower(vContLocal.description) CONTAINS 'escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation'
+		    MATCH (ep:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(vContLocal:Vulnerability)
+		    WHERE toLower(ep.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation')
 		  } AS hasDirectContLPE,
 		  EXISTS {
-		    MATCH (ep:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_VULNERABILITY]->(vContLocal:Vulnerability)
-		    WHERE (vContLocal.cvss_vector CONTAINS 'AV:L' AND vContLocal.cvss_vector CONTAINS 'C:H' AND vContLocal.cvss_vector CONTAINS 'I:H')
-		       OR toLower(vContLocal.description) CONTAINS 'escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation'
-		  } AS hasDirectImageContLPE,
-		  EXISTS {
-		    MATCH (ep:Container)<-[:HOSTS]-(host:Endpoint)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(vHostLocal:Vulnerability)
-		    WHERE (vHostLocal.cvss_vector CONTAINS 'AV:L' AND vHostLocal.cvss_vector CONTAINS 'C:H' AND vHostLocal.cvss_vector CONTAINS 'I:H')
-		       OR toLower(vHostLocal.description) CONTAINS 'escape' OR toLower(vHostLocal.description) CONTAINS 'privilege escalation'
-		  } AS hasParentHostLPE
+		    MATCH (ep:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(vContLocal:Vulnerability)
+		    WHERE toLower(ep.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation')
+		  } AS hasDirectImageContLPE
 		
 		WITH path, e1, indexed, ie, ep, allNets, 
 		  CASE 
 		    WHEN ep:Container THEN
 		      CASE 
 		        WHEN ie.index + 1 < size(indexed) AND "Network" IN labels(indexed[ie.index + 1].asset) THEN false
-		        ELSE (hasDirectContLPE OR hasDirectImageContLPE OR hasParentHostLPE)
+		        ELSE (ep.privileged = true OR hasDirectContLPE OR hasDirectImageContLPE)
 		      END
-		    WHEN size(allNets) > 0 AND allNets[0].is_container THEN (hasContLPE OR hasImageContLPE)
+		    WHEN size(allNets) > 0 AND allNets[0].is_container THEN (allNets[0].container.privileged = true OR hasContLPE OR hasImageContLPE)
 		    ELSE (hasHostLPE OR hasContLPE OR hasImageContLPE)
 		  END AS hasLPE
 		ORDER BY ie.index ASC
 		
 		WITH path, e1, collect({
-		    index: ie.index,
-		    endpoint: ep,
-		    allNets: allNets,
-		    is_container: (size(allNets) > 0 AND allNets[0].is_container),
-		    hasLPE: hasLPE
+		  index: ie.index,
+		  endpoint: ep,
+		  allNets: allNets,
+		  hasLPE: hasLPE,
+		  is_container: CASE WHEN size(allNets) > 0 THEN allNets[0].is_container ELSE (ep:Container) END
 		}) AS steps
 		
 		WHERE (size(steps) < 2 OR all(i IN range(0, size(steps)-2) WHERE 
-		    (NOT steps[i].is_container) OR (steps[i].hasLPE) OR (steps[i].endpoint:Container)
+		    (NOT steps[i].is_container) OR (steps[i].hasLPE)
 		))
+		AND (
+		    NOT (e1:Container) OR 
+		    size(steps) = 0 OR 
+		    e1.privileged = true OR
+		    (
+		      EXISTS { MATCH (e1)-[:HAS_INSTALLATION]->()-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(v1:Vulnerability) WHERE (toLower(v1.description) CONTAINS 'escape' OR toLower(v1.description) CONTAINS 'privilege escalation') }
+		      OR
+		      EXISTS { MATCH (e1)-[:USES_IMAGE]->()-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(v2:Vulnerability) WHERE (toLower(v2.description) CONTAINS 'escape' OR toLower(v2.description) CONTAINS 'privilege escalation') }
+		    )
+		)
 		AND size(steps) > 0
 		AND size(steps[0].allNets) > 0
 		AND (
@@ -649,44 +669,72 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		pathCounter := 1
 
 		getBoolLocal := func(val any) bool {
-			if val == nil { return false }
-			if b, ok := val.(bool); ok { return b }
+			if val == nil {
+				return false
+			}
+			if b, ok := val.(bool); ok {
+				return b
+			}
 			return false
 		}
 		getStringLocal := func(val any) string {
-			if val == nil { return "" }
-			if s, ok := val.(string); ok { return s }
+			if val == nil {
+				return ""
+			}
+			if s, ok := val.(string); ok {
+				return s
+			}
 			return ""
 		}
 		getFloatLocal := func(val any) float64 {
-			if val == nil { return 0.0 }
-			if f, ok := val.(float64); ok { return f }
-			if i, ok := val.(int64); ok { return float64(i) }
+			if val == nil {
+				return 0.0
+			}
+			if f, ok := val.(float64); ok {
+				return f
+			}
+			if i, ok := val.(int64); ok {
+				return float64(i)
+			}
 			return 0.0
 		}
 		getIntLocal := func(val any) int64 {
-			if val == nil { return 0 }
-			if i, ok := val.(int64); ok { return i }
+			if val == nil {
+				return 0
+			}
+			if i, ok := val.(int64); ok {
+				return i
+			}
 			return 0
 		}
 		getMap := func(val any) map[string]any {
-			if val == nil { return nil }
-			if m, ok := val.(map[string]any); ok { return m }
+			if val == nil {
+				return nil
+			}
+			if m, ok := val.(map[string]any); ok {
+				return m
+			}
 			return nil
 		}
 		getNodeProps := func(val any) map[string]any {
-			if val == nil { return nil }
-			if n, ok := val.(neo4j.Node); ok { return n.GetProperties() }
-			if m, ok := val.(map[string]any); ok { return m }
+			if val == nil {
+				return nil
+			}
+			if n, ok := val.(neo4j.Node); ok {
+				return n.GetProperties()
+			}
+			if m, ok := val.(map[string]any); ok {
+				return m
+			}
 			return nil
 		}
 
 		for result.Next(ctx) {
 			record := result.Record()
-			
+
 			entryIDVal, _ := record.Get("entry_id")
 			entryIDStr := fmt.Sprintf("%v", entryIDVal)
-			
+
 			stepsRaw, _ := record.Get("steps")
 			stepsList, ok := stepsRaw.([]any)
 			if !ok || len(stepsList) == 0 {
@@ -696,7 +744,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			// Construir el objeto ExploitationPath
 			firstStepMap := getMap(stepsList[0])
 			firstEndpointProps := getNodeProps(firstStepMap["endpoint"])
-			
+
 			initialEndpointName := getStringLocal(firstEndpointProps["hostname"])
 			if initialEndpointName == "" {
 				initialEndpointName = getStringLocal(firstEndpointProps["name"])
@@ -722,11 +770,16 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 				Offset       int
 				JustEscaped  bool
 			}
+			e1Raw, _ := record.Get("e1")
+			e1Name := getStringLocal(getNodeProps(e1Raw)["hostname"])
+			if e1Name == "" {
+				e1Name = getStringLocal(getNodeProps(e1Raw)["name"])
+			}
 
 			activePaths := []activePathState{
 				{
 					Path:         ep,
-					PrevEndpoint: "Internet",
+					PrevEndpoint: e1Name,
 					Offset:       0,
 					JustEscaped:  false,
 				},
@@ -789,109 +842,130 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 						continue
 					}
 
-					for netIdx, netAny := range allNetsRaw {
-						netMap := getMap(netAny)
-						if netMap == nil {
-							continue
-						}
-
-						softwareProps := getNodeProps(netMap["si"])
-						findingProps := getNodeProps(netMap["f"])
-						vulnProps := getNodeProps(netMap["v"])
-
-						var containerID, containerName string
+					var chosenNets []any
+					if len(allNetsRaw) > 0 {
 						if isContainer {
-							containerProps := getNodeProps(netMap["container"])
-							containerID = getStringLocal(containerProps["id"])
-							containerName = getStringLocal(containerProps["name"])
+							var bestSoftware, bestImage any
+							for _, netAny := range allNetsRaw {
+								netMap := getMap(netAny)
+								if netMap != nil {
+									if netMap["si"] != nil && bestSoftware == nil {
+										bestSoftware = netAny
+									}
+									if netMap["ci"] != nil && bestImage == nil {
+										bestImage = netAny
+									}
+								}
+							}
+							if bestSoftware != nil {
+								chosenNets = append(chosenNets, bestSoftware)
+							}
+							if bestImage != nil {
+								chosenNets = append(chosenNets, bestImage)
+							}
 						}
+						if len(chosenNets) == 0 {
+							chosenNets = append(chosenNets, allNetsRaw[0])
+						}
+					}
 
-						cvss := getStringLocal(vulnProps["cvss_vector"])
-						risk := getFloatLocal(findingProps["risk_score"])
+					for _, netAny := range chosenNets {
+						netMap := getMap(netAny)
+						if netMap != nil {
+							softwareProps := getNodeProps(netMap["si"])
+							findingProps := getNodeProps(netMap["f"])
+							vulnProps := getNodeProps(netMap["v"])
 
-						isRCE := false
-						cwes := getStringSlice(vulnProps, "cwe")
-						for _, cwe := range cwes {
-							if cwe == "CWE-94" || cwe == "CWE-78" || cwe == "CWE-77" {
+							var containerID, containerName string
+							if isContainer {
+								containerProps := getNodeProps(netMap["container"])
+								containerID = getStringLocal(containerProps["id"])
+								containerName = getStringLocal(containerProps["name"])
+							}
+
+							cvss := getStringLocal(vulnProps["cvss_vector"])
+							risk := getFloatLocal(findingProps["risk_score"])
+
+							isRCE := false
+							cwes := getStringSlice(vulnProps, "cwe")
+							for _, cwe := range cwes {
+								if cwe == "CWE-94" || cwe == "CWE-78" || cwe == "CWE-77" {
+									isRCE = true
+									break
+								}
+							}
+							if getBoolLocal(vulnProps["exploit"]) {
 								isRCE = true
-								break
 							}
-						}
-						if getBoolLocal(vulnProps["exploit"]) {
-							isRCE = true
-						}
 
-						rootObtained := hasLPE
-						if cvss != "" && strings.Contains(cvss, "C:H") && strings.Contains(cvss, "I:H") && strings.Contains(cvss, "A:H") {
-							if !isContainer {
-								rootObtained = true
+							rootObtained := hasLPE
+							if cvss != "" && strings.Contains(cvss, "C:H") && strings.Contains(cvss, "I:H") && strings.Contains(cvss, "A:H") {
+								if !isContainer {
+									rootObtained = true
+								}
 							}
-						}
 
-						findingElementID := getStringLocal(netMap["f_id"])
-						vulnCVE := getStringLocal(vulnProps["cve_id"])
+							findingElementID := getStringLocal(netMap["f_id"])
+							vulnCVE := getStringLocal(vulnProps["cve_id"])
 
-						// Clonar la ruta actual
-						clonedPath := domain.ExploitationPath{
-							PathID:          state.Path.PathID,
-							InitialEndpoint: state.Path.InitialEndpoint,
-							TotalRiskScore:  state.Path.TotalRiskScore,
-							Steps:           make([]domain.AttackStep, len(state.Path.Steps)),
-						}
-						copy(clonedPath.Steps, state.Path.Steps)
+							// Clonar la ruta actual
+							clonedPath := domain.ExploitationPath{
+								PathID:          state.Path.PathID,
+								InitialEndpoint: state.Path.InitialEndpoint,
+								TotalRiskScore:  state.Path.TotalRiskScore,
+								Steps:           make([]domain.AttackStep, len(state.Path.Steps)),
+							}
+							copy(clonedPath.Steps, state.Path.Steps)
 
-						if netIdx > 0 {
-							clonedPath.PathID = fmt.Sprintf("%s-branch-%d-%d", state.Path.PathID, index, netIdx)
-						}
-
-						clonedPath.Steps = append(clonedPath.Steps, domain.AttackStep{
-							StepIndex:        int(index) + state.Offset,
-							SourceEndpoint:   state.PrevEndpoint,
-							TargetEndpoint:   targetName,
-							TargetEndpointID: targetID,
-							IsContainer:      isContainer,
-							ContainerID:      containerID,
-							ContainerName:    containerName,
-							FindingID:        findingElementID,
-							Vulnerability:    vulnCVE,
-							SoftwareAffected: getStringLocal(softwareProps["install_path"]),
-							RiskScore:        risk,
-							RCE:              isRCE,
-							RootObtained:     rootObtained,
-							Exploitable:      getBoolLocal(vulnProps["exploit"]) || getBoolLocal(vulnProps["kev"]),
-							CVSSVector:       cvss,
-						})
-
-						clonedPath.TotalRiskScore += risk
-
-						newState := activePathState{
-							Path:         clonedPath,
-							PrevEndpoint: targetName,
-							Offset:       state.Offset,
-							JustEscaped:  false,
-						}
-
-						if isContainer && hasLPE && int(index) < len(stepsList)-1 {
-							newState.Offset++
-							newState.Path.Steps = append(newState.Path.Steps, domain.AttackStep{
-								StepIndex:        int(index) + newState.Offset,
-								SourceEndpoint:   targetName,
-								TargetEndpoint:   "", // se rellena en la siguiente iteración
-								TargetEndpointID: 0,
-								IsContainer:      false,
-								Vulnerability:    "Container Escape (LPE)",
-								SoftwareAffected: "Container Runtime/Kernel",
-								RiskScore:        8.8,
-								RCE:              true,
-								RootObtained:     true,
-								Exploitable:      true,
-								CVSSVector:       "AV:L/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+							clonedPath.Steps = append(clonedPath.Steps, domain.AttackStep{
+								StepIndex:        int(index) + state.Offset,
+								SourceEndpoint:   state.PrevEndpoint,
+								TargetEndpoint:   targetName,
+								TargetEndpointID: targetID,
+								IsContainer:      isContainer,
+								ContainerID:      containerID,
+								ContainerName:    containerName,
+								FindingID:        findingElementID,
+								Vulnerability:    vulnCVE,
+								SoftwareAffected: getStringLocal(softwareProps["install_path"]),
+								RiskScore:        risk,
+								RCE:              isRCE,
+								RootObtained:     rootObtained,
+								Exploitable:      getBoolLocal(vulnProps["exploit"]) || getBoolLocal(vulnProps["kev"]),
+								CVSSVector:       cvss,
 							})
-							newState.Path.TotalRiskScore += 8.8
-							newState.JustEscaped = true
-						}
 
-						nextActivePaths = append(nextActivePaths, newState)
+							clonedPath.TotalRiskScore += risk
+
+							newState := activePathState{
+								Path:         clonedPath,
+								PrevEndpoint: targetName,
+								Offset:       state.Offset,
+								JustEscaped:  false,
+							}
+
+							if isContainer && hasLPE && int(index) < len(stepsList)-1 {
+								newState.Offset++
+								newState.Path.Steps = append(newState.Path.Steps, domain.AttackStep{
+									StepIndex:        int(index) + newState.Offset,
+									SourceEndpoint:   targetName,
+									TargetEndpoint:   "", // se rellena en la siguiente iteración
+									TargetEndpointID: 0,
+									IsContainer:      false,
+									Vulnerability:    "Container Escape (LPE)",
+									SoftwareAffected: "Container Runtime/Kernel",
+									RiskScore:        8.8,
+									RCE:              true,
+									RootObtained:     true,
+									Exploitable:      true,
+									CVSSVector:       "AV:L/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+								})
+								newState.Path.TotalRiskScore += 8.8
+								newState.JustEscaped = true
+							}
+
+							nextActivePaths = append(nextActivePaths, newState)
+						}
 					}
 				}
 				activePaths = nextActivePaths
@@ -902,8 +976,28 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 					continue
 				}
 				lastStep := state.Path.Steps[len(state.Path.Steps)-1]
-				targetKey := fmt.Sprintf("%d-%s", lastStep.TargetEndpointID, lastStep.TargetEndpoint)
-				
+				firstStep := state.Path.Steps[0]
+
+				vectorType := "Endpoint"
+				if lastStep.IsContainer {
+					if lastStep.SoftwareAffected != "" {
+						vectorType = "Software"
+					} else {
+						vectorType = "Image"
+					}
+				}
+
+				initialVectorType := "Endpoint"
+				if firstStep.IsContainer {
+					if firstStep.SoftwareAffected != "" {
+						initialVectorType = "Software"
+					} else {
+						initialVectorType = "Image"
+					}
+				}
+
+				targetKey := fmt.Sprintf("%s-VIA-%s-TO-%d-%s-VIA-%s", state.Path.InitialEndpoint, initialVectorType, lastStep.TargetEndpointID, lastStep.TargetEndpoint, vectorType)
+
 				existing, ok := bestPathPerTarget[targetKey]
 				if !ok || state.Path.TotalRiskScore > existing.TotalRiskScore {
 					bestPathPerTarget[targetKey] = state.Path
@@ -947,7 +1041,7 @@ func normalizeProperties(props map[string]interface{}) map[string]interface{} {
 				continue
 			}
 		}
-		
+
 		switch val := v.(type) {
 		case map[string]interface{}, []interface{}:
 			if b, err := json.Marshal(val); err == nil {
@@ -1137,5 +1231,3 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 
 	return err
 }
-
-
