@@ -44,13 +44,15 @@ func (r *remediationRepo) DeleteByID(ctx context.Context, id int64) error {
 
 // GetFixedVersionByInstallationAndCVE devuelve la versión corregida registrada en la
 // remediación, o cadena vacía si no consta.
+
 func (r *remediationRepo) GetFixedVersionByInstallationAndCVE(ctx context.Context, installationID, cveID string) (string, error) {
 	query := `
 		MATCH (:SoftwareInstallation {id: $installation_id})-[:HAS_FINDING]->(f:Finding)
-		      -[:OF_VULNERABILITY]->(:Vulnerability {cve_id: $cve_id})
-		MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
-		WHERE coalesce(rem.fixed_version, '') <> ''
-		RETURN rem.fixed_version AS fixed_version
+		      -[:OF_VULNERABILITY]->(v:Vulnerability {cve_id: $cve_id})
+		OPTIONAL MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
+		WITH coalesce(rem.fixed_version, v.fixed_version, '') AS fixed_version
+		WHERE fixed_version <> ''
+		RETURN fixed_version
 		LIMIT 1
 	`
 
