@@ -100,59 +100,19 @@ func (r *endpointRepo) Update(ctx context.Context, endpoint *domain.Endpoint) er
 		    e.confidentiality_req = $confidentiality_req,
 		    e.integrity_req = $integrity_req,
 		    e.availability_req = $availability_req,
-		    e.risk_score = $risk_score,
-		    e.risk_tier = $risk_tier,
-		    e.risk_computed_at = $risk_computed_at,
-		    e.updated_at = timestamp(),
-			e.priority_score = $priority_score,
-			e.priority_tier = $priority_tier,
-			e.priority_computed_at = $priority_computed_at,
-			e.technical_driver_installation_id = $technical_driver_installation_id,
-			e.technical_driver_software_name = $technical_driver_software_name,
-			e.technical_driver_risk_score = $technical_driver_risk_score,
-			e.technical_driver_cve_id = $technical_driver_cve_id,
-			e.priority_driver_installation_id = $priority_driver_installation_id,
-			e.priority_driver_software_name = $priority_driver_software_name,
-			e.priority_driver_priority_score = $priority_driver_priority_score,
-			e.priority_driver_cve_id = $priority_driver_cve_id,
-			e.risky_software_count = $risky_software_count
+		    e.updated_at = timestamp()
 	`
 
-	var riskComputedAt any
-	if endpoint.RiskComputedAt != nil {
-		riskComputedAt = *endpoint.RiskComputedAt
-	}
-
-	var priorityComputedAt any
-	if endpoint.PriorityComputedAt != nil {
-		priorityComputedAt = *endpoint.PriorityComputedAt
-	}
-
 	params := map[string]any{
-		"id":                               endpoint.EndpointID,
-		"hostname":                         endpoint.Hostname,
-		"type":                             endpoint.Type,
-		"status":                           endpoint.Status,
-		"environment":                      endpoint.Environment,
-		"internet_exposed":                 endpoint.InternetExposed,
-		"confidentiality_req":              endpoint.ConfidentialityReq,
-		"integrity_req":                    endpoint.IntegrityReq,
-		"availability_req":                 endpoint.AvailabilityReq,
-		"risk_score":                       endpoint.RiskScore,
-		"risk_tier":                        endpoint.RiskTier,
-		"risk_computed_at":                 riskComputedAt,
-		"priority_score":                   endpoint.PriorityScore,
-		"priority_tier":                    endpoint.PriorityTier,
-		"priority_computed_at":             priorityComputedAt,
-		"technical_driver_installation_id": endpoint.TechnicalDriverInstallationID,
-		"technical_driver_software_name":   endpoint.TechnicalDriverSoftwareName,
-		"technical_driver_risk_score":      endpoint.TechnicalDriverRiskScore,
-		"technical_driver_cve_id":          endpoint.TechnicalDriverCVEID,
-		"priority_driver_installation_id":  endpoint.PriorityDriverInstallationID,
-		"priority_driver_software_name":    endpoint.PriorityDriverSoftwareName,
-		"priority_driver_priority_score":   endpoint.PriorityDriverPriorityScore,
-		"priority_driver_cve_id":           endpoint.PriorityDriverCVEID,
-		"risky_software_count":             endpoint.RiskySoftwareCount,
+		"id":                  endpoint.EndpointID,
+		"hostname":            endpoint.Hostname,
+		"type":                endpoint.Type,
+		"status":              endpoint.Status,
+		"environment":         endpoint.Environment,
+		"internet_exposed":    endpoint.InternetExposed,
+		"confidentiality_req": endpoint.ConfidentialityReq,
+		"integrity_req":       endpoint.IntegrityReq,
+		"availability_req":    endpoint.AvailabilityReq,
 	}
 
 	return executeWriteUpdateHelper(ctx, r.driver, query, params)
@@ -369,7 +329,7 @@ func (r *endpointRepo) GetIPs(ctx context.Context, endpointID int64) ([]domain.E
 				VLANID: vlanID,
 			})
 		}
-		
+
 		resultNets, err := tx.Run(ctx, `
 			MATCH (e:Endpoint)-[:CONNECTED_TO]->(n:Network)
 			WHERE toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id) OR elementId(e) = toString($endpoint_id)
@@ -378,7 +338,7 @@ func (r *endpointRepo) GetIPs(ctx context.Context, endpointID int64) ([]domain.E
 		if err != nil {
 			return nil, err
 		}
-		
+
 		for resultNets.Next(ctx) {
 			rec := resultNets.Record()
 			vlanVal, _ := rec.Get("vlan_id")

@@ -1,0 +1,217 @@
+[
+  {
+    "cve": "CVE-2016-4450",
+    "cwe": "CWE-476",
+    "control_duration_ms": 1813,
+    "control_ttps": [
+      "T1190",
+      "T1498"
+    ],
+    "runs": [
+      {
+        "attempt": 1,
+        "ttps": [
+          "T1498",
+          "T1499"
+        ],
+        "raw_response": "{\"ttps\": [\"T1498\", \"T1499\"]}",
+        "duration_ms": 1673,
+        "timestamp": "2026-08-18T15:28:38+02:00",
+        "cache_hit": false
+      },
+      {
+        "attempt": 2,
+        "ttps": [
+          "T1190",
+          "T1498"
+        ],
+        "raw_response": "{\"ttps\": [\"T1498\", \"T1190\"]}",
+        "duration_ms": 1625,
+        "timestamp": "2026-08-18T15:28:40+02:00",
+        "cache_hit": false
+      },
+      {
+        "attempt": 3,
+        "ttps": [
+          "T1498",
+          "T1499"
+        ],
+        "raw_response": "{\"ttps\": [\"T1498\", \"T1499\"]}",
+        "duration_ms": 1642,
+        "timestamp": "2026-08-18T15:28:41+02:00",
+        "cache_hit": false
+      },
+      {
+        "attempt": 4,
+        "ttps": [
+          "T1498",
+          "T1499"
+        ],
+        "raw_response": "{\"ttps\": [\"T1498\", \"T1499\"]}",
+        "duration_ms": 1638,
+        "timestamp": "2026-08-18T15:28:43+02:00",
+        "cache_hit": false
+      },
+      {
+        "attempt": 5,
+        "ttps": [
+          "T1498",
+          "T1499"
+        ],
+        "raw_response": "{\"ttps\": [\"T1498\", \"T1499\"]}",
+        "duration_ms": 1663,
+        "timestamp": "2026-08-18T15:28:45+02:00",
+        "cache_hit": false
+      }
+    ],
+    "exact_match_rate": 60,
+    "avg_duration_ms": 1648.2,
+    "total_errors": 0,
+    "variations": [
+      "Run 2 differed: got [T1190 T1498] (expected [T1498 T1499])"
+    ]
+  },
+  {
+    "cve": "CVE-2016-1247",
+    "cwe": "CWE-59",
+    "control_duration_ms": 2191,
+    "control_ttps": [
+      "T1071.001",
+      "T1566.001"
+    ],
+    "runs": [
+      {
+        "attempt": 1,
+        "ttps": [
+          "T1071.001",
+          "T1566.001"
+        ],
+        "raw_response": "{\"ttps\": [\"T1566.001\", \"T1071.001\"]}",
+        "duration_ms": 2198,
+        "timestamp": "2026-08-18T15:28:55+02:00",
+        "cache_hit": false
+      },
+      {
+        "attempt": 2,
+        "ttps": [
+          "T1071.001",
+          "T1566.001"
+        ],
+        "raw_response": "{\"ttps\": [\"T1566.001\", \"T1071.001\"]}",
+        "duration_ms": 2222,
+        "timestamp": "2026-08-18T15:28:57+02:00",
+        "cache_hit": false
+      },
+      {
+        "attempt": 3,
+        "ttps": [
+          "T1036",
+          "T1566.001"
+        ],
+        "raw_response": "{\"ttps\": [\"T1566.001\", \"T1036\"]}",
+        "duration_ms": 1867,
+        "timestamp": "2026-08-18T15:28:59+02:00",
+        "cache_hit": false
+      },
+      {
+        "attempt": 4,
+        "ttps": [
+          "T1036",
+          "T1566.001"
+        ],
+        "raw_response": "{\"ttps\": [\"T1566.001\", \"T1036\"]}",
+        "duration_ms": 1909,
+        "timestamp": "2026-08-18T15:29:01+02:00",
+        "cache_hit": false
+      },
+      {
+        "attempt": 5,
+        "ttps": [
+          "T1071.001",
+          "T1566.001"
+        ],
+        "raw_response": "{\"ttps\": [\"T1566.001\", \"T1071.001\"]}",
+        "duration_ms": 2101,
+        "timestamp": "2026-08-18T15:29:03+02:00",
+        "cache_hit": false
+      }
+    ],
+    "exact_match_rate": 40,
+    "avg_duration_ms": 2059.4,
+    "total_errors": 0,
+    "variations": [
+      "Run 3 differed: got [T1036 T1566.001] (expected [T1071.001 T1566.001])",
+      "Run 4 differed: got [T1036 T1566.001] (expected [T1071.001 T1566.001])"
+    ]
+  },
+  {
+    "cve": "CVE-2017-7529",
+    "cwe": "CWE-190",
+    "control_duration_ms": 1637,
+    "control_ttps": [
+      "T1046",
+      "T1537"
+    ],
+    "runs": [
+      {
+        "attempt": 1,
+        "ttps": [
+          "T1046",
+          "T1537"
+        ],
+        "raw_response": "{\"ttps\": [\"T1537\", \"T1046\"]}",
+        "duration_ms": 1636,
+        "timestamp": "2026-08-18T15:29:11+02:00",
+        "cache_hit": false
+      },
+      {
+        "attempt": 2,
+        "ttps": [
+          "T1046",
+          "T1537"
+        ],
+        "raw_response": "{\"ttps\": [\"T1537\", \"T1046\"]}",
+        "duration_ms": 1649,
+        "timestamp": "2026-08-18T15:29:13+02:00",
+        "cache_hit": false
+      },
+      {
+        "attempt": 3,
+        "ttps": [
+          "T1046",
+          "T1537"
+        ],
+        "raw_response": "{\"ttps\": [\"T1537\", \"T1046\"]}",
+        "duration_ms": 1666,
+        "timestamp": "2026-08-18T15:29:14+02:00",
+        "cache_hit": false
+      },
+      {
+        "attempt": 4,
+        "ttps": [
+          "T1046",
+          "T1537"
+        ],
+        "raw_response": "{\"ttps\": [\"T1537\", \"T1046\"]}",
+        "duration_ms": 1647,
+        "timestamp": "2026-08-18T15:29:16+02:00",
+        "cache_hit": false
+      },
+      {
+        "attempt": 5,
+        "ttps": [
+          "T1046",
+          "T1537"
+        ],
+        "raw_response": "{\"ttps\": [\"T1537\", \"T1046\"]}",
+        "duration_ms": 1657,
+        "timestamp": "2026-08-18T15:29:18+02:00",
+        "cache_hit": false
+      }
+    ],
+    "exact_match_rate": 100,
+    "avg_duration_ms": 1651,
+    "total_errors": 0,
+    "variations": []
+  }
+]

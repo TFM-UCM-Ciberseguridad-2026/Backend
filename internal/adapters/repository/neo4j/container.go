@@ -3,6 +3,7 @@ package neo4j
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/ports"
@@ -138,6 +139,20 @@ func (r *containerRepo) GetAllContainerImages(ctx context.Context) ([]domain.Con
 	return res.([]domain.ContainerImage), nil
 }
 
+// normalizeContainerImageID limpia nombres de imagen malformados como "nginx:1.19:latest" → "nginx:1.19".
+func normalizeContainerImageID(name string) string {
+	parts := strings.Split(name, ":")
+	if len(parts) <= 2 {
+		return name
+	}
+	// Más de un ':', ej: "httpd:2.4.49:latest" → quitar ":latest" del final
+	if parts[len(parts)-1] == "latest" {
+		return strings.Join(parts[:len(parts)-1], ":")
+	}
+	// Otro formato: quedarse con los dos primeros segmentos
+	return parts[0] + ":" + parts[1]
+}
+
 func (r *containerRepo) SaveContainer(ctx context.Context, container *domain.Container) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
@@ -146,31 +161,63 @@ func (r *containerRepo) SaveContainer(ctx context.Context, container *domain.Con
 		MERGE (c:Container {id: $id})
 		SET c.name = $name,
 		    c.state = $state,
+		    c.image_id = $image_id,
+		    c.internet_exposed = $internet_exposed,
+		    c.privileged = $privileged,
 		    c.risk_score = $risk_score
 		
 		WITH c
-		// Asociar a la imagen si se proporcionó
-		MATCH (i:ContainerImage {id: $image_id})
-		MERGE (c)-[:USES_IMAGE]->(i)
-		
-		WITH c
-		// Asociar al host
-		MATCH (e:Endpoint {id: $host_id})
+		// Asociar al host (obligatorio)
+		MATCH (e:Endpoint)
+		WHERE e.id = $host_id OR toInteger(e.id) = toInteger($host_id) OR toString(e.id) = toString($host_id)
 		MERGE (e)-[:HOSTS]->(c)
 	`
+	// Normalizar el image_id para evitar nombres como "httpd:2.4.49:latest"
+	imageID := normalizeContainerImageID(container.ImageID)
+
 	params := map[string]any{
-		"id":         container.ContainerID,
-		"name":       container.Name,
-		"state":      container.State,
-		"image_id":   container.ImageID,
-		"host_id":    container.HostID,
-		"risk_score": container.RiskScore,
+		"id":               container.ContainerID,
+		"name":             container.Name,
+		"state":            container.State,
+		"image_id":         imageID,
+		"internet_exposed": container.InternetExposed,
+		"privileged":       container.Privileged,
+		"host_id":          container.HostID,
+		"risk_score":       container.RiskScore,
 	}
 
 	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		return tx.Run(ctx, query, params)
 	})
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Desenlazar imagen anterior si ha cambiado o se ha vaciado
+	cleanQuery := `
+		MATCH (c:Container {id: $id})-[r:USES_IMAGE]->(old_i:ContainerImage)
+		WHERE old_i.id <> $image_id OR $image_id = ''
+		DELETE r
+		WITH old_i
+		WHERE NOT ()-[:USES_IMAGE]->(old_i)
+		DETACH DELETE old_i
+	`
+	_, _ = session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		return tx.Run(ctx, cleanQuery, params)
+	})
+
+	if container.ImageID != "" {
+		imgQuery := `
+			MATCH (c:Container {id: $id})
+			MERGE (i:ContainerImage {id: $image_id})
+			ON CREATE SET i.name = $image_id
+			MERGE (c)-[:USES_IMAGE]->(i)
+		`
+		_, _ = session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+			return tx.Run(ctx, imgQuery, params)
+		})
+	}
+	return nil
 }
 
 func (r *containerRepo) GetContainer(ctx context.Context, containerID string) (*domain.Container, error) {
@@ -213,11 +260,19 @@ func (r *containerRepo) GetContainer(ctx context.Context, containerID string) (*
 			imgID, _ := record.Get("image_id")
 			hostID, _ := record.Get("host_id")
 
+			getBool := func(val any) bool {
+				if val == nil { return false }
+				if b, ok := val.(bool); ok { return b }
+				return false
+			}
+
 			return &domain.Container{
 				ContainerID: getString(props["id"]),
 				Name:        getString(props["name"]),
 				State:       getString(props["state"]),
 				RiskScore:   getFloat(props["risk_score"]),
+				InternetExposed: getBool(props["internet_exposed"]),
+				Privileged:  getBool(props["privileged"]),
 				ImageID:     getString(imgID),
 				HostID:      getInt(hostID),
 			}, nil
@@ -242,7 +297,17 @@ func (r *containerRepo) LinkVulnerabilityToImage(ctx context.Context, imageID st
 	query := `
 		MATCH (ci:ContainerImage {id: $image_id})
 		MATCH (v:Vulnerability {cve_id: $cve_id})
-		MERGE (ci)-[:HAS_VULNERABILITY]->(v)
+		MERGE (f:Finding {unique_ref: 'finding-' + $image_id + '-' + $cve_id})
+		ON CREATE SET f.id = id(f),
+		              f.status = 'OPEN',
+		              f.severity = coalesce(v.severity, 'CRITICAL'),
+		              f.risk_score = coalesce(v.base_score / 10.0, 0.98),
+		              f.impact_score = coalesce(v.base_score / 10.0, 0.98),
+		              f.likelihood = 1.0,
+		              f.exposure_factor = 1.0,
+		              f.remediation_factor = 1.0
+		MERGE (ci)-[:HAS_FINDING]->(f)
+		MERGE (f)-[:OF_VULNERABILITY]->(v)
 	`
 	params := map[string]any{
 		"image_id": imageID,
@@ -253,4 +318,46 @@ func (r *containerRepo) LinkVulnerabilityToImage(ctx context.Context, imageID st
 		return tx.Run(ctx, query, params)
 	})
 	return err
+}
+
+func (r *containerRepo) SaveIPs(ctx context.Context, containerID string, ips []domain.EndpointIP) error {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	// Primero eliminar relaciones existentes
+	delQuery := `
+		MATCH (c:Container {id: $container_id})-[:HAS_IP]->(ip:IPAddress)
+		DETACH DELETE ip
+	`
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		return tx.Run(ctx, delQuery, map[string]any{"container_id": containerID})
+	})
+	if err != nil {
+		return err
+	}
+
+	if len(ips) == 0 {
+		return nil
+	}
+
+	// Luego enlazar las nuevas
+	for _, ipData := range ips {
+		query := `
+			MATCH (c:Container {id: $container_id})
+			CREATE (ip:IPAddress {ip: $ip, vlan_id: $vlan_id})
+			MERGE (c)-[:HAS_IP]->(ip)
+		`
+		params := map[string]any{
+			"container_id": containerID,
+			"ip":           ipData.IP,
+			"vlan_id":      ipData.VLANID,
+		}
+		_, err = session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+			return tx.Run(ctx, query, params)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

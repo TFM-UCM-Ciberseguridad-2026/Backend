@@ -101,7 +101,7 @@ func main() {
 
 	// Verificar si el Path Engine es capaz de encontrar la vulnerabilidad inyectada por Scout
 	fmt.Println("\n[*] Ejecutando algoritmo de Path de Explotación (GetExploitationPaths)...")
-	paths, err := infraRepo.GetExploitationPaths(ctx)
+	paths, err := infraRepo.GetExploitationPaths(ctx, 0)
 	if err != nil {
 		log.Fatalf("Error calculando paths: %v", err)
 	}

@@ -27,6 +27,9 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* DELETE /api/projects/{id}: Elimina un proyecto y su infraestructura en cascada. */
 	mux.HandleFunc("DELETE /api/projects/{id}", h.DeleteProject)
 
+	/* PUT /api/projects/{id}: Renombra un proyecto existente. */
+	mux.HandleFunc("PUT /api/projects/{id}", h.RenameProject)
+
 	/* POST /api/projects/{id}/endpoints: Asocia un endpoint (host) a un proyecto por su ID. */
 	mux.HandleFunc("POST /api/projects/{id}/endpoints", h.AddEndpointToProject)
 
@@ -119,6 +122,14 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	mux.HandleFunc("DELETE /api/software/{id}", h.DeleteSoftware)
 	mux.HandleFunc("PUT /api/installations/{id}", h.UpdateSoftwareInstallation)
 	mux.HandleFunc("DELETE /api/installations/{id}", h.DeleteSoftwareInstallation)
+	
+	// Contenedores CRUD
+	mux.HandleFunc("POST /api/endpoints/{id}/containers", h.AddContainerToEndpoint)
+	mux.HandleFunc("PUT /api/containers/{id}", h.UpdateContainer)
+	mux.HandleFunc("DELETE /api/containers/{id}", h.DeleteContainer)
+	mux.HandleFunc("POST /api/containers/{id}/installations", h.RegisterContainerSoftwareInstallation)
+	mux.HandleFunc("POST /api/containers/images/{id}/scan-vulns", h.ScanContainerImageVulnerabilities)
+	
 	mux.HandleFunc("DELETE /api/nodes/{id}", h.DeleteNode)
 
 	return mux

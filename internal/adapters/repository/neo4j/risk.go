@@ -246,9 +246,15 @@ func toBool(v any) bool {
 // GetFindingScoresByInstallation devuelve los scores de riesgo de todos los findings asociados a una instalación de software.
 func (r *riskRepo) GetFindingScoresByInstallation(ctx context.Context, installationID string) ([]domain.FindingRiskSummary, error) {
 	query := `
-        MATCH (e:Endpoint)-[:HAS_INSTALLATION]->(si:SoftwareInstallation {id: $installation_id})-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+        MATCH (si:SoftwareInstallation {id: $installation_id})-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
         WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
-          AND NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
+          // El endpoint se comprueba con EXISTS y no en el patrón principal: la instalación
+          // puede colgar de un contenedor, y meter el endpoint en el MATCH dejaba fuera ese
+          // caso además de multiplicar filas.
+          AND EXISTS {
+              MATCH (e:Endpoint)-[:HAS_INSTALLATION|HOSTS*1..2]->(si)
+              WHERE NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
+          }
         RETURN f.id AS finding_id,
 			v.cve_id AS cve_id,
 			f.risk_score AS risk_score,
@@ -320,9 +326,10 @@ func (r *riskRepo) UpdateSoftwareInstallationRisk(ctx context.Context, installat
 // GetInstallationIDsByEndpoint devuelve los IDs de todas las instalaciones de software asociadas a un endpoint activo.
 func (r *riskRepo) GetInstallationIDsByEndpoint(ctx context.Context, endpointID int64) ([]string, error) {
 	query := `
-        MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+        // Recorre también las instalaciones que cuelgan de un contenedor del endpoint.
+        MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
         WHERE NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
-        RETURN si.id AS installation_id
+        RETURN DISTINCT si.id AS installation_id
         ORDER BY installation_id
     `
 
@@ -424,7 +431,7 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, projectID *int64, limit in
 		       asset.id            AS installation_id,
 		       coalesce(s.name, asset.name, asset.id) AS software_name,
 		       coalesce(s.version, 'N/A') AS software_version,
-		       rem.fixed_version   AS fixed_version,
+		       coalesce(rem.fixed_version, v.fixed_version) AS fixed_version,
 		       e.id                AS endpoint_id,
 		       e.hostname          AS hostname,
 		       e.environment       AS environment,
@@ -531,7 +538,8 @@ func (r *riskRepo) GetEndpointIDsByInstallation(ctx context.Context, installatio
 
 func (r *riskRepo) GetSoftwareRiskSummariesByEndpoint(ctx context.Context, endpointID int64) ([]domain.SoftwareRiskSummary, error) {
 	query := `
-        MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+        // Recorre también las instalaciones que cuelgan de un contenedor del endpoint.
+        MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
         OPTIONAL MATCH (si)-[:INSTANCE_OF]->(s:Software)
         WHERE NOT coalesce(si.status, 'INSTALLED') IN ['REMOVED', 'UNINSTALLED', 'DELETED']
           AND NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']

@@ -205,6 +205,14 @@ func (o *Orchestrator) DeleteProject(ctx context.Context, projectID int64) error
 	return o.projectPort.DeleteByID(ctx, projectID)
 }
 
+// RenameProject actualiza el nombre de un proyecto.
+func (o *Orchestrator) RenameProject(ctx context.Context, projectID int64, newName string) error {
+	if newName == "" {
+		return fmt.Errorf("el nombre del proyecto no puede estar vacío")
+	}
+	return o.projectPort.RenameProject(ctx, projectID, newName)
+}
+
 // AddEndpointToProject guarda un nuevo endpoint y lo vincula a un proyecto.
 func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64, endpoint *domain.Endpoint) error {
 	if endpoint.EndpointID == 0 {
@@ -305,6 +313,9 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 		installation.InstallationID = o.nextInstallationID()
 	}
 
+	installation.CriticalityLevel = NormalizeSoftwareCriticalityLevel(installation.CriticalityLevel)
+	installation.CriticalityMultiplier = CalculateSoftwareCriticalityMultiplier(installation.CriticalityLevel)
+
 	if strings.TrimSpace(software.CPE) == "" || software.CPE == "N/A" {
 		software.CPE = domain.GenerateCPE23(software.Type, software.Vendor, software.Name, software.Version)
 	}
@@ -316,6 +327,44 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 		return err
 	}
 	if err := o.relationshipPort.LinkEndpointToInstallation(ctx, endpointID, installation.InstallationID); err != nil {
+		return err
+	}
+	return o.relationshipPort.LinkInstallationToSoftware(ctx, installation.InstallationID, software.SoftwareID)
+}
+
+// RegisterContainerSoftwareInstallation guarda la definición del software, la instancia instalada,
+// asocia la instancia al contenedor y el software genérico a la instancia instalada.
+func (o *Orchestrator) RegisterContainerSoftwareInstallation(ctx context.Context, containerID string, software *domain.Software, installation *domain.SoftwareInstallation) error {
+	if strings.TrimSpace(software.Vendor) == "" {
+		return fmt.Errorf("el fabricante (vendor) es obligatorio para registrar el software y consultar vulnerabilidades en NIST")
+	}
+
+	if software.SoftwareID == 0 {
+		swID, err := o.nextNodeID(ctx, "Software")
+		if err != nil {
+			return fmt.Errorf("error generando ID de software: %w", err)
+		}
+		software.SoftwareID = swID
+	}
+
+	if installation.InstallationID == "" {
+		installation.InstallationID = o.nextInstallationID()
+	}
+
+	installation.CriticalityLevel = NormalizeSoftwareCriticalityLevel(installation.CriticalityLevel)
+	installation.CriticalityMultiplier = CalculateSoftwareCriticalityMultiplier(installation.CriticalityLevel)
+
+	if strings.TrimSpace(software.CPE) == "" || software.CPE == "N/A" {
+		software.CPE = domain.GenerateCPE23(software.Type, software.Vendor, software.Name, software.Version)
+	}
+
+	if err := o.softwarePort.Save(ctx, software); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+		return err
+	}
+	if err := o.softwareInstPort.Save(ctx, installation); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+		return err
+	}
+	if err := o.relationshipPort.LinkContainerToInstallation(ctx, containerID, installation.InstallationID); err != nil {
 		return err
 	}
 	return o.relationshipPort.LinkInstallationToSoftware(ctx, installation.InstallationID, software.SoftwareID)
@@ -390,7 +439,7 @@ func (o *Orchestrator) GetTotalMitreTTPs(ctx context.Context) (int, error) {
 // GetVulnerabilitiesForFinding devuelve los CVEs asociados a un finding concreto. Se usa
 // desde el botón "Ver CVEs" del inspector de nodos, ya que los nodos Vulnerability no
 // viajan en el grafo general.
-func (o *Orchestrator) GetVulnerabilitiesForFinding(ctx context.Context, findingID int64) ([]domain.Vulnerability, error) {
+func (o *Orchestrator) GetVulnerabilitiesForFinding(ctx context.Context, findingID any) ([]domain.Vulnerability, error) {
 	return o.findingPort.GetVulnerabilitiesByFinding(ctx, findingID)
 }
 
@@ -402,19 +451,23 @@ func (o *Orchestrator) saveVulnerabilityWithTTPs(ctx context.Context, vuln *doma
 }
 
 /*
-AutoScanAndRegisterVulnerabilities implementa el caso de uso central para automatizar la detección y registro de fallos:
- 1. Recupera la entidad del software a partir de su ID.
- 2. Si no tiene una cadena CPE válida (o está vacía o es "N/A"), la genera dinámicamente usando el tipo de software (aplicación, sistema operativo, etc.) y la guarda en la base de datos para futuras referencias.
+AutoScanAndRegisterVulnerabilities implementa el caso de uso central para automatizar la detección y registro de
+fallos:
+1. Recupera la entidad del software a partir de su ID.
+2. Si no tiene una cadena CPE válida (o está vacía o es "N/A"), la genera dinámicamente usando el tipo de
+software (aplicación, sistema operativo, etc.) y la guarda en la base de datos para futuras referencias.
  3. Invoca el puerto externo VulnerabilityAPIscanner para buscar vulnerabilidades usando el CPE generado.
  4. Para cada vulnerabilidad encontrada, la guarda/actualiza en la base de datos de grafos Neo4j.
- 5. Crea un Hallazgo (Finding) con puntaje de riesgo inicializado y genera los enlaces relacionales de infraestructura:
+ 5. Crea o reutiliza un Hallazgo (Finding) para conectar la instalación del software con el CVE detectado:
     SoftwareInstallation -> [:HAS_FINDING] -> Finding -> [:OF_VULNERABILITY] -> Vulnerability.
+ 6. Devuelve un resumen del escaneo para que el frontend pueda mostrar cuántas vulnerabilidades se encontraron,
+    cuántos findings se crearon y cuántos ya existían.
 */
-func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, installationID string, softwareID int64, limits ...int) error {
+func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, installationID string, softwareID int64, limits ...int) (*domain.VulnerabilityScanResult, error) {
 	// 1. Obtener la entidad de software
 	sw, err := o.softwarePort.GetByID(ctx, softwareID)
 	if err != nil {
-		return fmt.Errorf("no se pudo recuperar el software: %w", err)
+		return nil, fmt.Errorf("no se pudo recuperar el software: %w", err)
 	}
 
 	// 2. Resolver o generar CPE
@@ -423,36 +476,52 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		// Generar automáticamente el CPE a partir del tipo (part), vendor, nombre del software y su versión
 		cpe = domain.GenerateCPE23(sw.Type, sw.Vendor, sw.Name, sw.Version)
 		sw.CPE = cpe
+
 		// Actualizar el software con el nuevo CPE generado
 		if err := o.softwarePort.Save(ctx, sw); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
-			return fmt.Errorf("error guardando software con CPE generado: %w", err)
+			return nil, fmt.Errorf("error guardando software con CPE generado: %w", err)
 		}
 	}
 
-	// 3. Buscar vulnerabilidades a través del puerto de escaneo
-	vulns, err := o.vulnScannerPort.FetchByCPE(ctx, cpe)
-	if err != nil {
-		return fmt.Errorf("error consultando la API de vulnerabilidades para el CPE %s: %w", cpe, err)
-	}
+	// 3. Determinar el límite de vulnerabilidades a procesar
 	limit := autoScanVulnerabilityLimit
 	if len(limits) > 0 && limits[0] > 0 && limits[0] < limit {
 		limit = limits[0]
 	}
+
+	// Preparar el resultado detallado del escaneo para API/frontend
+	result := &domain.VulnerabilityScanResult{
+		InstallationID: installationID,
+		SoftwareID:     softwareID,
+		CPE:            cpe,
+		LimitApplied:   limit,
+	}
+
+	// 4. Buscar vulnerabilidades a través del puerto de escaneo
+	vulns, err := o.vulnScannerPort.FetchByCPE(ctx, cpe)
+	if err != nil {
+		return nil, fmt.Errorf("error consultando la API de vulnerabilidades para el CPE %s: %w", cpe, err)
+	}
+
+	// VulnerabilitiesFound refleja lo devuelto por NVD antes de aplicar el límite local
+	result.VulnerabilitiesFound = len(vulns)
+
 	if len(vulns) > limit {
 		vulns = vulns[:limit]
 	}
 
-	// 4. Registrar vulnerabilidades y enlazarlas como hallazgos (Findings)
+	// 5. Registrar vulnerabilidades y enlazarlas como hallazgos (Findings)
 	for _, v := range vulns {
 		vCopy := v
-		if err := o.saveVulnerabilityWithTTPs(ctx, &vCopy); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
-			return fmt.Errorf("error al guardar la vulnerabilidad %s: %w", vCopy.CVEID, err)
+		// Guardar o reutilizar la vulnerabilidad global
+		if err := o.vulnPort.Save(ctx, &vCopy); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+			return nil, fmt.Errorf("error al guardar la vulnerabilidad %s: %w", vCopy.CVEID, err)
 		}
 
 		// Guardar los parches si los hay y vincularlos a la vulnerabilidad
 		_ = o.RegisterPatchesForVulnerability(ctx, vCopy.CVEID, vCopy.Patches)
 
-		// Crear un Finding inicial para esta vulnerabilidad en la instalación de software
+		// Crear un Finding inicial solo si no existe ya para installation_id + cve_id
 		now := time.Now().UTC()
 		findingID, err := o.nextNodeID(ctx, "Finding")
 		if err != nil {
@@ -472,15 +541,20 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 
 		_, created, err := o.findingPort.EnsureForInstallationAndCVE(ctx, installationID, vCopy.CVEID, finding)
 		if err != nil {
-			return fmt.Errorf("error asegurando finding para instalación %s y CVE %s: %w", installationID, vCopy.CVEID, err)
+			return nil, fmt.Errorf("error asegurando finding para instalación %s y CVE %s: %w", installationID, vCopy.CVEID,
+				err)
 		}
 
-		_ = created
-
+		if created {
+			result.FindingsCreated++
+		} else {
+			result.FindingsExisting++
+		}
+		
 		o.EnqueueCVE(vCopy.CVEID)
 	}
 
-	return nil
+	return result, nil
 }
 
 // ComputeEndpointRisk calcula y persiste el riesgo de todos los findings abiertos de un endpoint.
@@ -1128,74 +1202,7 @@ func (o *Orchestrator) ComputeProjectRisk(ctx context.Context, projectID int64) 
 		}
 	}
 
-	summaries, err := o.riskPort.GetEndpointRiskSummariesByProject(ctx, projectID)
-	if err != nil {
-		return fmt.Errorf("error obteniendo resumen de endpoints del proyecto %d: %w", projectID, err)
-	}
-
-	if len(summaries) == 0 {
-		return o.riskPort.UpdateProjectRiskAndPriority(
-			ctx,
-			projectID,
-			0.0,
-			"LOW",
-			0.0,
-			"LOW",
-			0,
-			"",
-			0.0,
-			"",
-			"",
-			0,
-			"",
-			0.0,
-			"",
-			"",
-			0,
-		)
-	}
-
-	riskScores := make([]float64, 0, len(summaries))
-	priorityScores := make([]float64, 0, len(summaries))
-	for _, summary := range summaries {
-		riskScores = append(riskScores, summary.RiskScore)
-		priorityScores = append(priorityScores, summary.PriorityScore)
-	}
-
-	projectRisk := AggregateInfrastructureRisk(riskScores)
-	projectRiskTier := ClassifyRiskTier(projectRisk)
-
-	projectPriority := AggregateInfrastructurePriority(priorityScores)
-	projectPriorityTier := ClassifyRiskTier(projectPriority)
-
-	technicalDriver, hasTechnicalDriver := findDriverEndpointByRisk(summaries)
-	priorityDriver, hasPriorityDriver := findDriverEndpointByPriority(summaries)
-	if !hasTechnicalDriver {
-		technicalDriver = domain.EndpointRiskSummary{}
-	}
-	if !hasPriorityDriver {
-		priorityDriver = domain.EndpointRiskSummary{}
-	}
-
-	return o.riskPort.UpdateProjectRiskAndPriority(
-		ctx,
-		projectID,
-		projectRisk,
-		projectRiskTier,
-		projectPriority,
-		projectPriorityTier,
-		technicalDriver.EndpointID,
-		technicalDriver.Hostname,
-		technicalDriver.RiskScore,
-		technicalDriver.TechnicalDriverSoftwareName,
-		technicalDriver.TechnicalDriverCVEID,
-		priorityDriver.EndpointID,
-		priorityDriver.Hostname,
-		priorityDriver.PriorityScore,
-		priorityDriver.PriorityDriverSoftwareName,
-		priorityDriver.PriorityDriverCVEID,
-		countRiskyEndpoints(summaries),
-	)
+	return o.AggregateProjectRiskFromCurrentEndpointScores(ctx, projectID)
 }
 
 // ComputeAllProjectsRisk recorre todos los proyectos y recalcula su riesgo agregado.
@@ -1214,9 +1221,10 @@ func (o *Orchestrator) ComputeAllProjectsRisk(ctx context.Context) error {
 	return nil
 }
 
-// GenerateExploitationPaths devuelve las rutas de explotación calculadas desde el motor de grafos.
-func (o *Orchestrator) GenerateExploitationPaths(ctx context.Context) ([]domain.ExploitationPath, error) {
-	return o.infraPort.GetExploitationPaths(ctx)
+// GenerateExploitationPaths devuelve las rutas de explotación calculadas desde el motor de grafos,
+// filtradas por proyecto si se indica un projectID > 0.
+func (o *Orchestrator) GenerateExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error) {
+	return o.infraPort.GetExploitationPaths(ctx, projectID)
 }
 
 // SaveContainerImage registra una imagen de contenedor en Neo4j.
@@ -1257,6 +1265,28 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		if err != nil {
 			return fmt.Errorf("error enlazando CVE %s a imagen %s: %w", v.CVEID, imageID, err)
 		}
+		// Crear un Finding (Hallazgo) para esta imagen y vulnerabilidad
+		now := time.Now().UTC()
+		findingID, err := o.nextNodeID(ctx, "Finding")
+		if err != nil {
+			findingID = int64(rand.Int31n(1000000) + 1)
+		}
+		finding := &domain.Finding{
+			FindingID:         findingID,
+			Status:            "OPEN",
+			FirstSeen:         now,
+			LastSeen:          &now,
+			ImpactScore:       v.BaseScore,
+			Likelihood:        0.5,
+			RemediationFactor: 1.0,
+			RiskScore:         v.BaseScore * 0.5,
+		}
+
+		_, _, err = o.findingPort.EnsureForContainerImageAndCVE(ctx, imageID, v.CVEID, finding)
+		if err != nil {
+			return fmt.Errorf("error creando finding para imagen %s y CVE %s: %w", imageID, v.CVEID, err)
+		}
+
 		o.EnqueueCVE(v.CVEID)
 	}
 
@@ -1277,14 +1307,15 @@ func (o *Orchestrator) SyncScoutDaily(ctx context.Context) error {
 
 	var errs []error
 	for _, img := range images {
-		// Para Scout el nombre es el Tag si es que está disponible, o simplemente name
-		// Por ejemplo: nginx:latest
-		imageName := img.Name
-		if img.Tag != "" && img.Tag != "latest" {
-			imageName = fmt.Sprintf("%s:%s", img.Name, img.Tag)
+		// Usar el ImageID directamente como nombre canónico de la imagen.
+		// El ImageID ya contiene el nombre completo (ej: "nginx:1.19", "httpd:2.4.49").
+		// No recomponemos Name+Tag para evitar duplicados como "httpd:2.4.49:latest".
+		imageName := img.ImageID
+		if imageName == "" {
+			imageName = img.Name
 		}
 
-		fmt.Printf("[Scout Sync] Escaneando imagen: %s (ID: %s)\n", imageName, img.ImageID)
+		fmt.Printf("[Scout Sync] Escaneando imagen: %s\n", imageName)
 		err := o.ScanAndSaveContainerImage(ctx, imageName, img.ImageID)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("fallo al escanear %s: %v", imageName, err))
@@ -1298,22 +1329,84 @@ func (o *Orchestrator) SyncScoutDaily(ctx context.Context) error {
 	return nil
 }
 
+// AddContainerToEndpoint guarda un contenedor y lo vincula a un host (endpoint)
+func (o *Orchestrator) AddContainerToEndpoint(ctx context.Context, hostID int64, container *domain.Container) error {
+	if container.ContainerID == "" {
+		// En principio el frontend genera UUID, pero si no...
+		container.ContainerID = fmt.Sprintf("container-%d", time.Now().UnixNano())
+	}
+	container.HostID = hostID
+
+	if err := o.containerPort.SaveContainer(ctx, container); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+		return err
+	}
+
+	if len(container.IPs) > 0 {
+		if err := o.containerPort.SaveIPs(ctx, container.ContainerID, container.IPs); err != nil {
+			return fmt.Errorf("error guardando IPs del contenedor: %w", err)
+		}
+		if o.networkPort != nil {
+			if _, err := o.networkPort.LinkContainerToMatchingNetworks(ctx, container.ContainerID, container.IPs); err != nil {
+				return fmt.Errorf("error enlazando contenedor a las redes coincidentes: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// UpdateContainer actualiza los datos de un contenedor y sus IPs.
+func (o *Orchestrator) UpdateContainer(ctx context.Context, container *domain.Container) error {
+	if err := o.containerPort.SaveContainer(ctx, container); err != nil {
+		return err
+	}
+
+	if err := o.containerPort.SaveIPs(ctx, container.ContainerID, container.IPs); err != nil {
+		return fmt.Errorf("error actualizando IPs del contenedor: %w", err)
+	}
+	if o.networkPort != nil {
+		if _, err := o.networkPort.LinkContainerToMatchingNetworks(ctx, container.ContainerID, container.IPs); err != nil {
+			return fmt.Errorf("error re-enlazando contenedor a redes coincidentes: %w", err)
+		}
+	}
+	return nil
+}
+
 // === EDICIÓN Y BORRADO DE ACTIVOS (CRUD COMPLETO) ===
 
 // UpdateEndpoint actualiza los datos y re-enlaza las IPs de un Endpoint en Neo4j.
 func (o *Orchestrator) UpdateEndpoint(ctx context.Context, endpoint *domain.Endpoint) error {
 	if err := o.endpointPort.Update(ctx, endpoint); err != nil {
-		return err
+		return fmt.Errorf("error actualizando endpoint: %w", err)
 	}
-	// Siempre sincronizamos IPs (para poder borrar VLANs o quitar todas las IPs de un endpoint)
+
 	if err := o.endpointPort.SaveIPs(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
-		return fmt.Errorf("error actualizando IPs del endpoint: %w", err)
+		return fmt.Errorf("error actualizando IPs del endpoint %d: %w", endpoint.EndpointID, err)
 	}
+
 	if o.networkPort != nil {
 		if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
-			return fmt.Errorf("error re-enlazando endpoint a las redes coincidentes: %w", err)
+			return fmt.Errorf("error actualizando relaciones endpoint-red para endpoint %d: %w", endpoint.EndpointID, err)
 		}
 	}
+
+	if o.riskPort != nil {
+		if err := o.ComputeEndpointRisk(ctx, endpoint.EndpointID); err != nil {
+			return fmt.Errorf("endpoint actualizado, pero falló el recálculo de riesgo del endpoint %d: %w",
+				endpoint.EndpointID, err)
+		}
+
+		projectID, err := o.riskPort.GetProjectIDByEndpoint(ctx, endpoint.EndpointID)
+		if err != nil {
+			return fmt.Errorf("endpoint actualizado, pero falló la búsqueda del proyecto para recalcular riesgo: %w", err)
+		}
+
+		if projectID != 0 {
+			if err := o.AggregateProjectRiskFromCurrentEndpointScores(ctx, projectID); err != nil {
+				return fmt.Errorf("endpoint actualizado, pero falló la agregación de riesgo del proyecto %d: %w", projectID, err)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -1373,7 +1466,46 @@ func (o *Orchestrator) DeleteSoftware(ctx context.Context, softwareID int64) err
 
 // UpdateSoftwareInstallation actualiza los datos de una instalación de software.
 func (o *Orchestrator) UpdateSoftwareInstallation(ctx context.Context, installation *domain.SoftwareInstallation) error {
-	return o.softwareInstPort.Update(ctx, installation)
+	installation.CriticalityLevel = NormalizeSoftwareCriticalityLevel(installation.CriticalityLevel)
+
+	if err := o.softwareInstPort.Update(ctx, installation); err != nil {
+		return fmt.Errorf("error actualizando instalación de software %s: %w", installation.InstallationID, err)
+	}
+
+	if o.riskPort == nil {
+		return nil
+	}
+
+	endpointIDs, err := o.riskPort.GetEndpointIDsByInstallation(ctx, installation.InstallationID)
+	if err != nil {
+		return fmt.Errorf("instalación actualizada, pero falló la búsqueda de endpoints afectados: %w", err)
+	}
+
+	if len(endpointIDs) == 0 {
+		if _, err := o.ComputeSoftwareInstallationRisk(ctx, installation.InstallationID); err != nil {
+			return fmt.Errorf("instalación actualizada, pero falló el recálculo de riesgo de la instalación %s: %w", installation.InstallationID, err)
+		}
+		return nil
+	}
+
+	for _, endpointID := range endpointIDs {
+		if err := o.ComputeEndpointRisk(ctx, endpointID); err != nil {
+			return fmt.Errorf("instalación actualizada, pero falló el recálculo de riesgo del endpoint %d: %w", endpointID, err)
+		}
+
+		projectID, err := o.riskPort.GetProjectIDByEndpoint(ctx, endpointID)
+		if err != nil {
+			return fmt.Errorf("instalación actualizada, pero falló la búsqueda del proyecto del endpoint %d: %w", endpointID, err)
+		}
+
+		if projectID != 0 {
+			if err := o.AggregateProjectRiskFromCurrentEndpointScores(ctx, projectID); err != nil {
+				return fmt.Errorf("instalación actualizada, pero falló la agregación de riesgo del proyecto %d: %w", projectID, err)
+			}
+		}
+	}
+
+	return nil
 }
 
 // DeleteSoftwareInstallation elimina una instalación por su ID.
@@ -1389,7 +1521,11 @@ func (o *Orchestrator) DeleteNodeByID(ctx context.Context, id string) error {
 	query := `
 		MATCH (n)
 		WHERE toString(n.id) = toString($id) OR toString(n.cve_id) = toString($id) OR toString(n.ttp_id) = toString($id) OR toString(n.installation_id) = toString($id) OR elementId(n) = $id
+		OPTIONAL MATCH (n)-[:USES_IMAGE]->(old_i:ContainerImage)
 		DETACH DELETE n
+		WITH old_i
+		WHERE old_i IS NOT NULL AND NOT ()-[:USES_IMAGE]->(old_i)
+		DETACH DELETE old_i
 	`
 	return o.dbHelper.ExecuteWrite(ctx, query, map[string]any{"id": id})
 }
@@ -1632,4 +1768,78 @@ func (o *Orchestrator) GetTTPSyncStatus() TTPBackgroundSyncResponse {
 		QueueLength: len(o.ttpQueue),
 		Logs:        logsCopy,
 	}
+}
+
+// AggregateProjectRiskFromCurrentEndpointScores recalcula el riesgo agregado de un proyecto completo, basado en los scores actuales de sus endpoints asociados.
+func (o *Orchestrator) AggregateProjectRiskFromCurrentEndpointScores(ctx context.Context, projectID int64) error {
+	summaries, err := o.riskPort.GetEndpointRiskSummariesByProject(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("error obteniendo resumen de endpoints del proyecto %d: %w", projectID, err)
+	}
+
+	if len(summaries) == 0 {
+		return o.riskPort.UpdateProjectRiskAndPriority(
+			ctx,
+			projectID,
+			0.0,
+			"LOW",
+			0.0,
+			"LOW",
+			0,
+			"",
+			0.0,
+			"",
+			"",
+			0,
+			"",
+			0.0,
+			"",
+			"",
+			0,
+		)
+	}
+
+	riskScores := make([]float64, 0, len(summaries))
+	priorityScores := make([]float64, 0, len(summaries))
+
+	for _, summary := range summaries {
+		riskScores = append(riskScores, summary.RiskScore)
+		priorityScores = append(priorityScores, summary.PriorityScore)
+	}
+
+	projectRisk := AggregateInfrastructureRisk(riskScores)
+	projectRiskTier := ClassifyRiskTier(projectRisk)
+
+	projectPriority := AggregateInfrastructurePriority(priorityScores)
+	projectPriorityTier := ClassifyRiskTier(projectPriority)
+
+	technicalDriver, hasTechnicalDriver := findDriverEndpointByRisk(summaries)
+	priorityDriver, hasPriorityDriver := findDriverEndpointByPriority(summaries)
+
+	if !hasTechnicalDriver {
+		technicalDriver = domain.EndpointRiskSummary{}
+	}
+	if !hasPriorityDriver {
+		priorityDriver = domain.EndpointRiskSummary{}
+	}
+
+	return o.riskPort.UpdateProjectRiskAndPriority(
+		ctx,
+		projectID,
+		projectRisk,
+		projectRiskTier,
+		projectPriority,
+		projectPriorityTier,
+		technicalDriver.EndpointID,
+		technicalDriver.Hostname,
+		technicalDriver.RiskScore,
+		technicalDriver.TechnicalDriverSoftwareName,
+		technicalDriver.TechnicalDriverCVEID,
+		priorityDriver.EndpointID,
+		priorityDriver.Hostname,
+		priorityDriver.PriorityScore,
+		priorityDriver.PriorityDriverSoftwareName,
+		priorityDriver.PriorityDriverCVEID,
+		countRiskyEndpoints(summaries),
+	)
 }
