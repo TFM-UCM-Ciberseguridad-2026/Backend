@@ -44,13 +44,15 @@ func (r *remediationRepo) DeleteByID(ctx context.Context, id int64) error {
 
 // GetFixedVersionByInstallationAndCVE devuelve la versión corregida registrada en la
 // remediación, o cadena vacía si no consta.
+
 func (r *remediationRepo) GetFixedVersionByInstallationAndCVE(ctx context.Context, installationID, cveID string) (string, error) {
 	query := `
 		MATCH (:SoftwareInstallation {id: $installation_id})-[:HAS_FINDING]->(f:Finding)
-		      -[:OF_VULNERABILITY]->(:Vulnerability {cve_id: $cve_id})
-		MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
-		WHERE coalesce(rem.fixed_version, '') <> ''
-		RETURN rem.fixed_version AS fixed_version
+		      -[:OF_VULNERABILITY]->(v:Vulnerability {cve_id: $cve_id})
+		OPTIONAL MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
+		WITH coalesce(rem.fixed_version, v.fixed_version, '') AS fixed_version
+		WHERE fixed_version <> ''
+		RETURN fixed_version
 		LIMIT 1
 	`
 
@@ -130,14 +132,20 @@ func (r *remediationRepo) ApplyByInstallationAndCVE(ctx context.Context, install
 	return int(res.(int64)), nil
 }
 
-// UpdateFixedVersionByCVE fija la versión corregida en todas las remediaciones asociadas
-// a findings del CVE indicado, recorriendo
-// (Vulnerability)<-[:OF_VULNERABILITY]-(Finding)-[:HAS_REMEDIATION]->(Remediation).
+// UpdateFixedVersionByCVE fija la versión corregida en el nodo Vulnerability y,
+// si existen, en todas las remediaciones asociadas a findings del CVE indicado.
+// Algunos findings creados por el autoscan aún no tienen nodo Remediation, así
+// que Vulnerability.fixed_version actúa como fallback para vistas como Patch Queue.
 // Devuelve el número de remediaciones actualizadas.
 func (r *remediationRepo) UpdateFixedVersionByCVE(ctx context.Context, cveID string, fixedVersion string) (int, error) {
 	query := `
-		MATCH (:Vulnerability {cve_id: $cve_id})<-[:OF_VULNERABILITY]-(:Finding)-[:HAS_REMEDIATION]->(rem:Remediation)
-		SET rem.fixed_version = $fixed_version
+		MATCH (v:Vulnerability {cve_id: $cve_id})
+		SET v.fixed_version = $fixed_version
+		WITH v
+		OPTIONAL MATCH (v)<-[:OF_VULNERABILITY]-(:Finding)-[:HAS_REMEDIATION]->(rem:Remediation)
+		FOREACH (_ IN CASE WHEN rem IS NULL THEN [] ELSE [1] END |
+			SET rem.fixed_version = $fixed_version
+		)
 		RETURN count(rem) AS updated
 	`
 
