@@ -1009,6 +1009,10 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			paths = append(paths, p)
 		}
 
+		for i := range paths {
+			paths[i].PathID = fmt.Sprintf("path-%d", i+1)
+		}
+
 		return paths, result.Err()
 	})
 
