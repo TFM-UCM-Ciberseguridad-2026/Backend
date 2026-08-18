@@ -20,10 +20,12 @@ func NewRiskRepository(driver neo4j.DriverWithContext) ports.RiskPort {
 // Devuelve el contexto completo de cada finding abierto para calcular su riesgo.
 func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID int64) ([]domain.FindingRiskContext, error) {
 	query := `
-		// El software cuelga del endpoint o de un contenedor que este aloja; el recorrido
+		// El software o imagen cuelga del endpoint o de un contenedor que este aloja; el recorrido
 		// variable cubre ambos caminos.
-		MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
-		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		MATCH (e:Endpoint {id: $endpoint_id})
+		MATCH path = (e)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)
+		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset))
+		MATCH (asset)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
 		  AND NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
 		RETURN
@@ -204,10 +206,34 @@ func toStr(v any) string {
 }
 
 func toFloat64(v any) float64 {
-	if f, ok := v.(float64); ok {
-		return f
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case int32:
+		return float64(n)
+	case int16:
+		return float64(n)
+	case int8:
+		return float64(n)
+	case uint:
+		return float64(n)
+	case uint64:
+		return float64(n)
+	case uint32:
+		return float64(n)
+	case uint16:
+		return float64(n)
+	case uint8:
+		return float64(n)
+	default:
+		return 0.0
 	}
-	return 0.0
 }
 
 func toBool(v any) bool {
@@ -383,19 +409,21 @@ func (r *riskRepo) GetSoftwareCriticalityLevel(ctx context.Context, installation
 // recorre toda la infraestructura.
 func (r *riskRepo) GetPatchQueue(ctx context.Context, projectID *int64, limit int) ([]domain.PatchQueueItem, error) {
 	query := `
-		MATCH (e:Endpoint)-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
-		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		MATCH (e:Endpoint)
+		MATCH path = (e)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)
+		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset))
+		MATCH (asset)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
 		  AND ($project_id IS NULL OR EXISTS { (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e) })
-		OPTIONAL MATCH (si)-[:INSTANCE_OF]->(s:Software)
-		OPTIONAL MATCH (c:Container)-[:HAS_INSTALLATION]->(si)
+		OPTIONAL MATCH (asset)-[:INSTANCE_OF]->(s:Software)
+		OPTIONAL MATCH (c:Container)-[:HAS_INSTALLATION|USES_IMAGE]->(asset)
 		OPTIONAL MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
 		RETURN f.id                AS finding_id,
 		       f.status            AS status,
 		       v.cve_id            AS cve_id,
-		       si.id               AS installation_id,
-		       s.name              AS software_name,
-		       s.version           AS software_version,
+		       asset.id            AS installation_id,
+		       coalesce(s.name, asset.name, asset.id) AS software_name,
+		       coalesce(s.version, 'N/A') AS software_version,
 		       rem.fixed_version   AS fixed_version,
 		       e.id                AS endpoint_id,
 		       e.hostname          AS hostname,
@@ -807,4 +835,42 @@ func (r *riskRepo) GetAllProjectIDs(ctx context.Context) ([]int64, error) {
 		return []int64{}, nil
 	}
 	return res.([]int64), nil
+}
+
+// GetProjectIDByEndpoint devuelve el ID del proyecto asociado a un endpoint activo.
+func (r *riskRepo) GetProjectIDByEndpoint(ctx context.Context, endpointID int64) (int64, error) {
+	query := `
+			MATCH (p:Project)-[:HAS_ENDPOINT]->(e:Endpoint {id: $endpoint_id})
+			RETURN p.id AS project_id
+			LIMIT 1
+	`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{
+			"endpoint_id": endpointID,
+		})
+		if err != nil {
+			return int64(0), err
+		}
+
+		if result.Next(ctx) {
+			projectID, _ := result.Record().Get("project_id")
+			return toInt64(projectID), result.Err()
+		}
+
+		if err := result.Err(); err != nil {
+			return int64(0), err
+		}
+
+		return int64(0), nil
+	})
+
+	if err != nil {
+		return 0, err
+	}
+
+	return res.(int64), nil
 }
