@@ -115,7 +115,7 @@ func main() {
 	fmt.Println("[*] ==============================================================")
 	fmt.Println("[*] FASE 1: Calculando Paths Iniciales (Sin Container Escapes)")
 	fmt.Println("[*] ==============================================================")
-	paths, err := infraRepo.GetExploitationPaths(ctx)
+	paths, err := infraRepo.GetExploitationPaths(ctx, 0)
 	if err != nil {
 		log.Fatalf("Error calculando paths: %v", err)
 	}
@@ -151,7 +151,7 @@ func main() {
 	fmt.Println("[INFO] Esta vulnerabilidad tiene impacto Crítico localmente (C:H, I:H, A:H) permitiendo escapar al host.")
 	fmt.Println("[INFO] Recalculando Attack Paths...\n")
 
-	paths2, err := infraRepo.GetExploitationPaths(ctx)
+	paths2, err := infraRepo.GetExploitationPaths(ctx, 0)
 	if err != nil {
 		log.Fatalf("Error calculando paths: %v", err)
 	}

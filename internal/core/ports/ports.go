@@ -17,12 +17,12 @@ Propósito arquitectónico y teórico:
 */
 
 type EndpointPort interface {
-	Save(ctx context.Context, endpoint *domain.Endpoint) error       				// Guarda en la DB
-	Update(ctx context.Context, endpoint *domain.Endpoint) error     				// Actualiza en la DB
-	GetByID(ctx context.Context, id int64) (*domain.Endpoint, error) 				// Te da con el id el objeto recuperado de la bd
-	DeleteByID(ctx context.Context, id int64) error                  				// Borra un nodo de la BD
-	SaveIPs(ctx context.Context, endpointID int64, ips []domain.EndpointIP) error	// Reemplaza el conjunto de direcciones IP de un endpoint por las indicadas.
-	GetIPs(ctx context.Context, endpointID int64) ([]domain.EndpointIP, error)		// Devuelve las direcciones IP asociadas a un endpoint.
+	Save(ctx context.Context, endpoint *domain.Endpoint) error                    // Guarda en la DB
+	Update(ctx context.Context, endpoint *domain.Endpoint) error                  // Actualiza en la DB
+	GetByID(ctx context.Context, id int64) (*domain.Endpoint, error)              // Te da con el id el objeto recuperado de la bd
+	DeleteByID(ctx context.Context, id int64) error                               // Borra un nodo de la BD
+	SaveIPs(ctx context.Context, endpointID int64, ips []domain.EndpointIP) error // Reemplaza el conjunto de direcciones IP de un endpoint por las indicadas.
+	GetIPs(ctx context.Context, endpointID int64) ([]domain.EndpointIP, error)    // Devuelve las direcciones IP asociadas a un endpoint.
 }
 
 type VulnerabilityPort interface {
@@ -48,13 +48,15 @@ type FindingPort interface {
 	GetByID(ctx context.Context, id int64) (*domain.Finding, error)
 	DeleteByID(ctx context.Context, id int64) error
 
+	EnsureForInstallationAndCVE(ctx context.Context, installationID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
+	EnsureForContainerImageAndCVE(ctx context.Context, imageID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
+
 	// ApplyRemediationByInstallationAndCVE fija factor y estado en los findings del CVE
 	// en esa instalación, y devuelve sus IDs. Con factor 0 pone también risk_score y
 	// priority_score a cero: el finding sale de las agregaciones y conservaría si no la
 	// última puntuación calculada.
 	ApplyRemediationByInstallationAndCVE(ctx context.Context, installationID, cveID string, remediationFactor float64, status string) ([]int64, error)
-	GetVulnerabilitiesByFinding(ctx context.Context, findingID int64) ([]domain.Vulnerability, error)
-
+	GetVulnerabilitiesByFinding(ctx context.Context, findingID any) ([]domain.Vulnerability, error)
 }
 
 type RemediationPort interface {
@@ -95,6 +97,7 @@ type NetworkPort interface {
 	DeleteByID(ctx context.Context, id int64) error
 	LinkMatchingEndpoints(ctx context.Context, networkID int64, cidr string, vlanID int64) (int, error)
 	LinkEndpointToMatchingNetworks(ctx context.Context, endpointID int64, ips []domain.EndpointIP) (int, error)
+	LinkContainerToMatchingNetworks(ctx context.Context, containerID string, ips []domain.EndpointIP) (int, error)
 	LinkNetworkToProjectIfOrphan(ctx context.Context, networkID int64, projectID int64) error
 }
 
@@ -122,6 +125,7 @@ type PatchPort interface {
 type ProjectPort interface {
 	Save(ctx context.Context, project *domain.Project) error
 	Update(ctx context.Context, project *domain.Project) error
+	RenameProject(ctx context.Context, id int64, newName string) error
 	GetByID(ctx context.Context, id int64) (*domain.Project, error)
 	DeleteByID(ctx context.Context, id int64) error
 	ExportGraph(ctx context.Context, id int64) (*domain.GraphData, error)
@@ -201,7 +205,7 @@ type InfrastructurePort interface {
 	GetGraphData(ctx context.Context) (*domain.GraphData, error)
 	GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int, projectID int64) ([]domain.APTThreatResult, error)
 	GetTotalMitreTTPs(ctx context.Context) (int, error)
-	GetExploitationPaths(ctx context.Context) ([]domain.ExploitationPath, error)
+	GetExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error)
 	ImportGraphData(ctx context.Context, data *domain.GraphData) error
 }
 
@@ -213,6 +217,7 @@ type ContainerPort interface {
 	SaveContainer(ctx context.Context, container *domain.Container) error
 	GetContainer(ctx context.Context, containerID string) (*domain.Container, error)
 	LinkVulnerabilityToImage(ctx context.Context, imageID string, cveID string) error
+	SaveIPs(ctx context.Context, containerID string, ips []domain.EndpointIP) error
 }
 
 // ContainerScannerPort define las operaciones para escanear imágenes de contenedores en busca de vulnerabilidades (ej. Docker Scout).
@@ -300,6 +305,9 @@ type RiskPort interface {
 
 	// GetEndpointIDsByProject devuelve los IDs de todos los endpoints asociados a un proyecto.
 	GetEndpointIDsByProject(ctx context.Context, projectID int64) ([]int64, error)
+
+	// GetProjectIDByEndpoint devuelve el ID del proyecto al que pertenece un endpoint.
+	GetProjectIDByEndpoint(ctx context.Context, endpointID int64) (int64, error)
 
 	// GetEndpointRiskSummariesByProject devuelve un resumen de riesgo de todos los endpoints asociados a un proyecto.
 	GetEndpointRiskSummariesByProject(ctx context.Context, projectID int64) ([]domain.EndpointRiskSummary, error)

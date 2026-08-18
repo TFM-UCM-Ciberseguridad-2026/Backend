@@ -22,7 +22,7 @@ func main() {
 		log.Fatalf("Error cargando configuración: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
 	// 2. Conectar a Neo4j
@@ -33,7 +33,7 @@ func main() {
 	defer driver.Close(ctx)
 
 	// 3. Inicializar repositorios
-	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, _, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo , _ := neo4j.NewRepository(driver)
+	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, _, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo, _ := neo4j.NewRepository(driver)
 	infraRepo := neo4j.NewInfrastructureRepository(driver)
 
 	// Limpiar base de datos
@@ -121,10 +121,10 @@ func main() {
 
 	// 6. Ejecutar el escaneo automático
 	fmt.Println("\nEjecutando escaneo automático por CPE/versión...")
-	if err := orchestrator.AutoScanAndRegisterVulnerabilities(ctx, "inst-tomcat-target", 200); err != nil {
+	if _, err := orchestrator.AutoScanAndRegisterVulnerabilities(ctx, "inst-tomcat-target", 200); err != nil {
 		log.Fatalf("Error durante el escaneo automático de Tomcat: %v", err)
 	}
-	if err := orchestrator.AutoScanAndRegisterVulnerabilities(ctx, "inst-ubuntu-target", 201); err != nil {
+	if _, err := orchestrator.AutoScanAndRegisterVulnerabilities(ctx, "inst-ubuntu-target", 201); err != nil {
 		log.Fatalf("Error durante el escaneo automático de Ubuntu: %v", err)
 	}
 	fmt.Println("Escaneo automático finalizado.")

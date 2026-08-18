@@ -500,7 +500,7 @@ type pathStepState struct {
 
 // GetExploitationPaths calcula TODAS las rutas de explotación posibles en la memoria de Go.
 // Cada combinación de (CVE de entrada, CVEs de pivote) genera una ruta de ataque independiente.
-func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain.ExploitationPath, error) {
+func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
@@ -508,6 +508,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 	queryData := `
 		MATCH (e:Endpoint)
 		WHERE NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
+		  AND ($projectID = 0 OR EXISTS { MATCH (proj:Project {id: $projectID})-[:HAS_ENDPOINT]->(e) })
 		
 		OPTIONAL MATCH (e)-[:CONNECTED_TO]->(net:Network)
 		
@@ -567,7 +568,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context) ([]domain
 	`
 
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
-		result, err := tx.Run(ctx, queryData, nil)
+		result, err := tx.Run(ctx, queryData, map[string]any{"projectID": projectID})
 		if err != nil {
 			return nil, err
 		}

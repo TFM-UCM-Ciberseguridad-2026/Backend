@@ -12,7 +12,9 @@ Propósito arquitectónico y teórico:
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -69,6 +71,31 @@ func (h *OrchestratorHandler) DeleteProject(w http.ResponseWriter, r *http.Reque
 	}
 
 	sendJSON(w, map[string]string{"status": "success", "message": "Proyecto eliminado con éxito"}, http.StatusOK)
+}
+
+// PUT /api/projects/{id}
+func (h *OrchestratorHandler) RenameProject(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	projectID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		sendError(w, "ID de proyecto inválido: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var payload struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		sendError(w, "Error decodificando payload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if err := h.orchestrator.RenameProject(r.Context(), projectID, payload.Name); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]string{"status": "success", "message": "Proyecto renombrado con éxito"}, http.StatusOK)
 }
 
 // POST /api/projects/{id}/endpoints
@@ -140,6 +167,66 @@ func (h *OrchestratorHandler) RegisterSoftwareInstallation(w http.ResponseWriter
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
 }
 
+// POST /api/containers/images/{id}/scan-vulns
+func (h *OrchestratorHandler) ScanContainerImageVulnerabilities(w http.ResponseWriter, r *http.Request) {
+	imageID, err := url.PathUnescape(r.PathValue("id"))
+	if err != nil || imageID == "" {
+		imageID = r.PathValue("id")
+	}
+
+	if imageID == "" {
+		sendError(w, "Invalid Image ID", http.StatusBadRequest)
+		return
+	}
+
+	var req struct {
+		ImageName string `json:"image_name"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	imageName := req.ImageName
+	if imageName == "" {
+		imageName = imageID
+	}
+
+	// Ejecutar el escaneo de forma síncrona (bloqueante)
+	// Gracias al timeout de 5 minutos en Vite, no debería dar 502 con imágenes grandes.
+	if err := h.orchestrator.ScanAndSaveContainerImage(r.Context(), imageName, imageID); err != nil {
+		fmt.Printf("[ScanContainerImage] Error escaneando %s: %v\n", imageName, err)
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	
+	fmt.Printf("[ScanContainerImage] Escaneo completado para %s\n", imageName)
+
+	// Responder con éxito una vez terminado
+	sendJSON(w, map[string]string{
+		"status":  "success",
+		"message": fmt.Sprintf("Escaneo de '%s' completado.", imageName),
+	}, http.StatusOK)
+}
+
+
+// POST /api/containers/{id}/installations
+func (h *OrchestratorHandler) RegisterContainerSoftwareInstallation(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	
+	var req struct {
+		Software     domain.Software             `json:"software"`
+		Installation domain.SoftwareInstallation `json:"installation"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendError(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.orchestrator.RegisterContainerSoftwareInstallation(r.Context(), idStr, &req.Software, &req.Installation); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
+}
+
 // POST /api/installations/{id}/findings
 func (h *OrchestratorHandler) GenerateFinding(w http.ResponseWriter, r *http.Request) {
 	instID := r.PathValue("id")
@@ -185,10 +272,12 @@ func (h *OrchestratorHandler) AssociateVulnerabilitiesAndRemediations(w http.Res
 // GET /api/findings/{id}/vulnerabilities
 func (h *OrchestratorHandler) GetFindingVulnerabilities(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
-	findingID, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		sendError(w, "Invalid finding ID", http.StatusBadRequest)
-		return
+	
+	var findingID any
+	if idInt, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+		findingID = idInt
+	} else {
+		findingID = idStr
 	}
 
 	vulns, err := h.orchestrator.GetVulnerabilitiesForFinding(r.Context(), findingID)
@@ -203,7 +292,6 @@ func (h *OrchestratorHandler) GetFindingVulnerabilities(w http.ResponseWriter, r
 		"vulnerabilities": vulns,
 	}, http.StatusOK)
 }
-
 
 // GET /api/infrastructure
 func (h *OrchestratorHandler) GetInfrastructure(w http.ResponseWriter, r *http.Request) {
@@ -259,9 +347,19 @@ func (h *OrchestratorHandler) GetMitreTTPCount(w http.ResponseWriter, r *http.Re
 	sendJSON(w, map[string]int{"count": count}, http.StatusOK)
 }
 
-// GET /api/infrastructure/exploitation-paths
+// GET /api/infrastructure/exploitation-paths?project_id={id}
 func (h *OrchestratorHandler) GetExploitationPaths(w http.ResponseWriter, r *http.Request) {
-	paths, err := h.orchestrator.GenerateExploitationPaths(r.Context())
+	projectIDStr := r.URL.Query().Get("project_id")
+	var projectID int64
+	if projectIDStr != "" {
+		var err error
+		projectID, err = strconv.ParseInt(projectIDStr, 10, 64)
+		if err != nil {
+			sendError(w, "Invalid project_id", http.StatusBadRequest)
+			return
+		}
+	}
+	paths, err := h.orchestrator.GenerateExploitationPaths(r.Context(), projectID)
 	if err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -283,11 +381,13 @@ func (h *OrchestratorHandler) ScanSoftwareVulnerabilities(w http.ResponseWriter,
 		sendError(w, "Missing software_id query parameter", http.StatusBadRequest)
 		return
 	}
+
 	swID, err := strconv.ParseInt(swIDStr, 10, 64)
 	if err != nil {
 		sendError(w, "Invalid software_id", http.StatusBadRequest)
 		return
 	}
+
 	limit := 100
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		parsedLimit, err := strconv.Atoi(limitStr)
@@ -300,11 +400,13 @@ func (h *OrchestratorHandler) ScanSoftwareVulnerabilities(w http.ResponseWriter,
 		}
 	}
 
-	if err := h.orchestrator.AutoScanAndRegisterVulnerabilities(r.Context(), instID, swID, limit); err != nil {
+	result, err := h.orchestrator.AutoScanAndRegisterVulnerabilities(r.Context(), instID, swID, limit)
+	if err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	sendJSON(w, map[string]string{"status": "success"}, http.StatusOK)
+
+	sendJSON(w, result, http.StatusOK)
 }
 
 // POST /api/endpoints/{id}/compute-risk
@@ -562,7 +664,6 @@ func (h *OrchestratorHandler) GetAppliedPatchHistory(w http.ResponseWriter, r *h
 		"applied_patches": history,
 	}, http.StatusOK)
 }
-
 
 // createNetworkRequest es el DTO de entrada para POST /api/networks y PUT /api/networks/{id}.
 // ProjectID identifica el proyecto activo en el frontend en el momento de crear/editar la
@@ -846,4 +947,48 @@ func (h *OrchestratorHandler) DeleteNode(w http.ResponseWriter, r *http.Request)
 	sendJSON(w, map[string]any{"status": "success", "message": "Nodo eliminado con éxito"}, http.StatusOK)
 }
 
+// POST /api/endpoints/{id}/containers
+func (h *OrchestratorHandler) AddContainerToEndpoint(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	endpointID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		sendError(w, "Invalid endpoint ID", http.StatusBadRequest)
+		return
+	}
 
+	var container domain.Container
+	if err := json.NewDecoder(r.Body).Decode(&container); err != nil {
+		sendError(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.orchestrator.AddContainerToEndpoint(r.Context(), endpointID, &container); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
+}
+
+// PUT /api/containers/{id}
+func (h *OrchestratorHandler) UpdateContainer(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	
+	var container domain.Container
+	if err := json.NewDecoder(r.Body).Decode(&container); err != nil {
+		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	container.ContainerID = idStr
+
+	if err := h.orchestrator.UpdateContainer(r.Context(), &container); err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]any{"status": "success", "message": "Contenedor actualizado con éxito"}, http.StatusOK)
+}
+
+// DELETE /api/containers/{id}
+func (h *OrchestratorHandler) DeleteContainer(w http.ResponseWriter, r *http.Request) {
+	// Se puede delegar en el borrado genérico o tener lógica específica si hace falta
+	h.DeleteNode(w, r)
+}
