@@ -12,10 +12,10 @@ type PatchQueueItem struct {
 	CVEID     string `json:"cve_id"`
 	Status    string `json:"status"`
 
-	InstallationID string `json:"installation_id"`
-	SoftwareName   string `json:"software_name"`
+	InstallationID  string `json:"installation_id"`
+	SoftwareName    string `json:"software_name"`
 	SoftwareVersion string `json:"software_version"`
-	FixedVersion   string `json:"fixed_version,omitempty"`
+	FixedVersion    string `json:"fixed_version,omitempty"`
 
 	EndpointID  int64  `json:"endpoint_id"`
 	Hostname    string `json:"hostname"`

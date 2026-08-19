@@ -36,6 +36,7 @@ func sendError(w http.ResponseWriter, msg string, code int) {
 
 func sendJSON(w http.ResponseWriter, data any, code int) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(data)
 }
@@ -196,7 +197,7 @@ func (h *OrchestratorHandler) ScanContainerImageVulnerabilities(w http.ResponseW
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	
+
 	fmt.Printf("[ScanContainerImage] Escaneo completado para %s\n", imageName)
 
 	// Responder con éxito una vez terminado
@@ -206,11 +207,10 @@ func (h *OrchestratorHandler) ScanContainerImageVulnerabilities(w http.ResponseW
 	}, http.StatusOK)
 }
 
-
 // POST /api/containers/{id}/installations
 func (h *OrchestratorHandler) RegisterContainerSoftwareInstallation(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
-	
+
 	var req struct {
 		Software     domain.Software             `json:"software"`
 		Installation domain.SoftwareInstallation `json:"installation"`
@@ -272,7 +272,7 @@ func (h *OrchestratorHandler) AssociateVulnerabilitiesAndRemediations(w http.Res
 // GET /api/findings/{id}/vulnerabilities
 func (h *OrchestratorHandler) GetFindingVulnerabilities(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
-	
+
 	var findingID any
 	if idInt, err := strconv.ParseInt(idStr, 10, 64); err == nil {
 		findingID = idInt
@@ -957,6 +957,7 @@ func (h *OrchestratorHandler) MapTTPsManually(w http.ResponseWriter, r *http.Req
 	go h.orchestrator.StartBackgroundTTPMapping()
 	sendJSON(w, map[string]any{"status": "success", "message": "Mapeo de TTPs iniciado en segundo plano"}, http.StatusOK)
 }
+
 // POST /api/endpoints/{id}/containers
 func (h *OrchestratorHandler) AddContainerToEndpoint(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
@@ -982,7 +983,7 @@ func (h *OrchestratorHandler) AddContainerToEndpoint(w http.ResponseWriter, r *h
 // PUT /api/containers/{id}
 func (h *OrchestratorHandler) UpdateContainer(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
-	
+
 	var container domain.Container
 	if err := json.NewDecoder(r.Body).Decode(&container); err != nil {
 		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
@@ -1001,4 +1002,25 @@ func (h *OrchestratorHandler) UpdateContainer(w http.ResponseWriter, r *http.Req
 func (h *OrchestratorHandler) DeleteContainer(w http.ResponseWriter, r *http.Request) {
 	// Se puede delegar en el borrado genérico o tener lógica específica si hace falta
 	h.DeleteNode(w, r)
+}
+
+func (h *OrchestratorHandler) GetTTPMatrix(w http.ResponseWriter, r *http.Request) {
+	var projectID *int64
+	projectIDStr := r.URL.Query().Get("project_id")
+	if projectIDStr != "" {
+		parsedID, err := strconv.ParseInt(projectIDStr, 10, 64)
+		if err == nil {
+			projectID = &parsedID
+		}
+	}
+
+	matrix, err := h.orchestrator.GetTTPMatrix(r.Context(), projectID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	json.NewEncoder(w).Encode(matrix)
 }

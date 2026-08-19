@@ -115,7 +115,7 @@ func (r *threatActorRepo) GetTopThreatActors(ctx context.Context, limit int) ([]
 		if !ok {
 			continue
 		}
-		
+
 		ttpCountRaw, _ := record.Get("ttp_count")
 		ttpCount := int(ttpCountRaw.(int64))
 

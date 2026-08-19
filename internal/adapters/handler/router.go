@@ -66,6 +66,9 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* GET /api/infrastructure/mitre-ttp-count: Obtiene el numero total de TTPs en el catalogo MITRE. */
 	mux.HandleFunc("GET /api/infrastructure/mitre-ttp-count", h.GetMitreTTPCount)
 
+	/* GET /api/infrastructure/ttps: Obtiene la matriz de TTPs procesada, opcionalmente filtrada por project_id */
+	mux.HandleFunc("GET /api/infrastructure/ttps", h.GetTTPMatrix)
+
 	/* GET /api/infrastructure/ttp-sync-status: Obtiene el estado actual del mapeo de TTPs en segundo plano. */
 	mux.HandleFunc("GET /api/infrastructure/ttp-sync-status", h.GetTTPSyncStatus)
 

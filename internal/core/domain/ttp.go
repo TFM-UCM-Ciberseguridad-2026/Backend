@@ -20,3 +20,19 @@ type TTPMapping struct {
 	Confidence string `json:"confidence"` // "high" or "low"
 	Source     string `json:"source"`     // "cwe_mapping" or "cve_description_fallback"
 }
+
+// TTPMatrixItem represents a TTP mapped to multiple CVEs, ready for frontend rendering.
+
+type TTPMatrixCVE struct {
+	ID   string `json:"id"`
+	CVSS any    `json:"cvss"`
+	Desc string `json:"desc"`
+}
+
+type TTPMatrixItem struct {
+	ID     string         `json:"id"`
+	Name   string         `json:"name"`
+	Tactic string         `json:"tactic"`
+	Desc   string         `json:"desc"`
+	CVEs   []TTPMatrixCVE `json:"cves"`
+}

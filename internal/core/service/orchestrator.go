@@ -1843,3 +1843,8 @@ func (o *Orchestrator) AggregateProjectRiskFromCurrentEndpointScores(ctx context
 		countRiskyEndpoints(summaries),
 	)
 }
+
+func (o *Orchestrator) GetTTPMatrix(ctx context.Context, projectID *int64) ([]domain.TTPMatrixItem, error) {
+	return o.infraPort.GetTTPMatrix(ctx, projectID)
+}
+
