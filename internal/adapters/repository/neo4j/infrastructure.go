@@ -1251,12 +1251,11 @@ func (r *infrastructureRepo) GetTTPMatrix(ctx context.Context, projectID *int64)
 	}
 	params := map[string]interface{}{"project_id": pid}
 
-	// Consulta validada: resuelve las 3 rutas y no bloquea por saltos rígidos
 	query := `
 		MATCH (v:Vulnerability)
 		WHERE $project_id = 0 OR toString($project_id) = "0" OR EXISTS {
 			MATCH (p:Project)-[*1..6]->(v)
-			WHERE p.id = $project_id OR toString(p.id) = toString($project_id)
+			WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id)
 		}
 
 		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t1:TTP)
@@ -1304,9 +1303,9 @@ func (r *infrastructureRepo) GetTTPMatrix(ctx context.Context, projectID *int64)
 				if cvesList, ok := cvesRaw.([]interface{}); ok {
 					for _, c := range cvesList {
 						if cMap, ok := c.(map[string]interface{}); ok {
-							cveID, _ := cMap["id"].(string)
+							cveID := fmt.Sprint(cMap["id"])
 							cveCVSS := fmt.Sprintf("%v", cMap["cvss"])
-							cveDesc, _ := cMap["desc"].(string)
+							cveDesc := fmt.Sprint(cMap["desc"])
 							cves = append(cves, domain.TTPMatrixCVE{
 								ID:   cveID,
 								CVSS: cveCVSS,
