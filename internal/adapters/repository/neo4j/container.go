@@ -56,16 +56,26 @@ func (r *containerRepo) GetContainerImage(ctx context.Context, imageID string) (
 		if result.Next(ctx) {
 			node := result.Record().Values[0].(neo4j.Node)
 			props := node.GetProperties()
-			
+
 			getFloat := func(val any) float64 {
-				if val == nil { return 0.0 }
-				if f, ok := val.(float64); ok { return f }
-				if i, ok := val.(int64); ok { return float64(i) }
+				if val == nil {
+					return 0.0
+				}
+				if f, ok := val.(float64); ok {
+					return f
+				}
+				if i, ok := val.(int64); ok {
+					return float64(i)
+				}
 				return 0.0
 			}
 			getString := func(val any) string {
-				if val == nil { return "" }
-				if s, ok := val.(string); ok { return s }
+				if val == nil {
+					return ""
+				}
+				if s, ok := val.(string); ok {
+					return s
+				}
 				return ""
 			}
 
@@ -112,7 +122,7 @@ func (r *containerRepo) GetAllContainerImages(ctx context.Context) ([]domain.Con
 		if err != nil {
 			return nil, err
 		}
-		
+
 		var images []domain.ContainerImage
 		for result.Next(ctx) {
 			record := result.Record()
@@ -239,21 +249,35 @@ func (r *containerRepo) GetContainer(ctx context.Context, containerID string) (*
 			record := result.Record()
 			cNode := record.Values[0].(neo4j.Node)
 			props := cNode.GetProperties()
-			
+
 			getFloat := func(val any) float64 {
-				if val == nil { return 0.0 }
-				if f, ok := val.(float64); ok { return f }
-				if i, ok := val.(int64); ok { return float64(i) }
+				if val == nil {
+					return 0.0
+				}
+				if f, ok := val.(float64); ok {
+					return f
+				}
+				if i, ok := val.(int64); ok {
+					return float64(i)
+				}
 				return 0.0
 			}
 			getString := func(val any) string {
-				if val == nil { return "" }
-				if s, ok := val.(string); ok { return s }
+				if val == nil {
+					return ""
+				}
+				if s, ok := val.(string); ok {
+					return s
+				}
 				return ""
 			}
 			getInt := func(val any) int64 {
-				if val == nil { return 0 }
-				if i, ok := val.(int64); ok { return i }
+				if val == nil {
+					return 0
+				}
+				if i, ok := val.(int64); ok {
+					return i
+				}
 				return 0
 			}
 
@@ -261,20 +285,24 @@ func (r *containerRepo) GetContainer(ctx context.Context, containerID string) (*
 			hostID, _ := record.Get("host_id")
 
 			getBool := func(val any) bool {
-				if val == nil { return false }
-				if b, ok := val.(bool); ok { return b }
+				if val == nil {
+					return false
+				}
+				if b, ok := val.(bool); ok {
+					return b
+				}
 				return false
 			}
 
 			return &domain.Container{
-				ContainerID: getString(props["id"]),
-				Name:        getString(props["name"]),
-				State:       getString(props["state"]),
-				RiskScore:   getFloat(props["risk_score"]),
+				ContainerID:     getString(props["id"]),
+				Name:            getString(props["name"]),
+				State:           getString(props["state"]),
+				RiskScore:       getFloat(props["risk_score"]),
 				InternetExposed: getBool(props["internet_exposed"]),
-				Privileged:  getBool(props["privileged"]),
-				ImageID:     getString(imgID),
-				HostID:      getInt(hostID),
+				Privileged:      getBool(props["privileged"]),
+				ImageID:         getString(imgID),
+				HostID:          getInt(hostID),
 			}, nil
 		}
 		return nil, nil

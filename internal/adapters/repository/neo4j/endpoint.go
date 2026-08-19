@@ -198,7 +198,7 @@ func (r *endpointRepo) DeleteByID(ctx context.Context, id int64) error {
 
 	cleanupQuery := `
 		MATCH (n)
-		WHERE (n:Software OR n:Hardware OR n:IPAddress OR n:SoftwareInstallation OR n:Finding OR n:Remediation OR n:Container OR n:ContainerImage)
+		WHERE (n:Software OR n:Hardware OR n:IPAddress OR n:SoftwareInstallation OR n:Finding OR n:Remediation OR n:Container OR n:ContainerImage OR n:Vulnerability OR n:Exploit)
 		  AND NOT EXISTS((n)-[*1..5]-(:Endpoint)) AND NOT EXISTS((n)-[*1..5]-(:Project))
 		DETACH DELETE n
 	`

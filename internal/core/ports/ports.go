@@ -31,8 +31,8 @@ type VulnerabilityPort interface {
 	GetByID(ctx context.Context, cveID string) (*domain.Vulnerability, error)
 	DeleteByID(ctx context.Context, cveID string) error
 	LinkVulnerabilityToCWEs(ctx context.Context, cveID string, cwes []string) error
-	GetInferredTTPsByCVE(ctx context.Context, cveID string) ([]domain.TTP, error)
-	LinkInferredTTPsToVulnerability(ctx context.Context, cveID string) (int, error)
+	LinkTTPsToVulnerability(ctx context.Context, cveID, cweID string, ttps []string, confidence, source string) error
+	GetUnmappedVulnerabilities(ctx context.Context) ([]domain.Vulnerability, error)
 }
 
 type SoftwarePort interface {
@@ -189,7 +189,12 @@ type TTPPort interface {
 
 // MitreATTACKProvider obtiene el catálogo MITRE ATT&CK Enterprise desde el feed STIX 2.1.
 type MitreATTACKProvider interface {
-	FetchATTACKBundle(ctx context.Context) ([]domain.TTP, error)
+	FetchATTACKBundle(ctx context.Context) ([]domain.TTP, []domain.ThreatActor, []domain.ThreatActorTTPRelation, error)
+}
+
+type TTPMapper interface {
+	MapCWEToTTP(ctx context.Context, cwe string) ([]string, error)
+	MapEnrichedToTTPRaw(ctx context.Context, cwe, description, cvssVector string) ([]string, string, error)
 }
 
 type ThreatActorPort interface {
@@ -199,11 +204,14 @@ type ThreatActorPort interface {
 	DeleteByID(ctx context.Context, id string) error
 	RelateToTTP(ctx context.Context, actorID string, ttpID string) error
 	GetTopThreatActors(ctx context.Context, limit int) ([]domain.ThreatActorThreat, error)
+	SaveBatch(ctx context.Context, actors []domain.ThreatActor) error
+	SaveRelationshipsBatch(ctx context.Context, relations []domain.ThreatActorTTPRelation) error
 }
 
 type InfrastructurePort interface {
 	GetGraphData(ctx context.Context) (*domain.GraphData, error)
 	GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int, projectID int64) ([]domain.APTThreatResult, error)
+	GetTTPMatrix(ctx context.Context, projectID *int64) ([]domain.TTPMatrixItem, error)
 	GetTotalMitreTTPs(ctx context.Context) (int, error)
 	GetExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error)
 	ImportGraphData(ctx context.Context, data *domain.GraphData) error
@@ -247,6 +255,7 @@ type CAPECPort interface {
 	LinkCAPECToCWE(ctx context.Context, capecID string, cweID string) error
 	LinkCAPECToTTP(ctx context.Context, capecID string, ttpID string) error
 	SaveBatch(ctx context.Context, capecs []domain.CAPEC) error
+	GetTTPsByCWE(ctx context.Context, cweID string) ([]string, error)
 }
 
 // PatchProvider obtiene información de remediación (parches publicados y versiones

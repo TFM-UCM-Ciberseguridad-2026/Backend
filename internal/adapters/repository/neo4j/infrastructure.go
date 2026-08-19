@@ -30,9 +30,15 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 	query := `
 		MATCH (n)
 		WHERE NOT (n:ThreatActor OR n:TTP OR n:IPAddress)
-		OPTIONAL MATCH (c:CAPEC)-[:MAPS_TO_CWE]->(w:CWE) WHERE ("Vulnerability" IN labels(n)) AND ((n)-[:HAS_CWE]->(w) OR w.cwe_id IN n.cwe)
-		OPTIONAL MATCH (c)-[:MAPS_TO_TTP]->(t:TTP)
-		WITH n, collect(DISTINCT case when t.ttp_id is not null then {ttp_id: t.ttp_id, name: coalesce(t.name, ''), tactic: coalesce(t.tactic, ''), description: coalesce(t.description, '')} else null end) AS inferredTTPs
+		OPTIONAL MATCH (n)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(t1:TTP) WHERE "Vulnerability" IN labels(n)
+		WITH n, collect(DISTINCT t1) AS t1List
+		OPTIONAL MATCH (n)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t2:TTP) WHERE "Vulnerability" IN labels(n)
+		WITH n, t1List, collect(DISTINCT t2) AS t2List
+		OPTIONAL MATCH (n)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t3:TTP) WHERE "Vulnerability" IN labels(n)
+		WITH n, t1List, t2List, collect(DISTINCT t3) AS t3List
+		WITH n, t1List + t2List + t3List AS combinedTTPs
+		UNWIND case when size(combinedTTPs) > 0 then combinedTTPs else [null] end AS t
+		WITH n, collect(DISTINCT case when t is not null and t.ttp_id is not null then {ttp_id: t.ttp_id, name: coalesce(t.name, ''), tactic: coalesce(t.tactic, ''), description: coalesce(t.description, '')} else null end) AS inferredTTPs
 		WITH n, [x IN inferredTTPs WHERE x IS NOT NULL] AS cleanTTPs
 		WITH collect({
 			id: elementId(n), 
@@ -368,19 +374,25 @@ func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context,
 	// 2. Para cada ThreatActor, cuenta cuántas de esas TTPs utiliza
 	// 3. Calcula el porcentaje de cobertura y ordena descendentemente
 	query := `
-		// Paso 1: Obtener todas las TTPs únicas que apuntan a CVEs de la infraestructura a través de CWE y CAPEC
+		// Paso 1: Obtener todas las TTPs únicas que apuntan a CVEs de la infraestructura
 		MATCH (p:Project)-[:HAS_ENDPOINT]->(e:Endpoint)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
 		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE $project_id = 0 OR p.id = $project_id
-		MATCH (c:CAPEC)-[:MAPS_TO_CWE]->(w:CWE)
-		WHERE (v)-[:HAS_CWE]->(w) OR w.cwe_id IN v.cwe
-		MATCH (c)-[:MAPS_TO_TTP]->(ttp:TTP)
-		WITH collect(DISTINCT ttp) AS infraTTPs
+		
+		// Ruta A (Producción): Mapeos de Ollama directos o a través de CWE
+		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t1:TTP)
+		OPTIONAL MATCH (v)-[:MAPS_TO]->(t2:TTP)
+		
+		// Ruta B: Mapeo a través de CAPEC
+		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t3:TTP)
+		
+		WITH collect(DISTINCT coalesce(t1, t2, t3)) AS rawTTPs
+		WITH [t IN rawTTPs WHERE t IS NOT NULL] AS infraTTPs
 
 		// Paso 2: Para cada ThreatActor, calcular solapamiento con las TTPs de la infraestructura
 		UNWIND infraTTPs AS infraTTP
 		WITH infraTTPs, infraTTP
-		MATCH (ta:ThreatActor)-[:USES]->(infraTTP)
+		MATCH (ta:ThreatActor)-[:USES|USES_TTP]->(infraTTP)
 		WITH ta, infraTTPs,
 		     collect(DISTINCT infraTTP) AS matchedTTPs
 
@@ -1234,4 +1246,94 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 	})
 
 	return err
+}
+
+func (r *infrastructureRepo) GetTTPMatrix(ctx context.Context, projectID *int64) ([]domain.TTPMatrixItem, error) {
+	var pid int64 = 0
+	if projectID != nil {
+		pid = *projectID
+	}
+	params := map[string]interface{}{"project_id": pid}
+
+	query := `
+		MATCH (v:Vulnerability)
+		WHERE $project_id = 0 OR toString($project_id) = "0" OR EXISTS {
+			MATCH (p:Project)-[*1..6]->(v)
+			WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id)
+		}
+
+		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t1:TTP)
+		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t2:TTP)
+		OPTIONAL MATCH (v)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(t3:TTP)
+
+		WITH v, [t IN [t1, t2, t3] WHERE t IS NOT NULL] AS ttps_raw
+		UNWIND (CASE WHEN size(ttps_raw) > 0 THEN ttps_raw ELSE [null] END) AS t
+		WITH v, t WHERE t IS NOT NULL
+
+		WITH t, collect(DISTINCT {
+			id: coalesce(v.cve_id, v.id, ''),
+			cvss: coalesce(v.cvss_score, v.base_score, 'N/A'),
+			desc: coalesce(v.description, '')
+		}) AS cves
+
+		RETURN coalesce(t.ttp_id, t.id, '') AS ttp_id, 
+		       coalesce(t.name, '') AS name, 
+		       coalesce(t.tactic, t.tactics, '') AS tactic, 
+		       coalesce(t.description, '') AS desc, 
+		       cves
+	`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, query, params)
+		if err != nil {
+			return nil, err
+		}
+
+		var matrix []domain.TTPMatrixItem
+		for result.Next(ctx) {
+			record := result.Record()
+
+			id, _ := record.Get("ttp_id")
+			name, _ := record.Get("name")
+			tactic, _ := record.Get("tactic")
+			desc, _ := record.Get("desc")
+			cvesRaw, _ := record.Get("cves")
+
+			var cves []domain.TTPMatrixCVE
+			if cvesRaw != nil {
+				if cvesList, ok := cvesRaw.([]interface{}); ok {
+					for _, c := range cvesList {
+						if cMap, ok := c.(map[string]interface{}); ok {
+							cveID := fmt.Sprint(cMap["id"])
+							cveCVSS := fmt.Sprintf("%v", cMap["cvss"])
+							cveDesc := fmt.Sprint(cMap["desc"])
+							cves = append(cves, domain.TTPMatrixCVE{
+								ID:   cveID,
+								CVSS: cveCVSS,
+								Desc: cveDesc,
+							})
+						}
+					}
+				}
+			}
+
+			matrix = append(matrix, domain.TTPMatrixItem{
+				ID:     fmt.Sprint(id),
+				Name:   fmt.Sprint(name),
+				Tactic: fmt.Sprint(tactic),
+				Desc:   fmt.Sprint(desc),
+				CVEs:   cves,
+			})
+		}
+		return matrix, nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return res.([]domain.TTPMatrixItem), nil
 }
