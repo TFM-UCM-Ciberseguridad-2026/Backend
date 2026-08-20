@@ -151,7 +151,7 @@ func LoadConfig() (*Config, error) {
 		},
 		Ollama: OllamaConfig{
 			Host:  getEnv("OLLAMA_HOST", "http://localhost:11434"),
-			Model: getEnv("OLLAMA_MODEL", "gemma4:e4b"),
+			Model: getEnv("OLLAMA_MODEL", "gemma3:4b"),
 		},
 	}
 
