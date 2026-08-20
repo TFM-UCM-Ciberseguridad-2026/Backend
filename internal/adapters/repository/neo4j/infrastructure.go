@@ -821,15 +821,22 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 					// Determinar si es contenedor basado en el primer allNets (todos comparten el endpoint)
 					firstNetMap := getMap(allNetsRaw[0])
 					isContainer := getBoolLocal(firstNetMap["is_container"])
+					containerIsSource := false // el contenedor mismo es el punto de entrada (e1 es Container)
 					if isContainer {
 						containerProps := getNodeProps(firstNetMap["container"])
 						contName := getStringLocal(containerProps["name"])
 						if contName != "" && contName != state.PrevEndpoint {
 							targetName = contName
 							targetID = 0
+						} else if contName != "" && contName == state.PrevEndpoint {
+							// El contenedor es el origen: la vuln lo permite escapar, pero no hay un "target" endpoint específico
+							// (el escape es a la red del host). targetName = "" para que el frontend lo renderice sin destino.
+							containerIsSource = true
+							targetName = "" // sin destino: es un paso de "container image escape"
+							targetID = 0
 						}
 					}
-					if targetName == "" || targetName == state.PrevEndpoint {
+					if targetName == "" || (!isContainer && targetName == state.PrevEndpoint) {
 						targetName = getStringLocal(endpointProps["name"])
 						if targetName == "" || targetName == state.PrevEndpoint {
 							targetName = getStringLocal(endpointProps["nombre"])
@@ -839,7 +846,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 						}
 					}
 
-					if targetName == state.PrevEndpoint {
+					if !isContainer && targetName == state.PrevEndpoint {
 						state.Offset--
 						nextActivePaths = append(nextActivePaths, state)
 						continue
@@ -862,8 +869,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 							}
 							if bestSoftware != nil {
 								chosenNets = append(chosenNets, bestSoftware)
-							}
-							if bestImage != nil {
+							} else if bestImage != nil {
 								chosenNets = append(chosenNets, bestImage)
 							}
 						}
@@ -949,9 +955,15 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 
 							clonedPath.TotalRiskScore += risk
 
+							// Si el contenedor es el origen, el siguiente paso parte del container name
+							nextPrev := targetName
+							if containerIsSource {
+								nextPrev = state.PrevEndpoint // mantener el container name como previo para siguientes saltos
+							}
+
 							newState := activePathState{
 								Path:         clonedPath,
-								PrevEndpoint: targetName,
+								PrevEndpoint: nextPrev,
 								Offset:       state.Offset,
 							}
 

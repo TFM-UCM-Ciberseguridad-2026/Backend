@@ -51,7 +51,8 @@ type Orchestrator struct {
 	capecProvider       ports.CAPECProvider
 	ttpPort             ports.TTPPort
 	mitreAttackProvider ports.MitreATTACKProvider
-	activeBgEnrichments int64 // contador atómico de goroutines de enriquecimiento activas
+	activeBgEnrichments int64      // contador atómico de goroutines de enriquecimiento activas
+	nvdSyncSem          chan struct{} // semáforo global: limita a 2 llamadas NVD síncronas simultáneas en total
 }
 
 func NewOrchestrator(
@@ -87,6 +88,7 @@ func NewOrchestrator(
 		patchPort:        patchPort,
 		dbHelper:         dbHelper,
 		vulnScannerPort:  vulnScannerPort,
+		nvdSyncSem:       make(chan struct{}, 2), // máximo 2 llamadas NVD síncronas en total a la vez
 	}
 }
 
@@ -1279,42 +1281,57 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		return vulnsToEnrich[i].BaseScore > vulnsToEnrich[j].BaseScore
 	})
 
-	// 3. Enriquecer síncronamente los TOP 3 CVEs más críticos para disponibilidad inmediata
+	// 3. Enriquecer síncronamente hasta 2 CVEs más críticos, limitado globalmente con semáforo
+	// para que múltiples escaneos simultáneos no saturen NVD (límite global: 2 slots en total).
 	if o.vulnScannerPort != nil && len(vulnsToEnrich) > 0 {
-		topSyncCount := 3
+		topSyncCount := 2
 		if len(vulnsToEnrich) < topSyncCount {
 			topSyncCount = len(vulnsToEnrich)
 		}
 
-		fmt.Printf("[Scout Sync] Enriqueciendo síncronamente los TOP %d CVEs más críticos...\n", topSyncCount)
-		for i := 0; i < topSyncCount; i++ {
-			v := vulnsToEnrich[i]
-			enriched, err := o.vulnScannerPort.FetchByCVE(ctx, v.CVEID)
-			if err == nil && enriched != nil {
-				v.CWE = enriched.CWE
-				v.Exploit = enriched.Exploit
-				v.KEV = enriched.KEV
-				if v.CVSSVector == "" {
-					v.CVSSVector = enriched.CVSSVector
+		enriched := 0
+		fmt.Printf("[Scout Sync] Intentando enriquecer TOP %d CVEs síncronamente (sem global)...\n", topSyncCount)
+		for i := 0; i < len(vulnsToEnrich) && enriched < topSyncCount; i++ {
+			// Intentar adquirir slot del semáforo sin bloquear (non-blocking)
+			select {
+			case o.nvdSyncSem <- struct{}{}:
+				// Slot adquirido: ejecutar enriquecimiento y liberar
+				v := vulnsToEnrich[i]
+				enrichedData, err := o.vulnScannerPort.FetchByCVE(ctx, v.CVEID)
+				<-o.nvdSyncSem // liberar slot inmediatamente tras la llamada
+				if err == nil && enrichedData != nil {
+					v.CWE = enrichedData.CWE
+					v.Exploit = enrichedData.Exploit
+					v.KEV = enrichedData.KEV
+					if v.CVSSVector == "" {
+						v.CVSSVector = enrichedData.CVSSVector
+					}
+					if v.NVDVector == "" {
+						v.NVDVector = enrichedData.NVDVector
+					}
+					if v.BaseScore == 0 {
+						v.BaseScore = enrichedData.BaseScore
+					}
+					if enrichedData.Description != "" {
+						v.Description = enrichedData.Description
+					}
+					v.NVDEnriched = true
+					_ = o.vulnPort.Save(ctx, &v)
+					descSnippet := v.Description
+					if len(descSnippet) > 40 {
+						descSnippet = descSnippet[:40]
+					}
+					fmt.Printf("[Scout Sync] CVE %s enriquecido: %s...\n", v.CVEID, descSnippet)
 				}
-				if v.NVDVector == "" {
-					v.NVDVector = enriched.NVDVector
+				vulnsToEnrich[i] = v
+				enriched++
+				if enriched < topSyncCount {
+					time.Sleep(1 * time.Second)
 				}
-				if v.BaseScore == 0 {
-					v.BaseScore = enriched.BaseScore
-				}
-				if enriched.Description != "" {
-					v.Description = enriched.Description
-				}
-				v.NVDEnriched = true
-				_ = o.vulnPort.Save(ctx, &v)
-				descSnippet := v.Description
-				if len(descSnippet) > 40 {
-					descSnippet = descSnippet[:40]
-				}
-				fmt.Printf("[Scout Sync] TOP CVE %s enriquecido síncronamente: %s...\n", v.CVEID, descSnippet)
+			default:
+				// Semáforo lleno: otro escaneo ya tiene 2 slots. Mover este CVE a background.
+				fmt.Printf("[Scout Sync] Semáforo NVD lleno, CVE %s irá a background\n", vulnsToEnrich[i].CVEID)
 			}
-			time.Sleep(1 * time.Second)
 		}
 
 		vulnsToEnrich = vulnsToEnrich[topSyncCount:]
