@@ -494,14 +494,14 @@ func (a *NistAPIAdapter) FetchByCVE(ctx context.Context, cve string) (*domain.Vu
 func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 	cve := dto.CVE
 
-	// 1. Extraer descripción (Prioridad Español, fallback a Inglés)
+	// 1. Extraer descripción (Prioridad Inglés, fallback a Español)
 	var finalDesc string
 	for _, d := range cve.Descriptions {
-		if d.Lang == "es" {
+		if d.Lang == "en" {
 			finalDesc = d.Value
 			break
 		}
-		if d.Lang == "en" {
+		if d.Lang == "es" {
 			finalDesc = d.Value
 		}
 	}
