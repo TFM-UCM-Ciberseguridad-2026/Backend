@@ -174,6 +174,8 @@ type VulnerabilityAPIscanner interface {
 	FetchByCPE(ctx context.Context, cpe string) ([]domain.Vulnerability, error)
 	// FetchByDate obtiene las vulnerabilidades modificadas en un rango de fechas.
 	FetchByDate(ctx context.Context, startDate, endDate time.Time) ([]domain.Vulnerability, error)
+	// FetchByCVE obtiene el detalle completo de una vulnerabilidad específica.
+	FetchByCVE(ctx context.Context, cve string) (*domain.Vulnerability, error)
 }
 
 //Los CRUDS para el mitre... consutarlo con Julve
@@ -206,6 +208,8 @@ type InfrastructurePort interface {
 	GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int, projectID int64) ([]domain.APTThreatResult, error)
 	GetTotalMitreTTPs(ctx context.Context) (int, error)
 	GetExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error)
+	// IsAnalysisPending comprueba si hay vulnerabilidades de red pendientes de enriquecimiento en background.
+	IsAnalysisPending(ctx context.Context, projectID int64) (bool, error)
 	ImportGraphData(ctx context.Context, data *domain.GraphData) error
 }
 

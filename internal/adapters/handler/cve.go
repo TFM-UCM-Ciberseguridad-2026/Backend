@@ -196,7 +196,7 @@ func (h *OrchestratorHandler) ScanContainerImageVulnerabilities(w http.ResponseW
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	
+
 	fmt.Printf("[ScanContainerImage] Escaneo completado para %s\n", imageName)
 
 	// Responder con éxito una vez terminado
@@ -206,11 +206,10 @@ func (h *OrchestratorHandler) ScanContainerImageVulnerabilities(w http.ResponseW
 	}, http.StatusOK)
 }
 
-
 // POST /api/containers/{id}/installations
 func (h *OrchestratorHandler) RegisterContainerSoftwareInstallation(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
-	
+
 	var req struct {
 		Software     domain.Software             `json:"software"`
 		Installation domain.SoftwareInstallation `json:"installation"`
@@ -272,7 +271,7 @@ func (h *OrchestratorHandler) AssociateVulnerabilitiesAndRemediations(w http.Res
 // GET /api/findings/{id}/vulnerabilities
 func (h *OrchestratorHandler) GetFindingVulnerabilities(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
-	
+
 	var findingID any
 	if idInt, err := strconv.ParseInt(idStr, 10, 64); err == nil {
 		findingID = idInt
@@ -364,6 +363,14 @@ func (h *OrchestratorHandler) GetExploitationPaths(w http.ResponseWriter, r *htt
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Comprobar si hay análisis en background
+	isPending, err := h.orchestrator.IsAnalysisPending(r.Context(), projectID)
+	if err == nil && isPending {
+		w.Header().Set("X-Analysis-Pending", "true")
+		w.Header().Set("X-Analysis-Warning", url.PathEscape("Se ha detectado una imagen y se está analizando en segundo plano. Podrían surgir más rutas de ataque en el futuro."))
+	}
+
 	sendJSON(w, paths, http.StatusOK)
 }
 
@@ -972,7 +979,7 @@ func (h *OrchestratorHandler) AddContainerToEndpoint(w http.ResponseWriter, r *h
 // PUT /api/containers/{id}
 func (h *OrchestratorHandler) UpdateContainer(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
-	
+
 	var container domain.Container
 	if err := json.NewDecoder(r.Body).Decode(&container); err != nil {
 		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)

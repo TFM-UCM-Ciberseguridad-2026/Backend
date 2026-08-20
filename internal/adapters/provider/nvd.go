@@ -449,6 +449,47 @@ func (a *NistAPIAdapter) FetchByDate(ctx context.Context, startDate, endDate tim
 	return vulnerabilities, nil
 }
 
+// FetchByCVE consulta la API REST oficial de NIST NVD v2.0 usando un identificador CVE.
+func (a *NistAPIAdapter) FetchByCVE(ctx context.Context, cve string) (*domain.Vulnerability, error) {
+	escapedCVE := url.QueryEscape(cve)
+	reqURL := fmt.Sprintf("%s?cveId=%s", a.baseURL, escapedCVE)
+
+	resp, err := a.doRequestWithRetry(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("error creando request para NIST por CVE: %w", err)
+		}
+		return req, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error ejecutando llamada HTTP a NIST por CVE: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, nil // No se encontró
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return nil, fmt.Errorf("api nist rate limit por CVE %s: status 429 tras reintentos", cve)
+		}
+		return nil, fmt.Errorf("api nist devolvió status code inválido por CVE %s: %d", cve, resp.StatusCode)
+	}
+
+	var apiResponse NistResponseDTO
+	if err := json.NewDecoder(resp.Body).Decode(&apiResponse); err != nil {
+		return nil, fmt.Errorf("error decodificando JSON de NIST por CVE: %w", err)
+	}
+
+	if len(apiResponse.Vulnerabilities) == 0 {
+		return nil, nil // Sin resultados
+	}
+
+	// Como buscamos por ID exacto, devolvemos el primero
+	vuln := toDomainEntity(apiResponse.Vulnerabilities[0])
+	return &vuln, nil
+}
+
 // toDomainEntity es el "Traductor" (Mapper) de Infraestructura -> Dominio
 func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 	cve := dto.CVE

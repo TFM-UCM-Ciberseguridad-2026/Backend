@@ -408,8 +408,8 @@ func (r *findingRepo) EnsureForContainerImageAndCVE(ctx context.Context, imageID
 	findingKey := imageID + "|" + cveID
 
 	query := `
-		MATCH (ci:ContainerImage {id: $image_id})
-		MATCH (v:Vulnerability {cve_id: $cve_id})
+		MERGE (ci:ContainerImage {id: $image_id})
+		MERGE (v:Vulnerability {cve_id: $cve_id})
 		MERGE (n:Finding {finding_key: $finding_key})
 		ON CREATE SET
 			n.id = $id,

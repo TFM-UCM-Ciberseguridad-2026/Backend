@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -49,6 +51,7 @@ type Orchestrator struct {
 	capecProvider       ports.CAPECProvider
 	ttpPort             ports.TTPPort
 	mitreAttackProvider ports.MitreATTACKProvider
+	activeBgEnrichments int64 // contador atómico de goroutines de enriquecimiento activas
 }
 
 func NewOrchestrator(
@@ -1185,6 +1188,11 @@ func (o *Orchestrator) GenerateExploitationPaths(ctx context.Context, projectID 
 	return o.infraPort.GetExploitationPaths(ctx, projectID)
 }
 
+// IsAnalysisPending comprueba si hay enriquecimiento NVD activo en background.
+func (o *Orchestrator) IsAnalysisPending(ctx context.Context, projectID int64) (bool, error) {
+	return atomic.LoadInt64(&o.activeBgEnrichments) > 0, nil
+}
+
 // SaveContainerImage registra una imagen de contenedor en Neo4j.
 func (o *Orchestrator) SaveContainerImage(ctx context.Context, image *domain.ContainerImage) error {
 	return o.containerPort.SaveContainerImage(ctx, image)
@@ -1209,19 +1217,33 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		return fmt.Errorf("error escaneando imagen %s: %w", imageName, err)
 	}
 
-	// 2. Guardar las vulnerabilidades y enlazarlas a la imagen
+	// 2. Guardar las vulnerabilidades y enlazarlas a la imagen de forma síncrona
+	var vulnsToEnrich []domain.Vulnerability
 	for _, v := range vulns {
+		// Obtener vulnerabilidad existente para no perder enriquecimiento previo (ej. NVD)
+		if existingVuln, err := o.vulnPort.GetByID(ctx, v.CVEID); err == nil && existingVuln != nil {
+			v.NVDEnriched = existingVuln.NVDEnriched
+			if len(v.CWE) == 0 {
+				v.CWE = existingVuln.CWE
+			}
+			if !v.Exploit {
+				v.Exploit = existingVuln.Exploit
+			}
+			if !v.KEV {
+				v.KEV = existingVuln.KEV
+			}
+			if v.CVSSVector == "" {
+				v.CVSSVector = existingVuln.CVSSVector
+			}
+			if v.NVDVector == "" {
+				v.NVDVector = existingVuln.NVDVector
+			}
+		}
+
 		// Guardar Vulnerabilidad
 		err = o.vulnPort.Save(ctx, &v)
 		if err != nil {
-			// Podría fallar si ya existe, idealmente debería haber un Update o ignorar error de duplicado.
-			// Para esta PoC ignoramos si ya existe.
-		}
-
-		// Enlazar a la imagen
-		err = o.containerPort.LinkVulnerabilityToImage(ctx, imageID, v.CVEID)
-		if err != nil {
-			return fmt.Errorf("error enlazando CVE %s a imagen %s: %w", v.CVEID, imageID, err)
+			// Ignoramos error de duplicado
 		}
 
 		// Crear un Finding (Hallazgo) para esta imagen y vulnerabilidad
@@ -1245,6 +1267,97 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		if err != nil {
 			return fmt.Errorf("error creando finding para imagen %s y CVE %s: %w", imageID, v.CVEID, err)
 		}
+
+		// Filtrar para enriquecimiento asíncrono: toda vulnerabilidad no enriquecida
+		if !v.NVDEnriched {
+			vulnsToEnrich = append(vulnsToEnrich, v)
+		}
+	}
+
+	// Ordenar por BaseScore descendente (CRITICAL -> HIGH -> MEDIUM -> LOW) para enriquecer primero las más severas
+	sort.Slice(vulnsToEnrich, func(i, j int) bool {
+		return vulnsToEnrich[i].BaseScore > vulnsToEnrich[j].BaseScore
+	})
+
+	// 3. Enriquecer síncronamente los TOP 3 CVEs más críticos para disponibilidad inmediata
+	if o.vulnScannerPort != nil && len(vulnsToEnrich) > 0 {
+		topSyncCount := 3
+		if len(vulnsToEnrich) < topSyncCount {
+			topSyncCount = len(vulnsToEnrich)
+		}
+
+		fmt.Printf("[Scout Sync] Enriqueciendo síncronamente los TOP %d CVEs más críticos...\n", topSyncCount)
+		for i := 0; i < topSyncCount; i++ {
+			v := vulnsToEnrich[i]
+			enriched, err := o.vulnScannerPort.FetchByCVE(ctx, v.CVEID)
+			if err == nil && enriched != nil {
+				v.CWE = enriched.CWE
+				v.Exploit = enriched.Exploit
+				v.KEV = enriched.KEV
+				if v.CVSSVector == "" {
+					v.CVSSVector = enriched.CVSSVector
+				}
+				if v.NVDVector == "" {
+					v.NVDVector = enriched.NVDVector
+				}
+				if v.BaseScore == 0 {
+					v.BaseScore = enriched.BaseScore
+				}
+				if enriched.Description != "" {
+					v.Description = enriched.Description
+				}
+				v.NVDEnriched = true
+				_ = o.vulnPort.Save(ctx, &v)
+				descSnippet := v.Description
+				if len(descSnippet) > 40 {
+					descSnippet = descSnippet[:40]
+				}
+				fmt.Printf("[Scout Sync] TOP CVE %s enriquecido síncronamente: %s...\n", v.CVEID, descSnippet)
+			}
+			time.Sleep(1 * time.Second)
+		}
+
+		vulnsToEnrich = vulnsToEnrich[topSyncCount:]
+	}
+
+	// 4. Procesamiento en Background (Goroutine) para el resto de vulnerabilidades
+	if o.vulnScannerPort != nil && len(vulnsToEnrich) > 0 {
+		atomic.AddInt64(&o.activeBgEnrichments, 1)
+		go func(vulns []domain.Vulnerability, port ports.VulnerabilityAPIscanner, repo ports.VulnerabilityPort) {
+			defer atomic.AddInt64(&o.activeBgEnrichments, -1)
+			bgCtx := context.Background() // Contexto separado porque el de la request puede expirar
+			fmt.Printf("[Scout Sync Async] Iniciando enriquecimiento NVD de %d CVEs restantes en background...\n", len(vulns))
+			for _, v := range vulns {
+				enriched, err := port.FetchByCVE(bgCtx, v.CVEID)
+				if err == nil {
+					if enriched != nil {
+						v.CWE = enriched.CWE
+						v.Exploit = enriched.Exploit
+						v.KEV = enriched.KEV
+						if v.CVSSVector == "" {
+							v.CVSSVector = enriched.CVSSVector
+						}
+						if v.NVDVector == "" {
+							v.NVDVector = enriched.NVDVector
+						}
+						if v.BaseScore == 0 {
+							v.BaseScore = enriched.BaseScore
+						}
+						if enriched.Description != "" {
+							v.Description = enriched.Description
+						}
+					}
+					v.NVDEnriched = true
+					// Actualizar la vulnerabilidad en la base de datos
+					_ = repo.Save(bgCtx, &v)
+				} else {
+					fmt.Printf("[Scout Sync Async] Error enriqueciendo %s: %v\n", v.CVEID, err)
+				}
+				// Evitar saturar el NVD (Límite sin API Key es 5 peticiones cada 30s -> ~1 cada 6s)
+				time.Sleep(7 * time.Second)
+			}
+			fmt.Println("[Scout Sync Async] Enriquecimiento NVD finalizado.")
+		}(vulnsToEnrich, o.vulnScannerPort, o.vulnPort)
 	}
 
 	return nil
