@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -475,6 +476,7 @@ type internalVuln struct {
 	IsContainer   bool
 	ContainerID   string
 	ContainerName string
+	VulnSource    string // "host_software", "container_software", "container_image"
 }
 
 // Genera una firma única para la secuencia completa de la ruta: [TargetAsset:Vulnerabilidad]
@@ -486,16 +488,17 @@ func getPathSignature(steps []domain.AttackStep) string {
 	return strings.Join(parts, "->")
 }
 
-// GetExploitationPaths extrae el subgrafo de Neo4j y calcula TODAS las combinaciones posibles de rutas en memoria (Go).
+// GetExploitationPaths extrae el subgrafo de Neo4j y calcula todas las combinaciones posibles de rutas en memoria (Go).
 func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	// Extracción liviana de subgrafo desde Neo4j
 	query := `
 		MATCH (p:Project)
 		WHERE $projectID = 0 OR p.id = $projectID
 		MATCH (p)-[:HAS_ENDPOINT]->(e:Endpoint)
+		WHERE NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
+		
 		OPTIONAL MATCH (e)-[:CONNECTED_TO]->(net:Network)
 		OPTIONAL MATCH (e)-[:HOSTS]->(c:Container)
 		OPTIONAL MATCH (c)-[:CONNECTED_TO]->(cnet:Network)
@@ -579,6 +582,24 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			}
 			return 0
 		}
+		getStringSlice := func(m map[string]any, key string) []string {
+			if m == nil {
+				return nil
+			}
+			if raw, ok := m[key].([]any); ok {
+				res := make([]string, 0, len(raw))
+				for _, item := range raw {
+					if s, ok := item.(string); ok {
+						res = append(res, s)
+					}
+				}
+				return res
+			}
+			if raw, ok := m[key].([]string); ok {
+				return raw
+			}
+			return nil
+		}
 
 		for result.Next(ctx) {
 			record := result.Record()
@@ -604,7 +625,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			}
 			assets[epElemID] = endpointAsset
 
-			// Process Endpoint Networks
+			// Redes del Endpoint
 			if netsRaw, ok := record.Get("e_networks"); ok && netsRaw != nil {
 				if netList, ok := netsRaw.([]any); ok {
 					for _, netAny := range netList {
@@ -613,7 +634,13 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 							continue
 						}
 						netElemID := getString(netMap, "elementId")
-						netName := getString(netMap, "name")
+						netName := getString(netMap, "nombre")
+						if netName == "" {
+							netName = getString(netMap, "name")
+						}
+						if netName == "" {
+							netName = getString(netMap, "cidr")
+						}
 						if netElemID != "" {
 							assets[netElemID] = internalAsset{
 								ID:   netElemID,
@@ -626,7 +653,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 				}
 			}
 
-			// Process Containers
+			// Contenedores del Endpoint
 			if containersRaw, ok := record.Get("containers"); ok && containersRaw != nil {
 				if contList, ok := containersRaw.([]any); ok {
 					for _, cAny := range contList {
@@ -639,19 +666,21 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 						cState := strings.ToLower(getString(cMap, "state"))
 						if cElemID != "" {
 							assets[cElemID] = internalAsset{
-								ID:         cElemID,
-								Name:       cName,
-								Type:       "Container",
-								State:      cState,
-								Privileged: getBool(cMap, "privileged"),
+								ID:              cElemID,
+								Name:            cName,
+								Type:            "Container",
+								State:           cState,
+								Privileged:      getBool(cMap, "privileged"),
+								InternetExposed: getBool(cMap, "internet_exposed"),
 							}
 							containerHosts[cElemID] = epElemID
+							addAdjacency(epElemID, cElemID)
 						}
 					}
 				}
 			}
 
-			// Process Container Networks
+			// Redes de los Contenedores
 			if cnetsRaw, ok := record.Get("c_networks"); ok && cnetsRaw != nil {
 				if cnetList, ok := cnetsRaw.([]any); ok {
 					for _, cnetAny := range cnetList {
@@ -660,7 +689,13 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 							continue
 						}
 						cnetElemID := getString(cnetMap, "elementId")
-						cnetName := getString(cnetMap, "name")
+						cnetName := getString(cnetMap, "nombre")
+						if cnetName == "" {
+							cnetName = getString(cnetMap, "name")
+						}
+						if cnetName == "" {
+							cnetName = getString(cnetMap, "cidr")
+						}
 						if cnetElemID != "" {
 							assets[cnetElemID] = internalAsset{
 								ID:   cnetElemID,
@@ -672,8 +707,8 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 				}
 			}
 
-			// Parse Vulnerabilities function
-			parseVulnRecord := func(assetID string, siMap, fMap, vMap map[string]any, isContainer bool, containerID, containerName string) {
+			// Función para parsear vulnerabilidades
+			parseVulnRecord := func(assetID string, siMap, fMap, vMap map[string]any, isContainer bool, containerID, containerName, vulnSource string) {
 				if vMap == nil {
 					return
 				}
@@ -702,11 +737,12 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 					IsContainer:   isContainer,
 					ContainerID:   containerID,
 					ContainerName: containerName,
+					VulnSource:    vulnSource,
 				}
 				assetVulns[assetID] = append(assetVulns[assetID], v)
 			}
 
-			// Parse Endpoint native Vulns
+			// 1. Vulns nativas del Endpoint
 			if eVulnsRaw, ok := record.Get("e_vulns"); ok && eVulnsRaw != nil {
 				if list, ok := eVulnsRaw.([]any); ok {
 					for _, item := range list {
@@ -717,12 +753,12 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 						siMap, _ := m["si"].(map[string]any)
 						fMap, _ := m["f"].(map[string]any)
 						vMap, _ := m["v"].(map[string]any)
-						parseVulnRecord(epElemID, siMap, fMap, vMap, false, "", "")
+						parseVulnRecord(epElemID, siMap, fMap, vMap, false, "", "", "host_software")
 					}
 				}
 			}
 
-			// Parse Container Software Vulns
+			// 2. Vulns de Software del Contenedor
 			if cSwVulnsRaw, ok := record.Get("c_sw_vulns"); ok && cSwVulnsRaw != nil {
 				if list, ok := cSwVulnsRaw.([]any); ok {
 					for _, item := range list {
@@ -736,14 +772,13 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 						vMap, _ := m["v"].(map[string]any)
 						cAsset := assets[cID]
 						if cID != "" {
-							parseVulnRecord(cID, siMap, fMap, vMap, true, cID, cAsset.Name)
-							parseVulnRecord(epElemID, siMap, fMap, vMap, true, cID, cAsset.Name)
+							parseVulnRecord(cID, siMap, fMap, vMap, true, cID, cAsset.Name, "container_software")
 						}
 					}
 				}
 			}
 
-			// Parse Container Image Vulns
+			// 3. Vulns de Imagen del Contenedor
 			if cImgVulnsRaw, ok := record.Get("c_img_vulns"); ok && cImgVulnsRaw != nil {
 				if list, ok := cImgVulnsRaw.([]any); ok {
 					for _, item := range list {
@@ -756,14 +791,13 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 						vMap, _ := m["v"].(map[string]any)
 						cAsset := assets[cID]
 						if cID != "" {
-							parseVulnRecord(cID, nil, fMap, vMap, true, cID, cAsset.Name)
-							parseVulnRecord(epElemID, nil, fMap, vMap, true, cID, cAsset.Name)
+							parseVulnRecord(cID, nil, fMap, vMap, true, cID, cAsset.Name, "container_image")
 						}
 					}
 				}
 			}
 
-			// Parse Container Direct Image Vulns
+			// 4. Vulns directas de Imagen sin Finding
 			if cDirImgVulnsRaw, ok := record.Get("c_direct_img_vulns"); ok && cDirImgVulnsRaw != nil {
 				if list, ok := cDirImgVulnsRaw.([]any); ok {
 					for _, item := range list {
@@ -781,15 +815,14 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 								"severity":   getString(vMap, "severity"),
 								"status":     "OPEN",
 							}
-							parseVulnRecord(cID, nil, fMap, vMap, true, cID, cAsset.Name)
-							parseVulnRecord(epElemID, nil, fMap, vMap, true, cID, cAsset.Name)
+							parseVulnRecord(cID, nil, fMap, vMap, true, cID, cAsset.Name, "container_image")
 						}
 					}
 				}
 			}
 		}
 
-		// REGLAS DE SEGURIDAD
+		// Helpers de evaluación de reglas
 		isAVNetwork := func(v internalVuln) bool {
 			cvss := strings.ToUpper(v.CVSSVector)
 			nvd := strings.ToUpper(v.NVDVector)
@@ -801,6 +834,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			rceCWEs := map[string]bool{
 				"CWE-94": true, "CWE-78": true, "CWE-77": true,
 				"CWE-502": true, "CWE-434": true, "CWE-95": true, "CWE-20": true,
+				"CWE-119": true, "CWE-120": true, "CWE-22": true,
 			}
 			for _, cwe := range v.CWEs {
 				if rceCWEs[cwe] {
@@ -811,33 +845,58 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 				return true
 			}
 			desc := strings.ToLower(v.Description)
-			return strings.Contains(desc, "remote code execution") ||
+			if strings.Contains(desc, "remote code execution") ||
 				strings.Contains(desc, "rce") ||
 				strings.Contains(desc, "command injection") ||
-				strings.Contains(desc, "code injection")
+				strings.Contains(desc, "code injection") {
+				return true
+			}
+
+			cvssUpper := strings.ToUpper(v.CVSSVector)
+			return strings.Contains(cvssUpper, "C:H") && strings.Contains(cvssUpper, "I:H")
 		}
 
 		isContainerLPE := func(v internalVuln, cAsset internalAsset) bool {
 			if cAsset.Privileged {
 				return true
 			}
-			cvss := strings.ToUpper(v.CVSSVector)
-			if strings.Contains(cvss, "AV:L") && strings.Contains(cvss, "C:H") && strings.Contains(cvss, "I:H") {
+			desc := strings.ToLower(v.Description)
+			return strings.Contains(desc, "escape") || strings.Contains(desc, "privilege escalation")
+		}
+
+		canContainerEscape := func(cAsset internalAsset) bool {
+			if cAsset.Privileged {
 				return true
 			}
-			desc := strings.ToLower(v.Description)
-			if strings.Contains(desc, "escape") || strings.Contains(desc, "privilege escalation") {
-				return true
+			for _, v := range assetVulns[cAsset.ID] {
+				if isContainerLPE(v, cAsset) {
+					return true
+				}
 			}
 			return false
 		}
 
 		isHostLPE := func(v internalVuln) bool {
 			cvss := strings.ToUpper(v.CVSSVector)
-			return strings.Contains(cvss, "AV:L") && strings.Contains(cvss, "C:H") && strings.Contains(cvss, "I:H")
+			nvd := strings.ToUpper(v.NVDVector)
+			return (strings.Contains(cvss, "AV:L") && strings.Contains(cvss, "C:H") && strings.Contains(cvss, "I:H")) ||
+				(strings.Contains(nvd, "AV:L") && strings.Contains(nvd, "C:H") && strings.Contains(nvd, "I:H"))
 		}
 
-		// Puntos de Entrada Candidatos (Internet + Running + RCE en Red)
+		hasEndpointRoot := func(targetVuln internalVuln, epVulns []internalVuln) bool {
+			cvssUpper := strings.ToUpper(targetVuln.CVSSVector)
+			if strings.Contains(cvssUpper, "C:H") && strings.Contains(cvssUpper, "I:H") && strings.Contains(cvssUpper, "A:H") {
+				return true
+			}
+			for _, v := range epVulns {
+				if isHostLPE(v) {
+					return true
+				}
+			}
+			return false
+		}
+
+		// Puntos de Entrada Candidatos
 		type entryCandidate struct {
 			Asset internalAsset
 			Vuln  internalVuln
@@ -848,9 +907,15 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			if !asset.InternetExposed {
 				continue
 			}
-			if asset.Type == "Container" && asset.State != "running" {
-				continue
+			if asset.Type == "Container" {
+				if asset.State != "running" {
+					continue
+				}
+				if !canContainerEscape(asset) {
+					continue
+				}
 			}
+
 			vulns := assetVulns[assetID]
 			for _, v := range vulns {
 				if isAVNetwork(v) && isRCEVuln(v) {
@@ -870,9 +935,57 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		}
 
 		bestPathsMap := make(map[string]domain.ExploitationPath)
+		const maxPathSteps = 5
 
-		// EXPLORACIÓN BFS COMBINATORIA COMPLETA
+		// Función auxiliar para recortar pasos que terminen en Red y guardar la ruta
+		trimAndSavePath := func(steps []domain.AttackStep, entryIdx int) {
+			if len(steps) == 0 {
+				return
+			}
+
+			trimmed := append([]domain.AttackStep{}, steps...)
+			for len(trimmed) > 0 {
+				last := trimmed[len(trimmed)-1]
+				if last.Vulnerability == "Conexión de Red" {
+					trimmed = trimmed[:len(trimmed)-1]
+				} else {
+					break
+				}
+			}
+
+			if len(trimmed) == 0 {
+				return
+			}
+
+			var totalRisk float64
+			for i := range trimmed {
+				trimmed[i].StepIndex = i + 1
+				totalRisk += trimmed[i].RiskScore
+			}
+
+			signature := getPathSignature(trimmed)
+			pathObj := domain.ExploitationPath{
+				PathID:          fmt.Sprintf("path-entry-%d", entryIdx+1),
+				InitialEndpoint: trimmed[0].TargetEndpoint,
+				TotalRiskScore:  totalRisk,
+				Steps:           trimmed,
+			}
+
+			existing, ok := bestPathsMap[signature]
+			if !ok || totalRisk > existing.TotalRiskScore {
+				bestPathsMap[signature] = pathObj
+			}
+		}
+
+		// Exploración BFS
 		for entryIdx, entry := range entryCandidates {
+			hasRoot := false
+			if entry.Asset.Type == "Container" {
+				hasRoot = isContainerLPE(entry.Vuln, entry.Asset)
+			} else {
+				hasRoot = hasEndpointRoot(entry.Vuln, assetVulns[entry.Asset.ID])
+			}
+
 			initialStep := domain.AttackStep{
 				StepIndex:        1,
 				SourceEndpoint:   "INTERNET",
@@ -886,7 +999,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 				SoftwareAffected: entry.Vuln.SoftwarePath,
 				RiskScore:        entry.Vuln.RiskScore,
 				RCE:              true,
-				RootObtained:     strings.Contains(entry.Vuln.CVSSVector, "C:H") && strings.Contains(entry.Vuln.CVSSVector, "I:H"),
+				RootObtained:     hasRoot,
 				Exploitable:      entry.Vuln.Exploit || entry.Vuln.KEV,
 				CVSSVector:       entry.Vuln.CVSSVector,
 			}
@@ -904,65 +1017,64 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 				curr := queue[0]
 				queue = queue[1:]
 
-				if len(curr.Steps) >= 5 { // Límite de seguridad de 5 saltos topológicos
+				if len(curr.Steps) >= maxPathSteps {
+					trimAndSavePath(curr.Steps, entryIdx)
 					continue
 				}
 
 				currAsset := assets[curr.CurrentAssetID]
+				expanded := false
 
 				// Transición 1: Contenedor con Escape LPE -> Host Endpoint
 				if currAsset.Type == "Container" {
-					hostID := containerHosts[curr.CurrentAssetID]
-					if hostID != "" && !curr.VisitedAssets[hostID] {
-						hostAsset := assets[hostID]
+					if canContainerEscape(currAsset) {
+						hostID := containerHosts[curr.CurrentAssetID]
+						if hostID != "" && !curr.VisitedAssets[hostID] {
+							hostAsset := assets[hostID]
 
-						// Evaluar TODAS las vulnerabilidades de escape (sin break)
-						for _, v := range assetVulns[curr.CurrentAssetID] {
-							if isContainerLPE(v, currAsset) {
-								escapeStep := domain.AttackStep{
-									StepIndex:        len(curr.Steps) + 1,
-									SourceEndpoint:   currAsset.Name,
-									TargetEndpoint:   hostAsset.Name,
-									TargetEndpointID: hostAsset.NumericID,
-									IsContainer:      false,
-									Vulnerability:    "Container Escape (LPE)",
-									SoftwareAffected: "Container Runtime/Kernel",
-									RiskScore:        8.8,
-									RCE:              true,
-									RootObtained:     true,
-									Exploitable:      true,
-									CVSSVector:       "AV:L/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
-								}
-
-								newVisited := make(map[string]bool)
-								for k, val := range curr.VisitedAssets {
-									newVisited[k] = val
-								}
-								newVisited[hostID] = true
-
-								nextSteps := append([]domain.AttackStep{}, curr.Steps...)
-								nextSteps = append(nextSteps, escapeStep)
-
-								queue = append(queue, bfsPathState{
-									CurrentAssetID: hostID,
-									VisitedAssets:  newVisited,
-									Steps:          nextSteps,
-									TotalRisk:      curr.TotalRisk + 8.8,
-								})
+							escapeStep := domain.AttackStep{
+								StepIndex:        len(curr.Steps) + 1,
+								SourceEndpoint:   currAsset.Name,
+								TargetEndpoint:   hostAsset.Name,
+								TargetEndpointID: hostAsset.NumericID,
+								IsContainer:      false,
+								Vulnerability:    "Container Escape (LPE)",
+								SoftwareAffected: "Container Runtime/Kernel",
+								RiskScore:        8.8,
+								RCE:              true,
+								RootObtained:     true,
+								Exploitable:      true,
+								CVSSVector:       "AV:L/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
 							}
+
+							newVisited := make(map[string]bool, len(curr.VisitedAssets)+1)
+							for k, val := range curr.VisitedAssets {
+								newVisited[k] = val
+							}
+							newVisited[hostID] = true
+
+							nextSteps := append([]domain.AttackStep{}, curr.Steps...)
+							nextSteps = append(nextSteps, escapeStep)
+
+							queue = append(queue, bfsPathState{
+								CurrentAssetID: hostID,
+								VisitedAssets:  newVisited,
+								Steps:          nextSteps,
+								TotalRisk:      curr.TotalRisk + 8.8,
+							})
+							expanded = true
 						}
 					}
 				}
 
-				// Transición 2: Endpoint -> Contenedores alojados
+				// Transición 2: Endpoint -> Contenedores Alojados (HOSTS)
 				if currAsset.Type == "Endpoint" {
 					for cID, hID := range containerHosts {
 						if hID == curr.CurrentAssetID && !curr.VisitedAssets[cID] {
 							cAsset := assets[cID]
 							if cAsset.State == "running" {
-								// Evaluar TODAS las vulnerabilidades de red del contenedor (sin break)
 								for _, v := range assetVulns[cID] {
-									if isAVNetwork(v) {
+									if isAVNetwork(v) && isRCEVuln(v) {
 										contStep := domain.AttackStep{
 											StepIndex:        len(curr.Steps) + 1,
 											SourceEndpoint:   currAsset.Name,
@@ -975,13 +1087,13 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 											Vulnerability:    v.CVEID,
 											SoftwareAffected: v.SoftwarePath,
 											RiskScore:        v.RiskScore,
-											RCE:              isRCEVuln(v),
+											RCE:              true,
 											RootObtained:     isContainerLPE(v, cAsset),
 											Exploitable:      v.Exploit || v.KEV,
 											CVSSVector:       v.CVSSVector,
 										}
 
-										newVisited := make(map[string]bool)
+										newVisited := make(map[string]bool, len(curr.VisitedAssets)+1)
 										for k, val := range curr.VisitedAssets {
 											newVisited[k] = val
 										}
@@ -996,6 +1108,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 											Steps:          nextSteps,
 											TotalRisk:      curr.TotalRisk + v.RiskScore,
 										})
+										expanded = true
 									}
 								}
 							}
@@ -1003,124 +1116,164 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 					}
 				}
 
-				// Transición 3: Movimiento lateral vía Redes Conectadas
-				neighbors := networkNeighbors[curr.CurrentAssetID]
-				for neighborID := range neighbors {
-					if curr.VisitedAssets[neighborID] {
-						continue
-					}
-					neighborAsset := assets[neighborID]
+				// Transición 3: Movimiento Lateral a través de Redes Conectadas
+				canPivotNetwork := true
+				if currAsset.Type == "Container" && !canContainerEscape(currAsset) {
+					canPivotNetwork = false
+				}
 
-					if neighborAsset.Type == "Network" {
-						netStep := domain.AttackStep{
-							StepIndex:        len(curr.Steps) + 1,
-							SourceEndpoint:   currAsset.Name,
-							TargetEndpoint:   neighborAsset.Name,
-							TargetEndpointID: 0,
-							IsContainer:      false,
-							Vulnerability:    "Conexión de Red",
-							SoftwareAffected: "Network Interface",
-							RiskScore:        0.0,
-							RCE:              false,
-							RootObtained:     false,
-							Exploitable:      false,
-							CVSSVector:       "AV:N/AC:L",
-						}
-
-						newVisited := make(map[string]bool)
-						for k, val := range curr.VisitedAssets {
-							newVisited[k] = val
-						}
-						newVisited[neighborID] = true
-
-						nextSteps := append([]domain.AttackStep{}, curr.Steps...)
-						nextSteps = append(nextSteps, netStep)
-
-						queue = append(queue, bfsPathState{
-							CurrentAssetID: neighborID,
-							VisitedAssets:  newVisited,
-							Steps:          nextSteps,
-							TotalRisk:      curr.TotalRisk,
-						})
-					} else {
-						if neighborAsset.Type == "Container" && neighborAsset.State != "running" {
+				if canPivotNetwork {
+					neighbors := networkNeighbors[curr.CurrentAssetID]
+					for neighborID := range neighbors {
+						if curr.VisitedAssets[neighborID] {
 							continue
 						}
+						neighborAsset := assets[neighborID]
 
-						// Evaluar TODAS las vulnerabilidades de red del activo destino (SIN BREAK)
-						targetVulns := assetVulns[neighborID]
-						for _, v := range targetVulns {
-							if isAVNetwork(v) {
-								hasRoot := false
-								if neighborAsset.Type == "Container" {
-									hasRoot = isContainerLPE(v, neighborAsset)
-								} else {
-									hasRoot = isHostLPE(v)
+						if neighborAsset.Type == "Network" {
+							netName := neighborAsset.Name
+							if netName == "" {
+								netName = "Red Intermedia"
+							}
+
+							netStep := domain.AttackStep{
+								StepIndex:        len(curr.Steps) + 1,
+								SourceEndpoint:   currAsset.Name,
+								TargetEndpoint:   netName,
+								TargetEndpointID: 0,
+								IsContainer:      false,
+								Vulnerability:    "Conexión de Red",
+								SoftwareAffected: "Network Interface",
+								RiskScore:        0.0,
+								RCE:              false,
+								RootObtained:     false,
+								Exploitable:      false,
+								CVSSVector:       "AV:N/AC:L",
+							}
+
+							newVisited := make(map[string]bool, len(curr.VisitedAssets)+1)
+							for k, val := range curr.VisitedAssets {
+								newVisited[k] = val
+							}
+							newVisited[neighborID] = true
+
+							nextSteps := append([]domain.AttackStep{}, curr.Steps...)
+							nextSteps = append(nextSteps, netStep)
+
+							queue = append(queue, bfsPathState{
+								CurrentAssetID: neighborID,
+								VisitedAssets:  newVisited,
+								Steps:          nextSteps,
+								TotalRisk:      curr.TotalRisk,
+							})
+							expanded = true
+						} else {
+							if neighborAsset.Type == "Container" && neighborAsset.State != "running" {
+								continue
+							}
+
+							targetVulns := assetVulns[neighborID]
+							for _, v := range targetVulns {
+								if isAVNetwork(v) && isRCEVuln(v) {
+									hasRoot := false
+									if neighborAsset.Type == "Container" {
+										hasRoot = isContainerLPE(v, neighborAsset)
+									} else {
+										hasRoot = hasEndpointRoot(v, assetVulns[neighborID])
+									}
+
+									hopStep := domain.AttackStep{
+										StepIndex:        len(curr.Steps) + 1,
+										SourceEndpoint:   currAsset.Name,
+										TargetEndpoint:   neighborAsset.Name,
+										TargetEndpointID: neighborAsset.NumericID,
+										IsContainer:      neighborAsset.Type == "Container",
+										ContainerID:      v.ContainerID,
+										ContainerName:    v.ContainerName,
+										FindingID:        v.FindingID,
+										Vulnerability:    v.CVEID,
+										SoftwareAffected: v.SoftwarePath,
+										RiskScore:        v.RiskScore,
+										RCE:              true,
+										RootObtained:     hasRoot,
+										Exploitable:      v.Exploit || v.KEV,
+										CVSSVector:       v.CVSSVector,
+									}
+
+									newVisited := make(map[string]bool, len(curr.VisitedAssets)+1)
+									for k, val := range curr.VisitedAssets {
+										newVisited[k] = val
+									}
+									newVisited[neighborID] = true
+
+									nextSteps := append([]domain.AttackStep{}, curr.Steps...)
+									nextSteps = append(nextSteps, hopStep)
+
+									queue = append(queue, bfsPathState{
+										CurrentAssetID: neighborID,
+										VisitedAssets:  newVisited,
+										Steps:          nextSteps,
+										TotalRisk:      curr.TotalRisk + v.RiskScore,
+									})
+									expanded = true
 								}
-
-								hopStep := domain.AttackStep{
-									StepIndex:        len(curr.Steps) + 1,
-									SourceEndpoint:   currAsset.Name,
-									TargetEndpoint:   neighborAsset.Name,
-									TargetEndpointID: neighborAsset.NumericID,
-									IsContainer:      neighborAsset.Type == "Container",
-									ContainerID:      v.ContainerID,
-									ContainerName:    v.ContainerName,
-									FindingID:        v.FindingID,
-									Vulnerability:    v.CVEID,
-									SoftwareAffected: v.SoftwarePath,
-									RiskScore:        v.RiskScore,
-									RCE:              isRCEVuln(v),
-									RootObtained:     hasRoot,
-									Exploitable:      v.Exploit || v.KEV,
-									CVSSVector:       v.CVSSVector,
-								}
-
-								newVisited := make(map[string]bool)
-								for k, val := range curr.VisitedAssets {
-									newVisited[k] = val
-								}
-								newVisited[neighborID] = true
-
-								nextSteps := append([]domain.AttackStep{}, curr.Steps...)
-								nextSteps = append(nextSteps, hopStep)
-
-								queue = append(queue, bfsPathState{
-									CurrentAssetID: neighborID,
-									VisitedAssets:  newVisited,
-									Steps:          nextSteps,
-									TotalRisk:      curr.TotalRisk + v.RiskScore,
-								})
 							}
 						}
 					}
 				}
 
-				// Si el camino tiene al menos 1 salto válido, registrarlo
-				if len(curr.Steps) > 1 {
-					// Firma basada en la SECUENCIA COMPLETA de [Activo:CVE] de toda la ruta
-					signature := getPathSignature(curr.Steps)
-
-					pathObj := domain.ExploitationPath{
-						PathID:          fmt.Sprintf("path-entry-%d", entryIdx+1),
-						InitialEndpoint: curr.Steps[0].SourceEndpoint,
-						TotalRiskScore:  curr.TotalRisk,
-						Steps:           curr.Steps,
-					}
-
-					existing, ok := bestPathsMap[signature]
-					if !ok || curr.TotalRisk > existing.TotalRiskScore {
-						bestPathsMap[signature] = pathObj
-					}
+				if !expanded {
+					trimAndSavePath(curr.Steps, entryIdx)
 				}
 			}
 		}
 
-		var computedPaths []domain.ExploitationPath
-		for _, p := range bestPathsMap {
-			computedPaths = append(computedPaths, p)
+		// --- FILTRADO OPTIMIZADO O(N log N) MEDIANTE PREFIX-SET ---
+
+		type pathWithSig struct {
+			path domain.ExploitationPath
+			sig  string
 		}
 
+		// 1. Precalcular las firmas una única vez
+		candidates := make([]pathWithSig, 0, len(bestPathsMap))
+		for _, p := range bestPathsMap {
+			candidates = append(candidates, pathWithSig{
+				path: p,
+				sig:  getPathSignature(p.Steps),
+			})
+		}
+
+		// 2. Ordenar rutas de mayor a menor longitud de pasos
+		sort.Slice(candidates, func(i, j int) bool {
+			return len(candidates[i].path.Steps) > len(candidates[j].path.Steps)
+		})
+
+		// 3. Filtrar en O(1) comprobando el set de prefijos
+		prefixSet := make(map[string]bool)
+		var computedPaths []domain.ExploitationPath
+
+		for _, item := range candidates {
+			// Si su firma completa ya está marcada como prefijo de una ruta más larga, se descarta
+			if prefixSet[item.sig] {
+				continue
+			}
+
+			computedPaths = append(computedPaths, item.path)
+
+			// Registrar todos los subprefijos de esta ruta para invalidar las rutas más cortas
+			steps := item.path.Steps
+			var prefixBuilder strings.Builder
+			for k := 0; k < len(steps)-1; k++ {
+				if k > 0 {
+					prefixBuilder.WriteString("->")
+				}
+				prefixBuilder.WriteString(fmt.Sprintf("%s:%s", steps[k].TargetEndpoint, steps[k].Vulnerability))
+				prefixSet[prefixBuilder.String()] = true
+			}
+		}
+
+		// 4. Reasignar IDs correlativos
 		for i := range computedPaths {
 			computedPaths[i].PathID = fmt.Sprintf("path-%d", i+1)
 		}
@@ -1128,12 +1281,8 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		return computedPaths, nil
 	})
 
-	if err != nil {
-		return nil, err
-	}
-
-	if res == nil {
-		return []domain.ExploitationPath{}, nil
+	if err != nil || res == nil {
+		return []domain.ExploitationPath{}, err
 	}
 
 	return res.([]domain.ExploitationPath), nil
@@ -1198,59 +1347,22 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 			}
 
 			props := normalizeProperties(node.Properties)
-
 			var matchKey string
 			var matchVal interface{}
 
-			switch primaryLabel {
-			case "Vulnerability":
-				if cveVal, exists := props["cve_id"]; exists && cveVal != nil {
-					matchKey = "cve_id"
-					matchVal = cveVal
-				} else if idVal, exists := props["id"]; exists && idVal != nil {
-					matchKey = "id"
-					matchVal = idVal
-				}
-			case "TTP":
-				if ttpVal, exists := props["ttp_id"]; exists && ttpVal != nil {
-					matchKey = "ttp_id"
-					matchVal = ttpVal
-				} else if idVal, exists := props["id"]; exists && idVal != nil {
-					matchKey = "id"
-					matchVal = idVal
-				}
-			case "ThreatActor":
-				if actorVal, exists := props["actor_id"]; exists && actorVal != nil {
-					matchKey = "actor_id"
-					matchVal = actorVal
-				} else if idVal, exists := props["id"]; exists && idVal != nil {
-					matchKey = "id"
-					matchVal = idVal
-				}
-			case "CWE":
-				if cweVal, exists := props["cwe_id"]; exists && cweVal != nil {
-					matchKey = "cwe_id"
-					matchVal = cweVal
-				} else if idVal, exists := props["id"]; exists && idVal != nil {
-					matchKey = "id"
-					matchVal = idVal
-				}
-			case "CAPEC":
-				if capecVal, exists := props["capec_id"]; exists && capecVal != nil {
-					matchKey = "capec_id"
-					matchVal = capecVal
-				} else if idVal, exists := props["id"]; exists && idVal != nil {
-					matchKey = "id"
-					matchVal = idVal
-				}
-			default:
-				if idVal, exists := props["id"]; exists && idVal != nil {
-					matchKey = "id"
-					matchVal = idVal
-				}
-			}
-
-			if matchKey == "" {
+			if idVal, exists := props["id"]; exists && idVal != nil {
+				matchKey = "id"
+				matchVal = idVal
+			} else if cveVal, exists := props["cve_id"]; exists && cveVal != nil {
+				matchKey = "cve_id"
+				matchVal = cveVal
+			} else if ttpVal, exists := props["ttp_id"]; exists && ttpVal != nil {
+				matchKey = "ttp_id"
+				matchVal = ttpVal
+			} else if actorVal, exists := props["actor_id"]; exists && actorVal != nil {
+				matchKey = "actor_id"
+				matchVal = actorVal
+			} else {
 				matchKey = "id"
 				matchVal = node.ID
 				props["id"] = node.ID
