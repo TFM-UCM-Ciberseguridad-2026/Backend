@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,6 +27,21 @@ Propósito arquitectónico y teórico:
 3. Coordinación de Dependencias: Recibe los puertos (CVEProvider, ExploitProvider, Database) a través del constructor (Inyección de Dependencias) y orquesta las llamadas necesarias en orden lógico para cumplir con el proceso de negocio.
 4. Neutralidad Tecnológica: No expone tipos HTTP ni dependencias de frameworks web, garantizando que las reglas de negocio puedan ser llamadas por un servidor HTTP, un CLI de consola o un proceso de ejecución programada (cron).
 */
+
+type TTPBackgroundSync struct {
+	mu         sync.RWMutex
+	processing bool
+	currentCVE string
+	logs       []string
+	queuedCVEs map[string]bool // Registro de CVEs encoladas o en proceso
+}
+
+type TTPBackgroundSyncResponse struct {
+	Processing  bool     `json:"processing"`
+	CurrentCVE  string   `json:"current_cve"`
+	QueueLength int      `json:"queue_length"`
+	Logs        []string `json:"logs"`
+}
 
 type Orchestrator struct {
 	projectPort         ports.ProjectPort
@@ -51,8 +68,12 @@ type Orchestrator struct {
 	capecProvider       ports.CAPECProvider
 	ttpPort             ports.TTPPort
 	mitreAttackProvider ports.MitreATTACKProvider
-	activeBgEnrichments int64      // contador atómico de goroutines de enriquecimiento activas
+	activeBgEnrichments int64         // contador atómico de goroutines de enriquecimiento activas
 	nvdSyncSem          chan struct{} // semáforo global: limita a 2 llamadas NVD síncronas simultáneas en total
+	ttpMapper           ports.TTPMapper
+	threatActorPort     ports.ThreatActorPort
+	ttpSync             TTPBackgroundSync
+	ttpQueue            chan string
 }
 
 func NewOrchestrator(
@@ -88,7 +109,12 @@ func NewOrchestrator(
 		patchPort:        patchPort,
 		dbHelper:         dbHelper,
 		vulnScannerPort:  vulnScannerPort,
-		nvdSyncSem:       make(chan struct{}, 2), // máximo 2 llamadas NVD síncronas en total a la vez
+		nvdSyncSem: make(chan struct{}, 2), // máximo 2 llamadas NVD síncronas en total a la vez
+		ttpQueue:   make(chan string, 1000),
+		ttpSync: TTPBackgroundSync{
+			logs:       []string{},
+			queuedCVEs: make(map[string]bool),
+		},
 	}
 }
 
@@ -119,6 +145,12 @@ func (o *Orchestrator) WithPatchProvider(patchProvider ports.PatchProvider) *Orc
 func (o *Orchestrator) WithCAPEC(capecPort ports.CAPECPort, capecProvider ports.CAPECProvider) *Orchestrator {
 	o.capecPort = capecPort
 	o.capecProvider = capecProvider
+	return o
+}
+
+// WithTTPMapper inyecta el proveedor de mapeo de TTPs vía LLM.
+func (o *Orchestrator) WithTTPMapper(ttpMapper ports.TTPMapper) *Orchestrator {
+	o.ttpMapper = ttpMapper
 	return o
 }
 
@@ -366,7 +398,7 @@ func (o *Orchestrator) AssociateVulnerabilitiesAndRemediations(ctx context.Conte
 			rem.RemediationID = id
 		}
 	}
-	if err := o.vulnPort.Save(ctx, vuln); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+	if err := o.saveVulnerabilityWithTTPs(ctx, vuln); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
 	if err := o.remediationPort.Save(ctx, rem); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
@@ -375,6 +407,7 @@ func (o *Orchestrator) AssociateVulnerabilitiesAndRemediations(ctx context.Conte
 	if err := o.relationshipPort.LinkFindingToVulnerability(ctx, findingID, vuln.CVEID); err != nil {
 		return err
 	}
+	o.EnqueueCVE(vuln.CVEID)
 	return o.relationshipPort.LinkFindingToRemediation(ctx, findingID, rem.RemediationID)
 }
 
@@ -413,6 +446,13 @@ func (o *Orchestrator) GetTotalMitreTTPs(ctx context.Context) (int, error) {
 // viajan en el grafo general.
 func (o *Orchestrator) GetVulnerabilitiesForFinding(ctx context.Context, findingID any) ([]domain.Vulnerability, error) {
 	return o.findingPort.GetVulnerabilitiesByFinding(ctx, findingID)
+}
+
+func (o *Orchestrator) saveVulnerabilityWithTTPs(ctx context.Context, vuln *domain.Vulnerability) error {
+	if err := o.vulnPort.Save(ctx, vuln); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+		return err
+	}
+	return nil
 }
 
 /*
@@ -478,7 +518,6 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 	// 5. Registrar vulnerabilidades y enlazarlas como hallazgos (Findings)
 	for _, v := range vulns {
 		vCopy := v
-
 		// Guardar o reutilizar la vulnerabilidad global
 		if err := o.vulnPort.Save(ctx, &vCopy); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 			return nil, fmt.Errorf("error al guardar la vulnerabilidad %s: %w", vCopy.CVEID, err)
@@ -516,6 +555,8 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		} else {
 			result.FindingsExisting++
 		}
+		
+		o.EnqueueCVE(vCopy.CVEID)
 	}
 
 	return result, nil
@@ -766,11 +807,12 @@ func (o *Orchestrator) SyncNistDaily(ctx context.Context) error {
 
 	for _, v := range vulns {
 		vCopy := v
-		if err := o.vulnPort.Save(ctx, &vCopy); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+		if err := o.saveVulnerabilityWithTTPs(ctx, &vCopy); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 			continue // Loguear o continuar si una falla
 		}
 
 		_ = o.RegisterPatchesForVulnerability(ctx, vCopy.CVEID, vCopy.Patches)
+		o.EnqueueCVE(vCopy.CVEID)
 	}
 	return nil
 }
@@ -1243,11 +1285,10 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		}
 
 		// Guardar Vulnerabilidad
-		err = o.vulnPort.Save(ctx, &v)
+		err = o.saveVulnerabilityWithTTPs(ctx, &v)
 		if err != nil {
 			// Ignoramos error de duplicado
 		}
-
 		// Crear un Finding (Hallazgo) para esta imagen y vulnerabilidad
 		now := time.Now().UTC()
 		findingID, err := o.nextNodeID(ctx, "Finding")
@@ -1274,6 +1315,7 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		if !v.NVDEnriched {
 			vulnsToEnrich = append(vulnsToEnrich, v)
 		}
+		o.EnqueueCVE(v.CVEID)
 	}
 
 	// Ordenar por BaseScore descendente (CRITICAL -> HIGH -> MEDIUM -> LOW) para enriquecer primero las más severas
@@ -1643,19 +1685,20 @@ func (o *Orchestrator) SyncCAPECCatalog(ctx context.Context) (int, error) {
 	return len(capecs), nil
 }
 
-func (o *Orchestrator) WithMitreATTACK(ttpPort ports.TTPPort, provider ports.MitreATTACKProvider) *Orchestrator {
+func (o *Orchestrator) WithMitreATTACK(ttpPort ports.TTPPort, provider ports.MitreATTACKProvider, actorPort ports.ThreatActorPort) *Orchestrator {
 	o.ttpPort = ttpPort
 	o.mitreAttackProvider = provider
+	o.threatActorPort = actorPort
 	return o
 }
 
-// SyncATTACKCatalog descarga el catálogo STIX 2.1 de MITRE ATT&CK Enterprise e ingiere la metadata de TTPs (nombre, tácticas, descripción) en Neo4j.
+// SyncATTACKCatalog descarga el catálogo STIX 2.1 de MITRE ATT&CK Enterprise e ingiere la metadata de TTPs, Threat Actors y relaciones en Neo4j.
 func (o *Orchestrator) SyncATTACKCatalog(ctx context.Context) (int, error) {
-	if o.mitreAttackProvider == nil || o.ttpPort == nil {
-		return 0, fmt.Errorf("los componentes de MITRE ATT&CK (ttpPort y mitreAttackProvider) no han sido inyectados en el orquestador")
+	if o.mitreAttackProvider == nil || o.ttpPort == nil || o.threatActorPort == nil {
+		return 0, fmt.Errorf("los componentes de MITRE ATT&CK (ttpPort, threatActorPort y mitreAttackProvider) no han sido inyectados en el orquestador")
 	}
 
-	ttps, err := o.mitreAttackProvider.FetchATTACKBundle(ctx)
+	ttps, actors, relations, err := o.mitreAttackProvider.FetchATTACKBundle(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("error obteniendo el catálogo STIX MITRE ATT&CK: %w", err)
 	}
@@ -1664,7 +1707,196 @@ func (o *Orchestrator) SyncATTACKCatalog(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("error guardando el catálogo MITRE ATT&CK TTPs en Neo4j: %w", err)
 	}
 
+	if err := o.threatActorPort.SaveBatch(ctx, actors); err != nil {
+		return 0, fmt.Errorf("error guardando el catálogo MITRE ATT&CK Threat Actors en Neo4j: %w", err)
+	}
+
+	if err := o.threatActorPort.SaveRelationshipsBatch(ctx, relations); err != nil {
+		return 0, fmt.Errorf("error guardando las relaciones MITRE ATT&CK USES en Neo4j: %w", err)
+	}
+
 	return len(ttps), nil
+}
+
+func (o *Orchestrator) StartBackgroundTTPMapping() {
+	// Disparo manual: ejecuta un barrido en background para encolar lo no mapeado
+	go o.runSweep(context.Background())
+}
+
+func (o *Orchestrator) StartTTPWorker(ctx context.Context) {
+	// 1. Worker Consumidor Principal
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case cveID, ok := <-o.ttpQueue:
+				if !ok {
+					return
+				}
+				o.startProcessingCVE(cveID)
+				if err := o.processSingleCVE(ctx, cveID); err != nil {
+					o.addTTPLog(fmt.Sprintf("Error procesando %s: %v", cveID, err))
+				}
+				o.endProcessingCVE(cveID)
+			}
+		}
+	}()
+
+	// 2. Barrido Periódico de Seguridad (cada 10 minutos)
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+
+		// Barrido inicial al arrancar
+		o.runSweep(ctx)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				o.runSweep(ctx)
+			}
+		}
+	}()
+}
+
+func (o *Orchestrator) runSweep(ctx context.Context) {
+	vulns, err := o.vulnPort.GetUnmappedVulnerabilities(ctx)
+	if err != nil {
+		log.Printf("[TTP-BG-SWEEP] Error obteniendo vulnerabilidades no mapeadas: %v", err)
+		return
+	}
+	if len(vulns) > 0 {
+		log.Printf("[TTP-BG-SWEEP] Encolando %d vulnerabilidades sin TTP...", len(vulns))
+		for _, v := range vulns {
+			o.EnqueueCVE(v.CVEID)
+		}
+	}
+}
+
+func (o *Orchestrator) EnqueueCVE(cveID string) {
+	o.ttpSync.mu.Lock()
+	if o.ttpSync.queuedCVEs[cveID] {
+		o.ttpSync.mu.Unlock()
+		return // Ya está encolado o procesándose
+	}
+	o.ttpSync.queuedCVEs[cveID] = true
+	o.ttpSync.processing = true
+	o.ttpSync.mu.Unlock()
+
+	select {
+	case o.ttpQueue <- cveID:
+		// Encolado con éxito
+	default:
+		// Sacar del mapa si se descarta de la cola (para que pueda volver a re-encolarse en el barrido)
+		o.ttpSync.mu.Lock()
+		delete(o.ttpSync.queuedCVEs, cveID)
+		o.ttpSync.mu.Unlock()
+		o.addTTPLog(fmt.Sprintf("Advertencia: Cola de mapeo TTP llena, descartado temporalmente: %s", cveID))
+	}
+}
+
+func (o *Orchestrator) startProcessingCVE(cveID string) {
+	o.ttpSync.mu.Lock()
+	defer o.ttpSync.mu.Unlock()
+	o.ttpSync.currentCVE = cveID
+	o.ttpSync.processing = true
+}
+
+func (o *Orchestrator) endProcessingCVE(cveID string) {
+	o.ttpSync.mu.Lock()
+	defer o.ttpSync.mu.Unlock()
+	o.ttpSync.currentCVE = ""
+	delete(o.ttpSync.queuedCVEs, cveID)
+	if len(o.ttpQueue) == 0 {
+		o.ttpSync.processing = false
+	}
+}
+
+func (o *Orchestrator) processSingleCVE(ctx context.Context, cveID string) error {
+	v, err := o.vulnPort.GetByID(ctx, cveID)
+	if err != nil {
+		return fmt.Errorf("error obteniendo vuln: %w", err)
+	}
+
+	var ttps []string
+	var confidence, source string
+	var mappedCWE string
+
+	validCWEs := []string{}
+	for _, cwe := range v.CWE {
+		cleaned := strings.TrimSpace(cwe)
+		if cleaned != "" && cleaned != "[]" && cleaned != "NVD-CWE-Other" && cleaned != "NVD-CWE-noinfo" {
+			validCWEs = append(validCWEs, cleaned)
+		}
+	}
+
+	start := time.Now()
+	if len(validCWEs) > 0 {
+		mappedCWE = validCWEs[0]
+		var capecErr error
+		if o.capecPort != nil {
+			ttps, capecErr = o.capecPort.GetTTPsByCWE(ctx, mappedCWE)
+		} else {
+			capecErr = fmt.Errorf("capecPort no inicializado")
+		}
+		if capecErr == nil && len(ttps) > 0 {
+			confidence = "high"
+			source = "capec_static"
+		} else {
+			if capecErr != nil {
+				log.Printf("[CAPEC] Error consultando CAPEC para %s: %v — usando fallback LLM", mappedCWE, capecErr)
+			} else {
+				log.Printf("[CAPEC] Sin cobertura para %s, usando fallback LLM", mappedCWE)
+			}
+			ttps, _, err = o.ttpMapper.MapEnrichedToTTPRaw(ctx, mappedCWE, v.Description, v.CVSSVector)
+			confidence = "medium"
+			source = "llm_enriched"
+		}
+	} else {
+		ttps, _, err = o.ttpMapper.MapEnrichedToTTPRaw(ctx, "", v.Description, v.CVSSVector)
+		confidence = "medium"
+		source = "llm_enriched"
+	}
+	duration := time.Since(start)
+
+	if err != nil {
+		return err
+	}
+
+	o.addTTPLog(fmt.Sprintf("CVE %s mapeado a TTPs %v en %v (Confianza: %s)", v.CVEID, ttps, duration.Round(time.Millisecond), confidence))
+	if len(ttps) > 0 {
+		err = o.vulnPort.LinkTTPsToVulnerability(ctx, v.CVEID, mappedCWE, ttps, confidence, source)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (o *Orchestrator) addTTPLog(msg string) {
+	o.ttpSync.mu.Lock()
+	defer o.ttpSync.mu.Unlock()
+	logLine := fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), msg)
+	o.ttpSync.logs = append(o.ttpSync.logs, logLine)
+	fmt.Printf("[TTP-BG] %s\n", msg)
+}
+
+func (o *Orchestrator) GetTTPSyncStatus() TTPBackgroundSyncResponse {
+	o.ttpSync.mu.RLock()
+	defer o.ttpSync.mu.RUnlock()
+
+	logsCopy := make([]string, len(o.ttpSync.logs))
+	copy(logsCopy, o.ttpSync.logs)
+
+	return TTPBackgroundSyncResponse{
+		Processing:  o.ttpSync.processing,
+		CurrentCVE:  o.ttpSync.currentCVE,
+		QueueLength: len(o.ttpQueue),
+		Logs:        logsCopy,
+	}
 }
 
 // AggregateProjectRiskFromCurrentEndpointScores recalcula el riesgo agregado de un proyecto completo, basado en los scores actuales de sus endpoints asociados.
@@ -1740,3 +1972,8 @@ func (o *Orchestrator) AggregateProjectRiskFromCurrentEndpointScores(ctx context
 		countRiskyEndpoints(summaries),
 	)
 }
+
+func (o *Orchestrator) GetTTPMatrix(ctx context.Context, projectID *int64) ([]domain.TTPMatrixItem, error) {
+	return o.infraPort.GetTTPMatrix(ctx, projectID)
+}
+

@@ -36,6 +36,7 @@ func sendError(w http.ResponseWriter, msg string, code int) {
 
 func sendJSON(w http.ResponseWriter, data any, code int) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(data)
 }
@@ -954,6 +955,17 @@ func (h *OrchestratorHandler) DeleteNode(w http.ResponseWriter, r *http.Request)
 	sendJSON(w, map[string]any{"status": "success", "message": "Nodo eliminado con éxito"}, http.StatusOK)
 }
 
+func (h *OrchestratorHandler) GetTTPSyncStatus(w http.ResponseWriter, r *http.Request) {
+	status := h.orchestrator.GetTTPSyncStatus()
+	sendJSON(w, status, http.StatusOK)
+}
+
+// POST /api/infrastructure/map-ttps
+func (h *OrchestratorHandler) MapTTPsManually(w http.ResponseWriter, r *http.Request) {
+	go h.orchestrator.StartBackgroundTTPMapping()
+	sendJSON(w, map[string]any{"status": "success", "message": "Mapeo de TTPs iniciado en segundo plano"}, http.StatusOK)
+}
+
 // POST /api/endpoints/{id}/containers
 func (h *OrchestratorHandler) AddContainerToEndpoint(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
@@ -998,4 +1010,25 @@ func (h *OrchestratorHandler) UpdateContainer(w http.ResponseWriter, r *http.Req
 func (h *OrchestratorHandler) DeleteContainer(w http.ResponseWriter, r *http.Request) {
 	// Se puede delegar en el borrado genérico o tener lógica específica si hace falta
 	h.DeleteNode(w, r)
+}
+
+func (h *OrchestratorHandler) GetTTPMatrix(w http.ResponseWriter, r *http.Request) {
+	var projectID *int64
+	projectIDStr := r.URL.Query().Get("project_id")
+	if projectIDStr != "" {
+		parsedID, err := strconv.ParseInt(projectIDStr, 10, 64)
+		if err == nil {
+			projectID = &parsedID
+		}
+	}
+
+	matrix, err := h.orchestrator.GetTTPMatrix(r.Context(), projectID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	json.NewEncoder(w).Encode(matrix)
 }

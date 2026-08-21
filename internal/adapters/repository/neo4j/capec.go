@@ -10,6 +10,7 @@ Propósito arquitectónico y teórico:
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
@@ -71,7 +72,7 @@ func (r *capecRepo) Save(ctx context.Context, capec *domain.CAPEC) error {
 		queryTTP := `
 			MATCH (c:CAPEC {capec_id: $capec_id})
 			UNWIND $ttps AS ttp_id
-			MERGE (t:TTP {ttp_id: ttp_id})
+			MATCH (t:TTP {ttp_id: ttp_id})
 			MERGE (c)-[rel:MAPS_TO_TTP]->(t)
 			SET rel.updated_at = timestamp()
 		`
@@ -141,7 +142,7 @@ func (r *capecRepo) SaveBatch(ctx context.Context, capecs []domain.CAPEC) error 
 		WITH item WHERE size(item.ttps) > 0
 		MATCH (c:CAPEC {capec_id: item.capec_id})
 		UNWIND item.ttps AS ttp_id
-		MERGE (t:TTP {ttp_id: ttp_id})
+		MATCH (t:TTP {ttp_id: ttp_id})
 		MERGE (c)-[rel:MAPS_TO_TTP]->(t)
 		SET rel.updated_at = timestamp()
 	`
@@ -188,7 +189,7 @@ func (r *capecRepo) LinkCAPECToCWE(ctx context.Context, capecID string, cweID st
 func (r *capecRepo) LinkCAPECToTTP(ctx context.Context, capecID string, ttpID string) error {
 	query := `
 		MERGE (c:CAPEC {capec_id: $capec_id})
-		MERGE (t:TTP {ttp_id: $ttp_id})
+		MATCH (t:TTP {ttp_id: $ttp_id})
 		MERGE (c)-[rel:MAPS_TO_TTP]->(t)
 		SET rel.updated_at = timestamp()
 	`
@@ -197,4 +198,36 @@ func (r *capecRepo) LinkCAPECToTTP(ctx context.Context, capecID string, ttpID st
 		"ttp_id":   ttpID,
 	}
 	return executeWriteHelper(ctx, r.driver, query, params)
+}
+
+func (r *capecRepo) GetTTPsByCWE(ctx context.Context, cweID string) ([]string, error) {
+	query := `
+		MATCH (w:CWE {cwe_id: $cwe_id})<-[:MAPS_TO_CWE]-(c:CAPEC)-[:MAPS_TO_TTP]->(t:TTP)
+		RETURN DISTINCT t.ttp_id AS ttp_id
+		ORDER BY ttp_id
+	`
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		res, err := tx.Run(ctx, query, map[string]any{"cwe_id": cweID})
+		if err != nil {
+			return nil, err
+		}
+		var ttps []string
+		for res.Next(ctx) {
+			record := res.Record()
+			if id, ok := record.Get("ttp_id"); ok && id != nil {
+				ttps = append(ttps, fmt.Sprintf("%v", id))
+			}
+		}
+		return ttps, res.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return []string{}, nil
+	}
+	return result.([]string), nil
 }

@@ -330,8 +330,9 @@ func (r *findingRepo) GetVulnerabilitiesByFinding(ctx context.Context, findingID
 	query := `
 		MATCH (f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE f.id = $finding_id OR elementId(f) = toString($finding_id) OR toString(f.id) = toString($finding_id)
-		OPTIONAL MATCH (c:CAPEC)-[:MAPS_TO_CWE]->(w:CWE) WHERE (v)-[:HAS_CWE]->(w) OR w.cwe_id IN v.cwe
-		OPTIONAL MATCH (c)-[:MAPS_TO_TTP]->(t:TTP)
+		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t1:TTP)
+		OPTIONAL MATCH (v)-[:MAPS_TO]->(t2:TTP)
+		WITH v, coalesce(t1, t2) AS t
 		WITH v, collect(DISTINCT {
 			ttp_id: t.ttp_id,
 			name: coalesce(t.name, ''),
