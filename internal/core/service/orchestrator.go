@@ -41,6 +41,13 @@ type TTPBackgroundSyncResponse struct {
 	Logs        []string `json:"logs"`
 }
 
+// ttpTask agrupa el CVE ID y el project_id del contexto que originó el encolado.
+// ProjectID = 0 significa origen global (sweep automático, cron, escaneo sin contexto de proyecto).
+type ttpTask struct {
+	cveID     string
+	projectID int64
+}
+
 type Orchestrator struct {
 	projectPort         ports.ProjectPort
 	endpointPort        ports.EndpointPort
@@ -68,8 +75,9 @@ type Orchestrator struct {
 	mitreAttackProvider ports.MitreATTACKProvider
 	ttpMapper           ports.TTPMapper
 	threatActorPort     ports.ThreatActorPort
+	notifier            ports.NotificationPort // nil si no se inyecta
 	ttpSync             TTPBackgroundSync
-	ttpQueue            chan string
+	ttpQueue            chan ttpTask
 }
 
 func NewOrchestrator(
@@ -105,7 +113,7 @@ func NewOrchestrator(
 		patchPort:        patchPort,
 		dbHelper:         dbHelper,
 		vulnScannerPort:  vulnScannerPort,
-		ttpQueue:         make(chan string, 1000),
+		ttpQueue:         make(chan ttpTask, 1000),
 		ttpSync: TTPBackgroundSync{
 			logs:       []string{},
 			queuedCVEs: make(map[string]bool),
@@ -146,6 +154,13 @@ func (o *Orchestrator) WithCAPEC(capecPort ports.CAPECPort, capecProvider ports.
 // WithTTPMapper inyecta el proveedor de mapeo de TTPs vía LLM.
 func (o *Orchestrator) WithTTPMapper(ttpMapper ports.TTPMapper) *Orchestrator {
 	o.ttpMapper = ttpMapper
+	return o
+}
+
+// WithNotifier inyecta el puerto de notificación en tiempo real (ej. WSHub).
+// Si no se inyecta, el worker funciona igual pero sin emitir eventos WebSocket.
+func (o *Orchestrator) WithNotifier(n ports.NotificationPort) *Orchestrator {
+	o.notifier = n
 	return o
 }
 
@@ -402,7 +417,7 @@ func (o *Orchestrator) AssociateVulnerabilitiesAndRemediations(ctx context.Conte
 	if err := o.relationshipPort.LinkFindingToVulnerability(ctx, findingID, vuln.CVEID); err != nil {
 		return err
 	}
-	o.EnqueueCVE(vuln.CVEID)
+	o.EnqueueCVE(vuln.CVEID, 0) // 0 = sin contexto de proyecto (alta manual de vulnerabilidad)
 	return o.relationshipPort.LinkFindingToRemediation(ctx, findingID, rem.RemediationID)
 }
 
@@ -551,7 +566,7 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 			result.FindingsExisting++
 		}
 		
-		o.EnqueueCVE(vCopy.CVEID)
+		o.EnqueueCVE(vCopy.CVEID, 0) // 0 = sin contexto de proyecto (escaneo por CPE)
 	}
 
 	return result, nil
@@ -807,7 +822,7 @@ func (o *Orchestrator) SyncNistDaily(ctx context.Context) error {
 		}
 
 		_ = o.RegisterPatchesForVulnerability(ctx, vCopy.CVEID, vCopy.Patches)
-		o.EnqueueCVE(vCopy.CVEID)
+		o.EnqueueCVE(vCopy.CVEID, 0) // 0 = sin contexto de proyecto (cron diario NIST)
 	}
 	return nil
 }
@@ -1287,7 +1302,7 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 			return fmt.Errorf("error creando finding para imagen %s y CVE %s: %w", imageID, v.CVEID, err)
 		}
 
-		o.EnqueueCVE(v.CVEID)
+		o.EnqueueCVE(v.CVEID, 0) // 0 = sin contexto de proyecto (cron Docker Scout)
 	}
 
 	return nil
@@ -1589,9 +1604,9 @@ func (o *Orchestrator) SyncATTACKCatalog(ctx context.Context) (int, error) {
 	return len(ttps), nil
 }
 
-func (o *Orchestrator) StartBackgroundTTPMapping() {
-	// Disparo manual: ejecuta un barrido en background para encolar lo no mapeado
-	go o.runSweep(context.Background())
+func (o *Orchestrator) StartBackgroundTTPMapping(projectID int64) {
+	// Disparo manual: ejecuta un barrido acotado al proyecto indicado (0 = global)
+	go o.runSweep(context.Background(), projectID)
 }
 
 func (o *Orchestrator) StartTTPWorker(ctx context.Context) {
@@ -1601,53 +1616,53 @@ func (o *Orchestrator) StartTTPWorker(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
-			case cveID, ok := <-o.ttpQueue:
+			case task, ok := <-o.ttpQueue:
 				if !ok {
 					return
 				}
-				o.startProcessingCVE(cveID)
-				if err := o.processSingleCVE(ctx, cveID); err != nil {
-					o.addTTPLog(fmt.Sprintf("Error procesando %s: %v", cveID, err))
+				o.startProcessingCVE(task.cveID)
+				if err := o.processSingleCVE(ctx, task); err != nil {
+					o.addTTPLog(fmt.Sprintf("Error procesando %s: %v", task.cveID, err))
 				}
-				o.endProcessingCVE(cveID)
+				o.endProcessingCVE(task.cveID)
 			}
 		}
 	}()
 
-	// 2. Barrido Periódico de Seguridad (cada 10 minutos)
+	// 2. Barrido Periódico de Seguridad (cada 10 minutos) — global, sin filtro de proyecto
 	go func() {
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
 
 		// Barrido inicial al arrancar
-		o.runSweep(ctx)
+		o.runSweep(ctx, 0)
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				o.runSweep(ctx)
+				o.runSweep(ctx, 0)
 			}
 		}
 	}()
 }
 
-func (o *Orchestrator) runSweep(ctx context.Context) {
-	vulns, err := o.vulnPort.GetUnmappedVulnerabilities(ctx)
+func (o *Orchestrator) runSweep(ctx context.Context, projectID int64) {
+	vulns, err := o.vulnPort.GetUnmappedVulnerabilities(ctx, projectID)
 	if err != nil {
 		log.Printf("[TTP-BG-SWEEP] Error obteniendo vulnerabilidades no mapeadas: %v", err)
 		return
 	}
 	if len(vulns) > 0 {
-		log.Printf("[TTP-BG-SWEEP] Encolando %d vulnerabilidades sin TTP...", len(vulns))
+		log.Printf("[TTP-BG-SWEEP] Encolando %d vulnerabilidades sin TTP (projectID=%d)...", len(vulns), projectID)
 		for _, v := range vulns {
-			o.EnqueueCVE(v.CVEID)
+			o.EnqueueCVE(v.CVEID, projectID)
 		}
 	}
 }
 
-func (o *Orchestrator) EnqueueCVE(cveID string) {
+func (o *Orchestrator) EnqueueCVE(cveID string, projectID int64) {
 	o.ttpSync.mu.Lock()
 	if o.ttpSync.queuedCVEs[cveID] {
 		o.ttpSync.mu.Unlock()
@@ -1658,7 +1673,7 @@ func (o *Orchestrator) EnqueueCVE(cveID string) {
 	o.ttpSync.mu.Unlock()
 
 	select {
-	case o.ttpQueue <- cveID:
+	case o.ttpQueue <- ttpTask{cveID: cveID, projectID: projectID}:
 		// Encolado con éxito
 	default:
 		// Sacar del mapa si se descarta de la cola (para que pueda volver a re-encolarse en el barrido)
@@ -1686,8 +1701,8 @@ func (o *Orchestrator) endProcessingCVE(cveID string) {
 	}
 }
 
-func (o *Orchestrator) processSingleCVE(ctx context.Context, cveID string) error {
-	v, err := o.vulnPort.GetByID(ctx, cveID)
+func (o *Orchestrator) processSingleCVE(ctx context.Context, task ttpTask) error {
+	v, err := o.vulnPort.GetByID(ctx, task.cveID)
 	if err != nil {
 		return fmt.Errorf("error obteniendo vuln: %w", err)
 	}
@@ -1742,6 +1757,17 @@ func (o *Orchestrator) processSingleCVE(ctx context.Context, cveID string) error
 		err = o.vulnPort.LinkTTPsToVulnerability(ctx, v.CVEID, mappedCWE, ttps, confidence, source)
 		if err != nil {
 			return err
+		}
+		// Emitir evento WebSocket si el notificador está inyectado
+		if o.notifier != nil {
+			_ = o.notifier.NotifyTTPMapped(ctx, ports.TTPMappedEvent{
+				CVEID:      v.CVEID,
+				TTPs:       ttps,
+				Confidence: confidence,
+				Source:     source,
+				ProjectID:  task.projectID,
+				Log:        fmt.Sprintf("CVE %s → TTPs %v (Confianza: %s)", v.CVEID, ttps, confidence),
+			})
 		}
 	}
 	return nil

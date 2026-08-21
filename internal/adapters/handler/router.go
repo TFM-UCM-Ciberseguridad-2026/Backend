@@ -15,7 +15,7 @@ Propósito arquitectónico y teórico:
 //va a haber una api que se sea /fetch/vuln/endpoint?endpoint=nombreendpoint
 
 // NewRouter crea y configura el multiplexor HTTP con las rutas de la aplicación.
-func NewRouter(h *OrchestratorHandler) *http.ServeMux {
+func NewRouter(h *OrchestratorHandler, hub *WSHub) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// Definición de las rutas RESTful.
@@ -77,6 +77,11 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 
 	/* POST /api/infrastructure/map-ttps: Inicia manualmente el mapeo (directo e indirecto) de TTPs en background. */
 	mux.HandleFunc("POST /api/infrastructure/map-ttps", h.MapTTPsManually)
+
+	/* GET /api/ws/ttps: WebSocket de notificaciones en tiempo real del worker de TTPs.
+	   Query param opcional: ?project_id=N para suscripción acotada al proyecto N.
+	   Sin query param (o project_id=0): suscripción global (recibe todos los eventos). */
+	mux.HandleFunc("GET /api/ws/ttps", hub.ServeWS)
 
 
 	/* POST /api/installations/{id}/scan-vulns: Automatiza el escaneo y registro de vulnerabilidades por CPE/versión contra la API del NIST. */

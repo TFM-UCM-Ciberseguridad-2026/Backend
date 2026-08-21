@@ -85,6 +85,10 @@ func main() {
 		nistAPIAdapter,
 	).WithRisk(riskRepo, epssAdapter, kevAdapter).WithScout(scoutAdapter).WithPatchProvider(osvAdapter).WithTTPMapper(ollamaClient)
 
+	// Hub WebSocket para notificaciones en tiempo real del worker de TTPs
+	wsHub := handler.NewWSHub()
+	orchestrator.WithNotifier(wsHub)
+
 	// Inyectar el repositorio y proveedor para el catálogo de CAPEC
 	orchestrator.WithCAPEC(capecRepo, capecProvider)
 
@@ -183,7 +187,7 @@ func main() {
 
 	// 5. Inicialización de los Controladores HTTP (Adaptadores Inbound)
 	h := handler.NewOrchestratorHandler(orchestrator)
-	router := handler.NewRouter(h)
+	router := handler.NewRouter(h, wsHub)
 
 	// Middleware CORS para evitar bloqueos del navegador en desarrollo
 	corsHandler := middleware.CORS(router)
