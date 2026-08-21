@@ -24,7 +24,9 @@ RUN mkdir -p ~/.docker/cli-plugins && \
 COPY --from=builder /app/main .
 
 # Script de arranque: hace docker login si se proveen credenciales, luego arranca el backend
-RUN printf '#!/bin/sh\nif [ -n "$DOCKER_HUB_USER" ] && [ -n "$DOCKER_HUB_TOKEN" ]; then\n  echo "$DOCKER_HUB_TOKEN" | docker login -u "$DOCKER_HUB_USER" --password-stdin\nfi\nexec ./main\n' > /root/entrypoint.sh && chmod +x /root/entrypoint.sh
+# Nota: se pre-crea config.json sin credsStore para evitar el error "device or resource busy"
+# que ocurre en overlayfs cuando docker login intenta renombrar el fichero de credenciales.
+RUN printf '#!/bin/sh\nmkdir -p /root/.docker\necho "{\"auths\":{}}" > /root/.docker/config.json\nif [ -n "$DOCKER_HUB_USER" ] && [ -n "$DOCKER_HUB_TOKEN" ]; then\n  echo "$DOCKER_HUB_TOKEN" | docker login -u "$DOCKER_HUB_USER" --password-stdin\nfi\nexec ./main\n' > /root/entrypoint.sh && chmod +x /root/entrypoint.sh
 
 # Environment variables
 ENV NEO4J_URI=neo4j://neo4j:7687
