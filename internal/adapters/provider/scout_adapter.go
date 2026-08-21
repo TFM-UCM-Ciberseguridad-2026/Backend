@@ -74,7 +74,7 @@ type sarifResult struct {
 var cvssVectorRegex = regexp.MustCompile(`CVSS Vector:\s*(CVSS:[^\s]+)`)
 
 // ScanImage llama a Docker Scout y devuelve las vulnerabilidades encontradas.
-// Si Docker Scout no está disponible o falla, cae automáticamente a datos de demostración.
+// Si Docker Scout no está disponible o falla, devuelve error (sin datos de demostración).
 func (s *ScoutAdapter) ScanImage(ctx context.Context, imageName string) ([]domain.Vulnerability, error) {
 	// Normalizar el nombre de imagen: quitar tags duplicados como "nginx:1.19:latest"
 	imageName = normalizeImageName(imageName)
@@ -92,11 +92,10 @@ func (s *ScoutAdapter) ScanImage(ctx context.Context, imageName string) ([]domai
 		cmd.Stderr = &stderr
 
 		if err := cmd.Run(); err != nil {
-			fmt.Printf("[ScoutAdapter] INFO: Docker Scout no disponible para '%s'. Usando datos de demostración. (Causa: %v)\n", imageName, err)
-			outputBytes = getFallbackMockData(imageName)
-		} else {
-			outputBytes = out.Bytes()
+			fmt.Printf("[ScoutAdapter] Docker Scout no disponible para '%s': %v\n", imageName, err)
+			return nil, fmt.Errorf("docker scout no disponible para '%s': %w", imageName, err)
 		}
+		outputBytes = out.Bytes()
 
 		// Borrar la imagen de forma asíncrona para ahorrar espacio en disco
 		go func(img string) {

@@ -1054,22 +1054,47 @@ func normalizeProperties(props map[string]interface{}) map[string]interface{} {
 	}
 	cleaned := make(map[string]interface{}, len(props))
 	for k, v := range props {
-		if floatVal, ok := v.(float64); ok {
-			if floatVal == float64(int64(floatVal)) {
-				cleaned[k] = int64(floatVal)
-				continue
-			}
+		if v == nil {
+			continue
 		}
-
 		switch val := v.(type) {
-		case map[string]interface{}, []interface{}:
+		case float64:
+			// JSON unmarshals all numbers as float64.
+			// Preserve booleans-as-float (0.0/1.0 for bool props) and int conversions.
+			if val == float64(int64(val)) {
+				cleaned[k] = int64(val)
+			} else {
+				cleaned[k] = val
+			}
+		case bool:
+			// Keep booleans as booleans — Neo4j stores them natively.
+			cleaned[k] = val
+		case []interface{}:
+			// Keep arrays as native slices so Cypher `any(x IN list WHERE ...)` works.
+			// Neo4j driver accepts []interface{} directly as a list property.
+			cleaned[k] = val
+		case string:
+			// Detect JSON-encoded arrays from previous exports (round-trip safety)
+			// e.g. "[\"CWE-94\",\"CWE-787\"]" → []interface{}{"CWE-94","CWE-787"}
+			trimmed := strings.TrimSpace(val)
+			if len(trimmed) > 1 && trimmed[0] == '[' && trimmed[len(trimmed)-1] == ']' {
+				var arr []interface{}
+				if err := json.Unmarshal([]byte(trimmed), &arr); err == nil {
+					cleaned[k] = arr
+					continue
+				}
+			}
+			cleaned[k] = val
+		case map[string]interface{}:
+			// Nested maps: serialize to JSON string (Neo4j doesn't support nested maps as props)
 			if b, err := json.Marshal(val); err == nil {
 				cleaned[k] = string(b)
-				continue
+			} else {
+				cleaned[k] = fmt.Sprint(val)
 			}
+		default:
+			cleaned[k] = v
 		}
-
-		cleaned[k] = v
 	}
 	return cleaned
 }
