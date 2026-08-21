@@ -237,8 +237,10 @@ func (s *CPEService) ExecuteCPEPipeline(ctx context.Context, rawInput string) ([
 			CPE:          cpeFormatted,
 			ID:           item.CPENameID,
 			LastModified: item.LastModified,
+			URL:          item.URL,
 		})
 	}
+
 
 	return finalList, nil
 }

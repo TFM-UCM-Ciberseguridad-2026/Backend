@@ -616,17 +616,43 @@ func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 
 // --- DTOs para la API cpes/2.0 de NIST ---
 
+type NVDCPERefDTO struct {
+	Ref  string `json:"ref"`
+	Type string `json:"type"`
+}
+
 type NVDCPEMatchDTO struct {
-	CPEName      string `json:"cpeName"`
-	CPENameID    string `json:"cpeNameId"`
-	Deprecated   bool   `json:"deprecated"`
-	Created      string `json:"created"`
-	LastModified string `json:"lastModified"`
+	CPEName      string        `json:"cpeName"`
+	CPENameID    string        `json:"cpeNameId"`
+	Deprecated   bool          `json:"deprecated"`
+	Created      string        `json:"created"`
+	LastModified string        `json:"lastModified"`
 	Titles       []struct {
 		Title string `json:"title"`
 		Lang  string `json:"lang"`
 	} `json:"titles"`
+	Refs []NVDCPERefDTO `json:"refs"`
 }
+
+func extractURLFromRefs(refs []NVDCPERefDTO) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	for _, r := range refs {
+		if strings.EqualFold(r.Type, "Product") || strings.EqualFold(r.Type, "Vendor") {
+			if strings.TrimSpace(r.Ref) != "" {
+				return r.Ref
+			}
+		}
+	}
+	for _, r := range refs {
+		if strings.TrimSpace(r.Ref) != "" {
+			return r.Ref
+		}
+	}
+	return ""
+}
+
 
 
 type NVDCPENodeDTO struct {
@@ -842,16 +868,20 @@ func (a *NistAPIAdapter) FetchNVDProductsByCPEMatch(ctx context.Context, cpeBase
 			lastMod, _ = time.Parse(time.RFC3339, p.CPE.LastModified)
 		}
 
+		refURL := extractURLFromRefs(p.CPE.Refs)
+
 		items = append(items, domain.NVDProductItem{
 			CPEName:      p.CPE.CPEName,
 			CPENameID:    p.CPE.CPENameID,
 			Title:        titleEn,
 			Deprecated:   p.CPE.Deprecated,
 			LastModified: lastMod,
+			URL:          refURL,
 		})
 	}
 
 	return items, nil
 }
+
 
 

@@ -30,6 +30,8 @@ type Software struct {
 	ReleaseDate *time.Time `json:"release_date"`
 	Vendor      string     `json:"vendor"`
 	CPEStatus   string     `json:"cpe_status"`
+	URL         string     `json:"url,omitempty"`
 }
+
 
 

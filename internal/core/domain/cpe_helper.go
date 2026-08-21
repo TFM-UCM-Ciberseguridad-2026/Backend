@@ -13,6 +13,7 @@ type CPEFinalItem struct {
 	CPE          string    `json:"cpe"`
 	ID           string    `json:"id"`
 	LastModified time.Time `json:"last_modified"`
+	URL          string    `json:"url,omitempty"`
 }
 
 // NVDProductItem representa un elemento extraído de la API v2.0 de NVD.
@@ -22,6 +23,7 @@ type NVDProductItem struct {
 	Title        string    `json:"title"`
 	Deprecated   bool      `json:"deprecated"`
 	LastModified time.Time `json:"last_modified"`
+	URL          string    `json:"url,omitempty"`
 }
 
 
@@ -33,7 +35,9 @@ type CPESuggestion struct {
 	Title                    string `json:"title"`
 	MatchType                string `json:"match_type"` // EXACT_MATCH, FUZZY_SUGGESTION, CUSTOM_INTERNAL
 	RequiresUserConfirmation bool   `json:"requires_user_confirmation"`
+	URL                      string `json:"url,omitempty"`
 }
+
 
 // CPEMatchResult es el resultado producido por la canalización de resolución de CPEs en el dominio.
 type CPEMatchResult struct {
