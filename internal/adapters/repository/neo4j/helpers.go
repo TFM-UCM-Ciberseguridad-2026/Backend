@@ -20,7 +20,7 @@ func executeWriteHelper(ctx context.Context, driver neo4j.DriverWithContext, que
 	return err
 }
 
-// executeWriteSaveHelper ejecuta una consulta Cypher de creación y devuelve error si el nodo ya existía.
+// executeWriteSaveHelper ejecuta una consulta Cypher de creación/actualización con MERGE.
 func executeWriteSaveHelper(ctx context.Context, driver neo4j.DriverWithContext, query string, params map[string]any) error {
 	session := driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
@@ -29,14 +29,8 @@ func executeWriteSaveHelper(ctx context.Context, driver neo4j.DriverWithContext,
 		if err != nil {
 			return nil, err
 		}
-		summary, err := res.Consume(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if summary.Counters().NodesCreated() == 0 {
-			return nil, domain.ErrNodeAlreadyExists
-		}
-		return nil, nil
+		_, err = res.Consume(ctx)
+		return nil, err
 	})
 	return err
 }

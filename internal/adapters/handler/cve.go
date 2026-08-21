@@ -364,6 +364,14 @@ func (h *OrchestratorHandler) GetExploitationPaths(w http.ResponseWriter, r *htt
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Comprobar si hay análisis en background
+	isPending, err := h.orchestrator.IsAnalysisPending(r.Context(), projectID)
+	if err == nil && isPending {
+		w.Header().Set("X-Analysis-Pending", "true")
+		w.Header().Set("X-Analysis-Warning", url.PathEscape("Se ha detectado una imagen y se está analizando en segundo plano. Podrían surgir más rutas de ataque en el futuro."))
+	}
+
 	sendJSON(w, paths, http.StatusOK)
 }
 
