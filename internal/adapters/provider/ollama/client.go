@@ -81,13 +81,14 @@ func (c *OllamaClient) generateTTPs(parentCtx context.Context, prompt string) ([
 	c.acquireSem()
 	defer c.releaseSem()
 
+	startTime := time.Now()
 	var lastErr error
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			// Backoff exponencial: 5s, 10s
 			backoff := time.Duration(5*(1<<(attempt-1))) * time.Second
-			log.Printf("[Ollama] Retry %d/%d after %v...", attempt, maxRetries, backoff)
+			log.Printf("[Ollama] Reintento %d/%d tras %v...", attempt, maxRetries, backoff)
 			time.Sleep(backoff)
 		}
 
@@ -110,6 +111,8 @@ func (c *OllamaClient) generateTTPs(parentCtx context.Context, prompt string) ([
 			return nil, "", err
 		}
 
+		elapsed := time.Since(startTime).Round(time.Millisecond)
+		log.Printf("[Ollama] Tarea completada (%s) en %v -> %d TTPs mapeadas: %v", c.model, elapsed, len(result), result)
 		return result, raw, nil
 	}
 
