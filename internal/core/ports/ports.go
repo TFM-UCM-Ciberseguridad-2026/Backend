@@ -42,6 +42,23 @@ type SoftwarePort interface {
 	DeleteByID(ctx context.Context, id int64) error
 }
 
+// CPEResolverPort define las operaciones de consulta y validación externa contra la API CPE de NIST NVD.
+type CPEResolverPort interface {
+	SearchCPECandidates(ctx context.Context, vendor, product, version string) ([]domain.CPESuggestion, error)
+	ValidateExactCPE(ctx context.Context, cpeString string) (bool, error)
+	FetchNVDProductsByCPEMatch(ctx context.Context, cpeBase string, limit int) ([]domain.NVDProductItem, error)
+}
+
+// CPEGuesserPort define la interfaz para realizar búsquedas difusas de prefijos base en CIRCL CPE Guesser.
+type CPEGuesserPort interface {
+	SearchBaseCPEs(ctx context.Context, tokens []string, topK int) ([]string, error)
+}
+
+
+
+
+
+
 type FindingPort interface {
 	Save(ctx context.Context, finding *domain.Finding) error
 	Update(ctx context.Context, finding *domain.Finding) error

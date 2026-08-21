@@ -21,8 +21,10 @@ import (
 	"sync"
 	"time"
 
+
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 )
+
 
 // --- Formato JSON de NIST v2.0 ---
 
@@ -611,3 +613,245 @@ func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 		Patches:         patches,
 	}
 }
+
+// --- DTOs para la API cpes/2.0 de NIST ---
+
+type NVDCPEMatchDTO struct {
+	CPEName      string `json:"cpeName"`
+	CPENameID    string `json:"cpeNameId"`
+	Deprecated   bool   `json:"deprecated"`
+	Created      string `json:"created"`
+	LastModified string `json:"lastModified"`
+	Titles       []struct {
+		Title string `json:"title"`
+		Lang  string `json:"lang"`
+	} `json:"titles"`
+}
+
+
+type NVDCPENodeDTO struct {
+	CPE NVDCPEMatchDTO `json:"cpe"`
+}
+
+type NVDCPEResponseDTO struct {
+	ResultsPerPage int             `json:"resultsPerPage"`
+	StartIndex     int             `json:"startIndex"`
+	TotalResults   int             `json:"totalResults"`
+	Products       []NVDCPENodeDTO `json:"products"`
+}
+
+// SearchCPECandidates realiza la búsqueda por palabras clave en la API de NIST NVD CPEs v2.0
+func (a *NistAPIAdapter) SearchCPECandidates(ctx context.Context, vendor, product, version string) ([]domain.CPESuggestion, error) {
+	cleanQuery := strings.TrimSpace(fmt.Sprintf("%s %s", vendor, product))
+	if cleanQuery == "" {
+		return []domain.CPESuggestion{}, nil
+	}
+
+	if err := a.waitTurn(ctx); err != nil {
+		return nil, err
+	}
+
+	cpeBaseURL := "https://services.nvd.nist.gov/rest/json/cpes/2.0"
+	reqURL := fmt.Sprintf("%s?keywordSearch=%s&resultsPerPage=20", cpeBaseURL, url.QueryEscape(cleanQuery))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creando request para NVD CPE: %w", err)
+	}
+
+	if strings.TrimSpace(a.apiKey) != "" {
+		req.Header.Set("apiKey", a.apiKey)
+	}
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error ejecutando request NVD CPE: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			return []domain.CPESuggestion{}, nil
+		}
+		return nil, fmt.Errorf("api nist cpe devolvió status code invalido: %d", resp.StatusCode)
+	}
+
+	var apiResp NVDCPEResponseDTO
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("error decodificando respuesta JSON de NVD CPE: %w", err)
+	}
+
+	suggestions := make([]domain.CPESuggestion, 0, len(apiResp.Products))
+	seenCPEs := make(map[string]bool)
+
+	for _, p := range apiResp.Products {
+		cpeStr := p.CPE.CPEName
+		if seenCPEs[cpeStr] {
+			continue
+		}
+		seenCPEs[cpeStr] = true
+
+		candVendor, candProduct, _ := parseCPE23Parts(cpeStr)
+
+		var titleStr string
+		for _, t := range p.CPE.Titles {
+			if t.Lang == "en" {
+				titleStr = t.Title
+				break
+			}
+			if titleStr == "" {
+				titleStr = t.Title
+			}
+		}
+		if titleStr == "" {
+			titleStr = fmt.Sprintf("%s %s", candVendor, candProduct)
+		}
+
+		matchType := "FUZZY_SUGGESTION"
+		requiresConfirmation := true
+		if strings.EqualFold(candVendor, vendor) && strings.EqualFold(candProduct, product) {
+			matchType = "EXACT_MATCH"
+			requiresConfirmation = false
+		}
+
+		suggestions = append(suggestions, domain.CPESuggestion{
+			CPE:                      cpeStr,
+			Vendor:                   candVendor,
+			Product:                  candProduct,
+			Title:                    titleStr,
+			MatchType:                matchType,
+			RequiresUserConfirmation: requiresConfirmation,
+		})
+	}
+
+	if len(suggestions) > 10 {
+		suggestions = suggestions[:10]
+	}
+
+
+	return suggestions, nil
+}
+
+// ValidateExactCPE comprueba si una cadena CPE 2.3 dada existe literalmente en el catálogo de NIST NVD
+func (a *NistAPIAdapter) ValidateExactCPE(ctx context.Context, cpeString string) (bool, error) {
+	if strings.TrimSpace(cpeString) == "" || cpeString == "N/A" {
+		return false, nil
+	}
+
+	if err := a.waitTurn(ctx); err != nil {
+		return false, err
+	}
+
+	cpeBaseURL := "https://services.nvd.nist.gov/rest/json/cpes/2.0"
+	reqURL := fmt.Sprintf("%s?cpeMatchString=%s", cpeBaseURL, url.QueryEscape(cpeString))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return false, fmt.Errorf("error creando request para validación CPE: %w", err)
+	}
+
+	if strings.TrimSpace(a.apiKey) != "" {
+		req.Header.Set("apiKey", a.apiKey)
+	}
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("error ejecutando validación CPE: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return false, nil
+	}
+
+	var apiResp NVDCPEResponseDTO
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return false, err
+	}
+
+	return apiResp.TotalResults > 0, nil
+}
+
+func parseCPE23Parts(cpeStr string) (vendor, product, version string) {
+	parts := strings.Split(cpeStr, ":")
+	if len(parts) >= 6 {
+		return parts[3], parts[4], parts[5]
+	}
+	return "", "", "*"
+}
+
+// FetchNVDProductsByCPEMatch consulta la API v2.0 de NVD para la Fase 3 del pipeline usando cpeMatchString
+func (a *NistAPIAdapter) FetchNVDProductsByCPEMatch(ctx context.Context, cpeBase string, limit int) ([]domain.NVDProductItem, error) {
+	if strings.TrimSpace(cpeBase) == "" {
+		return []domain.NVDProductItem{}, nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	if err := a.waitTurn(ctx); err != nil {
+		return nil, err
+	}
+
+	// Asegurar comodín al final si no lo tiene
+	matchStr := cpeBase
+	if !strings.HasSuffix(matchStr, ":*") && !strings.HasSuffix(matchStr, "*") {
+		matchStr = matchStr + ":*"
+	}
+
+	cpeBaseURL := "https://services.nvd.nist.gov/rest/json/cpes/2.0"
+	reqURL := fmt.Sprintf("%s?cpeMatchString=%s&resultsPerPage=%d", cpeBaseURL, url.QueryEscape(matchStr), limit)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creando petición HTTP a NVD CPE API: %w", err)
+	}
+
+	if strings.TrimSpace(a.apiKey) != "" {
+		req.Header.Set("apiKey", a.apiKey)
+	}
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error ejecutando consulta HTTP a NVD CPE API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("NVD CPE API devolvió HTTP %d", resp.StatusCode)
+	}
+
+	var apiResp NVDCPEResponseDTO
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("error decodificando JSON de NVD CPE API: %w", err)
+	}
+
+	items := []domain.NVDProductItem{}
+	for _, p := range apiResp.Products {
+		titleEn := ""
+		for _, t := range p.CPE.Titles {
+			if t.Lang == "en" {
+				titleEn = t.Title
+				break
+			}
+		}
+		if titleEn == "" && len(p.CPE.Titles) > 0 {
+			titleEn = p.CPE.Titles[0].Title
+		}
+
+		lastMod, _ := time.Parse("2006-01-02T15:04:05.999", p.CPE.LastModified)
+		if lastMod.IsZero() {
+			lastMod, _ = time.Parse(time.RFC3339, p.CPE.LastModified)
+		}
+
+		items = append(items, domain.NVDProductItem{
+			CPEName:      p.CPE.CPEName,
+			CPENameID:    p.CPE.CPENameID,
+			Title:        titleEn,
+			Deprecated:   p.CPE.Deprecated,
+			LastModified: lastMod,
+		})
+	}
+
+	return items, nil
+}
+
+
