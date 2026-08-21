@@ -2,20 +2,19 @@ package handler
 
 /*
 Este archivo contiene los Controladores / Manejadores (HTTP Handlers) de la API REST.
-
-Propósito arquitectónico y teórico:
-1. Ubicación en Arquitectura Hexagonal: Se localiza en `internal/adapters/handler`, actuando como un Adaptador de Entrada (Driving Adapter) que traduce las peticiones HTTP entrantes en llamadas comprensibles por los puertos del Core.
-2. Adaptador de Entrada (Driving Adapter): Sirve como la interfaz de entrada HTTP para interactuar con el sistema de vulnerabilidades.
-3. Serialización y Deserialización: Traduce payloads de formato JSON a tipos estructurados del dominio (Deserialización) y codifica las estructuras de negocio de vuelta a formato JSON (Serialización).
-4. Gestión del Protocolo HTTP: Configura cabeceras específicas (Content-Type: application/json), valida el método HTTP y asigna el código de estado adecuado (200 OK, 400 Bad Request, 500 Internal Server Error) basándose en las respuestas devueltas por los servicios del dominio.
+Emite logs estructurados en JSON (sin campo operador) con diffs exactos y justificación.
 */
 
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -30,6 +29,80 @@ func NewOrchestratorHandler(o *service.Orchestrator) *OrchestratorHandler {
 	return &OrchestratorHandler{orchestrator: o}
 }
 
+
+// ESTRUCTURAS Y EMISOR DE AUDITORÍA (STDOUT + FICHERO PERSISTENTE)
+
+var auditWriter io.Writer = os.Stdout
+
+func init() {
+	logPath := os.Getenv("AUDIT_LOG_PATH")
+	if logPath == "" {
+		logPath = "logs/audit.log"
+	}
+	dir := filepath.Dir(logPath)
+	if dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0755)
+	}
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err == nil {
+		auditWriter = io.MultiWriter(os.Stdout, f)
+	} else {
+		auditWriter = os.Stdout
+	}
+}
+
+type auditChange struct {
+	Antes   any `json:"antes,omitempty"`
+	Despues any `json:"despues,omitempty"`
+}
+
+type auditAction struct {
+	Tipo         string `json:"tipo"`          // CREACION, MODIFICACION, ELIMINACION
+	TipoActivo   string `json:"tipo_activo"`   // Endpoint, Network, Container, etc.
+	IDActivo     string `json:"id_activo"`
+	NombreActivo string `json:"nombre_activo,omitempty"`
+	ProyectoID   string `json:"proyecto_id,omitempty"`
+}
+
+type auditLogEntry struct {
+	FechaHora         string                 `json:"fecha_hora"`
+	Nivel             string                 `json:"nivel"` // "AUDIT"
+	Accion            auditAction            `json:"accion"`
+	Justificacion     string                 `json:"justificacion,omitempty"`
+	CambiosRealizados map[string]auditChange `json:"cambios_realizados,omitempty"`
+	Estado            string                 `json:"estado"` // SUCCESS / ERROR
+	DetallesError     string                 `json:"detalles_error,omitempty"`
+}
+
+func emitAuditLog(tipoAccion, tipoActivo, idActivo, nombreActivo, proyectoID, justificacion string, cambios map[string]auditChange, estado, errStr string) {
+	entry := auditLogEntry{
+		FechaHora: time.Now().UTC().Format(time.RFC3339Nano),
+		Nivel:     "AUDIT",
+		Accion: auditAction{
+			Tipo:         tipoAccion,
+			TipoActivo:   tipoActivo,
+			IDActivo:     idActivo,
+			NombreActivo: nombreActivo,
+			ProyectoID:   proyectoID,
+		},
+		Justificacion:     justificacion,
+		CambiosRealizados: cambios,
+		Estado:            estado,
+		DetallesError:     errStr,
+	}
+
+	if b, err := json.Marshal(entry); err == nil {
+		fmt.Fprintln(auditWriter, string(b)) // Escribe simultáneamente en consola y fichero
+	}
+}
+
+func extractJustification(r *http.Request) string {
+	if q := r.URL.Query().Get("justification"); strings.TrimSpace(q) != "" {
+		return strings.TrimSpace(q)
+	}
+	return ""
+}
+
 func sendError(w http.ResponseWriter, msg string, code int) {
 	http.Error(w, msg, code)
 }
@@ -38,22 +111,32 @@ func sendJSON(w http.ResponseWriter, data any, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(data)
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 // POST /api/projects
 func (h *OrchestratorHandler) CreateProject(w http.ResponseWriter, r *http.Request) {
-	var project domain.Project
-	if err := json.NewDecoder(r.Body).Decode(&project); err != nil {
+	var payload struct {
+		domain.Project
+		Justification string `json:"justification"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		sendError(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
+	project := payload.Project
 	if err := h.orchestrator.CreateProject(r.Context(), &project); err != nil {
+		emitAuditLog("CREACION", "Project", fmt.Sprint(project.ProjectID), project.Nombre, fmt.Sprint(project.ProjectID), payload.Justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	cambios := map[string]auditChange{
+		"nombre":     {Despues: project.Nombre},
+		"project_id": {Despues: project.ProjectID},
+	}
+	emitAuditLog("CREACION", "Project", fmt.Sprint(project.ProjectID), project.Nombre, fmt.Sprint(project.ProjectID), payload.Justification, cambios, "SUCCESS", "")
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
 }
 
@@ -66,11 +149,19 @@ func (h *OrchestratorHandler) DeleteProject(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	oldProj, _ := h.orchestrator.GetProjectByID(r.Context(), projectID)
+	nombre := ""
+	if oldProj != nil {
+		nombre = oldProj.Nombre
+	}
+
 	if err := h.orchestrator.DeleteProject(r.Context(), projectID); err != nil {
+		emitAuditLog("ELIMINACION", "Project", idStr, nombre, idStr, "", nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	emitAuditLog("ELIMINACION", "Project", idStr, nombre, idStr, "", nil, "SUCCESS", "")
 	sendJSON(w, map[string]string{"status": "success", "message": "Proyecto eliminado con éxito"}, http.StatusOK)
 }
 
@@ -84,18 +175,28 @@ func (h *OrchestratorHandler) RenameProject(w http.ResponseWriter, r *http.Reque
 	}
 
 	var payload struct {
-		Name string `json:"name"`
+		Name          string `json:"name"`
+		Justification string `json:"justification"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		sendError(w, "Error decodificando payload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
+	oldProj, _ := h.orchestrator.GetProjectByID(r.Context(), projectID)
+
 	if err := h.orchestrator.RenameProject(r.Context(), projectID, payload.Name); err != nil {
+		emitAuditLog("MODIFICACION", "Project", idStr, payload.Name, idStr, payload.Justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	cambios := make(map[string]auditChange)
+	if oldProj != nil && oldProj.Nombre != payload.Name {
+		cambios["nombre"] = auditChange{Antes: oldProj.Nombre, Despues: payload.Name}
+	}
+
+	emitAuditLog("MODIFICACION", "Project", idStr, payload.Name, idStr, payload.Justification, cambios, "SUCCESS", "")
 	sendJSON(w, map[string]string{"status": "success", "message": "Proyecto renombrado con éxito"}, http.StatusOK)
 }
 
@@ -108,16 +209,39 @@ func (h *OrchestratorHandler) AddEndpointToProject(w http.ResponseWriter, r *htt
 		return
 	}
 
-	var endpoint domain.Endpoint
-	if err := json.NewDecoder(r.Body).Decode(&endpoint); err != nil {
+	var payload struct {
+		domain.Endpoint
+		Justification string `json:"justification"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		sendError(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
+	endpoint := payload.Endpoint
 	if err := h.orchestrator.AddEndpointToProject(r.Context(), projectID, &endpoint); err != nil {
+		emitAuditLog("CREACION", "Endpoint", fmt.Sprint(endpoint.EndpointID), endpoint.Hostname, idStr, payload.Justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	cambios := map[string]auditChange{
+		"endpoint_id":         {Despues: endpoint.EndpointID},
+		"hostname":            {Despues: endpoint.Hostname},
+		"tipo":                {Despues: endpoint.Type},
+		"status":              {Despues: endpoint.Status},
+		"environment":         {Despues: endpoint.Environment},
+		"internet_exposed":    {Despues: endpoint.InternetExposed},
+		"confidentiality_req": {Despues: endpoint.ConfidentialityReq},
+		"integrity_req":       {Despues: endpoint.IntegrityReq},
+		"availability_req":    {Despues: endpoint.AvailabilityReq},
+		"project_id":          {Despues: projectID},
+	}
+	if len(endpoint.IPs) > 0 {
+		cambios["ips"] = auditChange{Despues: endpoint.IPs}
+	}
+
+	emitAuditLog("CREACION", "Endpoint", fmt.Sprint(endpoint.EndpointID), endpoint.Hostname, idStr, payload.Justification, cambios, "SUCCESS", "")
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
 }
 
@@ -130,16 +254,35 @@ func (h *OrchestratorHandler) AssociateHardwareToEndpoint(w http.ResponseWriter,
 		return
 	}
 
-	var hw domain.Hardware
-	if err := json.NewDecoder(r.Body).Decode(&hw); err != nil {
+	var payload struct {
+		domain.Hardware
+		Justification string `json:"justification"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		sendError(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
+	hw := payload.Hardware
 	if err := h.orchestrator.AssociateHardwareToEndpoint(r.Context(), endpointID, &hw); err != nil {
+		emitAuditLog("CREACION", "Hardware", fmt.Sprint(hw.HardwareID), hw.Model, "", payload.Justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	cambios := map[string]auditChange{
+		"hardware_id":   {Despues: hw.HardwareID},
+		"modelo":        {Despues: hw.Model},
+		"tipo":          {Despues: hw.Type},
+		"manufacturer":  {Despues: hw.Manufacturer},
+		"serial_number": {Despues: hw.SerialNumber},
+		"cpu":           {Despues: hw.CPU},
+		"ram_gb":        {Despues: hw.RAMGB},
+		"storage_gb":    {Despues: hw.StorageGB},
+		"endpoint_id":   {Despues: endpointID},
+	}
+
+	emitAuditLog("CREACION", "Hardware", fmt.Sprint(hw.HardwareID), hw.Model, "", payload.Justification, cambios, "SUCCESS", "")
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
 }
 
@@ -153,8 +296,9 @@ func (h *OrchestratorHandler) RegisterSoftwareInstallation(w http.ResponseWriter
 	}
 
 	var req struct {
-		Software     domain.Software             `json:"software"`
-		Installation domain.SoftwareInstallation `json:"installation"`
+		Software      domain.Software             `json:"software"`
+		Installation  domain.SoftwareInstallation `json:"installation"`
+		Justification string                      `json:"justification"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendError(w, "Invalid JSON", http.StatusBadRequest)
@@ -162,9 +306,26 @@ func (h *OrchestratorHandler) RegisterSoftwareInstallation(w http.ResponseWriter
 	}
 
 	if err := h.orchestrator.RegisterSoftwareInstallation(r.Context(), endpointID, &req.Software, &req.Installation); err != nil {
+		emitAuditLog("CREACION", "SoftwareInstallation", req.Installation.InstallationID, req.Software.Name, "", req.Justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	cambios := map[string]auditChange{
+		"software_id":       {Despues: req.Software.SoftwareID},
+		"name":              {Despues: req.Software.Name},
+		"version":           {Despues: req.Software.Version},
+		"vendor":            {Despues: req.Software.Vendor},
+		"type":              {Despues: req.Software.Type},
+		"cpe":               {Despues: req.Software.CPE},
+		"installation_id":   {Despues: req.Installation.InstallationID},
+		"install_path":      {Despues: req.Installation.InstallPath},
+		"status":            {Despues: req.Installation.Status},
+		"criticality_level": {Despues: req.Installation.CriticalityLevel},
+		"endpoint_id":       {Despues: endpointID},
+	}
+
+	emitAuditLog("CREACION", "SoftwareInstallation", req.Installation.InstallationID, req.Software.Name, "", req.Justification, cambios, "SUCCESS", "")
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
 }
 
@@ -190,17 +351,12 @@ func (h *OrchestratorHandler) ScanContainerImageVulnerabilities(w http.ResponseW
 		imageName = imageID
 	}
 
-	// Ejecutar el escaneo de forma síncrona (bloqueante)
-	// Gracias al timeout de 5 minutos en Vite, no debería dar 502 con imágenes grandes.
 	if err := h.orchestrator.ScanAndSaveContainerImage(r.Context(), imageName, imageID); err != nil {
 		fmt.Printf("[ScanContainerImage] Error escaneando %s: %v\n", imageName, err)
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	fmt.Printf("[ScanContainerImage] Escaneo completado para %s\n", imageName)
-
-	// Responder con éxito una vez terminado
 	sendJSON(w, map[string]string{
 		"status":  "success",
 		"message": fmt.Sprintf("Escaneo de '%s' completado.", imageName),
@@ -212,8 +368,9 @@ func (h *OrchestratorHandler) RegisterContainerSoftwareInstallation(w http.Respo
 	idStr := r.PathValue("id")
 
 	var req struct {
-		Software     domain.Software             `json:"software"`
-		Installation domain.SoftwareInstallation `json:"installation"`
+		Software      domain.Software             `json:"software"`
+		Installation  domain.SoftwareInstallation `json:"installation"`
+		Justification string                      `json:"justification"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendError(w, "Invalid JSON", http.StatusBadRequest)
@@ -221,9 +378,26 @@ func (h *OrchestratorHandler) RegisterContainerSoftwareInstallation(w http.Respo
 	}
 
 	if err := h.orchestrator.RegisterContainerSoftwareInstallation(r.Context(), idStr, &req.Software, &req.Installation); err != nil {
+		emitAuditLog("CREACION", "ContainerSoftwareInstallation", req.Installation.InstallationID, req.Software.Name, "", req.Justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	cambios := map[string]auditChange{
+		"software_id":       {Despues: req.Software.SoftwareID},
+		"name":              {Despues: req.Software.Name},
+		"version":           {Despues: req.Software.Version},
+		"vendor":            {Despues: req.Software.Vendor},
+		"type":              {Despues: req.Software.Type},
+		"cpe":               {Despues: req.Software.CPE},
+		"installation_id":   {Despues: req.Installation.InstallationID},
+		"install_path":      {Despues: req.Installation.InstallPath},
+		"status":            {Despues: req.Installation.Status},
+		"criticality_level": {Despues: req.Installation.CriticalityLevel},
+		"container_id":      {Despues: idStr},
+	}
+
+	emitAuditLog("CREACION", "ContainerSoftwareInstallation", req.Installation.InstallationID, req.Software.Name, "", req.Justification, cambios, "SUCCESS", "")
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
 }
 
@@ -316,6 +490,7 @@ func (h *OrchestratorHandler) ImportInfrastructure(w http.ResponseWriter, r *htt
 		return
 	}
 
+	emitAuditLog("CREACION", "InfrastructureImport", "batch", "GraphImport", "", "Importación masiva de infraestructura JSON", nil, "SUCCESS", "")
 	sendJSON(w, map[string]string{"status": "success", "message": "Infraestructura importada con éxito"}, http.StatusCreated)
 }
 
@@ -367,13 +542,7 @@ func (h *OrchestratorHandler) GetExploitationPaths(w http.ResponseWriter, r *htt
 	sendJSON(w, paths, http.StatusOK)
 }
 
-/*
-ScanSoftwareVulnerabilities maneja la solicitud HTTP POST para ejecutar el escaneo y registro automático de vulnerabilidades.
-Ruta: POST /api/installations/{id}/scan-vulns?software_id={software_id}
-- 'id': Corresponde al ID de la instalación del software.
-- 'software_id': ID numérico (Query Parameter) que apunta al software instalado.
-Llama directamente al servicio Orchestrator y devuelve un JSON indicando estado exitoso o el respectivo código de error HTTP.
-*/
+// POST /api/installations/{id}/scan-vulns
 func (h *OrchestratorHandler) ScanSoftwareVulnerabilities(w http.ResponseWriter, r *http.Request) {
 	instID := r.PathValue("id")
 	swIDStr := r.URL.Query().Get("software_id")
@@ -410,8 +579,6 @@ func (h *OrchestratorHandler) ScanSoftwareVulnerabilities(w http.ResponseWriter,
 }
 
 // POST /api/endpoints/{id}/compute-risk
-// Calcula y persiste el riesgo de todos los findings abiertos del endpoint indicado.
-// Llama a las APIs EPSS y KEV para obtener datos frescos antes de calcular.
 func (h *OrchestratorHandler) ComputeEndpointRisk(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	endpointID, err := strconv.ParseInt(idStr, 10, 64)
@@ -431,7 +598,6 @@ func (h *OrchestratorHandler) ComputeEndpointRisk(w http.ResponseWriter, r *http
 }
 
 // POST /api/risk/recalculate-all
-// Recalcula el riesgo de todos los endpoints. Pensado para el cron diario o trigger manual.
 func (h *OrchestratorHandler) ComputeAllRisks(w http.ResponseWriter, r *http.Request) {
 	if err := h.orchestrator.ComputeAllEndpointsRisk(r.Context()); err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
@@ -441,7 +607,6 @@ func (h *OrchestratorHandler) ComputeAllRisks(w http.ResponseWriter, r *http.Req
 }
 
 // POST /api/installations/{id}/compute-risk
-// Calcula y persiste el riesgo de todos los findings abiertos de la instalación de software indicada.
 func (h *OrchestratorHandler) ComputeSoftwareInstallationRisk(w http.ResponseWriter, r *http.Request) {
 	installationID := r.PathValue("id")
 	if installationID == "" {
@@ -462,7 +627,6 @@ func (h *OrchestratorHandler) ComputeSoftwareInstallationRisk(w http.ResponseWri
 }
 
 // POST /api/projects/{id}/compute-risk
-// Recalcula el riesgo agregado de un proyecto completo, basado en todos sus endpoints y findings asociados.
 func (h *OrchestratorHandler) ComputeProjectRisk(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	projectID, err := strconv.ParseInt(idStr, 10, 64)
@@ -483,7 +647,6 @@ func (h *OrchestratorHandler) ComputeProjectRisk(w http.ResponseWriter, r *http.
 }
 
 // POST /api/risk/recalculate-all-projects
-// Recalcula el riesgo de todos los proyectos. Pensado para el cron diario o trigger manual.
 func (h *OrchestratorHandler) ComputeAllProjectsRisk(w http.ResponseWriter, r *http.Request) {
 	if err := h.orchestrator.ComputeAllProjectsRisk(r.Context()); err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
@@ -494,7 +657,6 @@ func (h *OrchestratorHandler) ComputeAllProjectsRisk(w http.ResponseWriter, r *h
 }
 
 // GET /api/vulnerabilities/{cve}/patches
-// Devuelve los parches oficiales disponibles para un CVE concreto.
 func (h *OrchestratorHandler) GetPatchesForVulnerability(w http.ResponseWriter, r *http.Request) {
 	cveID := r.PathValue("cve")
 	if cveID == "" {
@@ -516,8 +678,6 @@ func (h *OrchestratorHandler) GetPatchesForVulnerability(w http.ResponseWriter, 
 }
 
 // POST /api/vulnerabilities/{cve}/patches/refresh
-// Consulta la fuente externa de parches (OSV), registra los que encuentre y propaga la
-// versión corregida a las remediaciones del CVE.
 func (h *OrchestratorHandler) RefreshPatchesForVulnerability(w http.ResponseWriter, r *http.Request) {
 	cveID := r.PathValue("cve")
 	if cveID == "" {
@@ -531,7 +691,6 @@ func (h *OrchestratorHandler) RefreshPatchesForVulnerability(w http.ResponseWrit
 		return
 	}
 
-	// La fuente no cubre este CVE: no es un error, simplemente no aporta datos.
 	if info == nil {
 		sendJSON(w, map[string]any{
 			"cve_id": cveID,
@@ -552,18 +711,6 @@ func (h *OrchestratorHandler) RefreshPatchesForVulnerability(w http.ResponseWrit
 }
 
 // POST /api/installations/{id}/applied-patches
-// Declara que un parche se ha aplicado sobre la instalación indicada.
-//
-// Cuerpo esperado:
-//
-//	{
-//	  "cve_id": "CVE-2021-44228",
-//	  "patch_id": 8,                       // opcional si el CVE solo tiene un parche
-//	  "remediation_level": "OFFICIAL_FIX",  // OFFICIAL_FIX | TEMPORARY_FIX | WORKAROUND | UNAVAILABLE
-//	  "applied_at": "2026-07-29T10:00:00Z", // opcional, por defecto ahora
-//	  "applied_by": "diego",
-//	  "notes": "..."
-//	}
 func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http.Request) {
 	installationID := r.PathValue("id")
 	if installationID == "" {
@@ -595,11 +742,11 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 		appliedAt, req.AppliedBy, req.Notes,
 	)
 	if err != nil {
-		// Datos mal informados por el cliente, no fallo del servidor.
 		sendError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
+	emitAuditLog("CREACION", "AppliedPatch", fmt.Sprint(req.PatchID), req.CVEID, "", req.Notes, nil, "SUCCESS", "")
 	sendJSON(w, map[string]any{
 		"status":            "parche declarado como aplicado",
 		"application":       application,
@@ -607,9 +754,7 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 	}, http.StatusCreated)
 }
 
-// GET /api/patch-queue?project_id={id}&limit={n}
-// Cola de parcheo: findings pendientes ordenados por prioridad. Sin project_id recorre
-// toda la infraestructura.
+// GET /api/patch-queue
 func (h *OrchestratorHandler) GetPatchQueue(w http.ResponseWriter, r *http.Request) {
 	var projectID *int64
 	if raw := r.URL.Query().Get("project_id"); raw != "" {
@@ -644,7 +789,6 @@ func (h *OrchestratorHandler) GetPatchQueue(w http.ResponseWriter, r *http.Reque
 }
 
 // GET /api/installations/{id}/applied-patches
-// Devuelve el histórico de parches aplicados sobre una instalación.
 func (h *OrchestratorHandler) GetAppliedPatchHistory(w http.ResponseWriter, r *http.Request) {
 	installationID := r.PathValue("id")
 	if installationID == "" {
@@ -665,22 +809,17 @@ func (h *OrchestratorHandler) GetAppliedPatchHistory(w http.ResponseWriter, r *h
 	}, http.StatusOK)
 }
 
-// createNetworkRequest es el DTO de entrada para POST /api/networks y PUT /api/networks/{id}.
-// ProjectID identifica el proyecto activo en el frontend en el momento de crear/editar la
-// red: si la red no coincide con ningún endpoint, se usa para anclarla como huérfana de
-// ese proyecto únicamente (ver Orchestrator.CreateNetwork/UpdateNetwork).
 type createNetworkRequest struct {
-	Nombre      string `json:"nombre"`
-	CIDR        string `json:"cidr"`
-	Gateway     string `json:"gateway"`
-	VLANID      int64  `json:"vlan_id"`
-	Descripcion string `json:"descripcion"`
-	ProjectID   int64  `json:"project_id"`
+	Nombre        string `json:"nombre"`
+	CIDR          string `json:"cidr"`
+	Gateway       string `json:"gateway"`
+	VLANID        int64  `json:"vlan_id"`
+	Descripcion   string `json:"descripcion"`
+	ProjectID     int64  `json:"project_id"`
+	Justification string `json:"justification"`
 }
 
 // POST /api/networks
-// Crea una red de forma independiente (sin endpoint asociado) y enlaza automáticamente
-// los endpoints cuya IP caiga dentro del CIDR y, si se indica VLAN, la compartan.
 func (h *OrchestratorHandler) CreateNetwork(w http.ResponseWriter, r *http.Request) {
 	var req createNetworkRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -703,10 +842,22 @@ func (h *OrchestratorHandler) CreateNetwork(w http.ResponseWriter, r *http.Reque
 
 	networkID, linked, err := h.orchestrator.CreateNetwork(r.Context(), &network, req.ProjectID)
 	if err != nil {
+		emitAuditLog("CREACION", "Network", fmt.Sprint(networkID), req.Nombre, fmt.Sprint(req.ProjectID), req.Justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	cambios := map[string]auditChange{
+		"network_id":  {Despues: networkID},
+		"nombre":      {Despues: req.Nombre},
+		"cidr":        {Despues: req.CIDR},
+		"gateway":     {Despues: req.Gateway},
+		"vlan_id":     {Despues: req.VLANID},
+		"descripcion": {Despues: req.Descripcion},
+		"project_id":  {Despues: req.ProjectID},
+	}
+
+	emitAuditLog("CREACION", "Network", fmt.Sprint(networkID), req.Nombre, fmt.Sprint(req.ProjectID), req.Justification, cambios, "SUCCESS", "")
 	sendJSON(w, map[string]any{
 		"status":           "success",
 		"network_id":       networkID,
@@ -719,7 +870,7 @@ func (h *OrchestratorHandler) CreateNetwork(w http.ResponseWriter, r *http.Reque
 	}, http.StatusCreated)
 }
 
-// === HANDLERS DE EDICIÓN Y BORRADO (CRUD COMPLETO) ===
+// === HANDLERS DE EDICIÓN Y BORRADO ===
 
 // PUT /api/endpoints/{id}
 func (h *OrchestratorHandler) UpdateEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -729,17 +880,62 @@ func (h *OrchestratorHandler) UpdateEndpoint(w http.ResponseWriter, r *http.Requ
 		sendError(w, "ID de endpoint inválido", http.StatusBadRequest)
 		return
 	}
-	var endpoint domain.Endpoint
-	if err := json.NewDecoder(r.Body).Decode(&endpoint); err != nil {
+
+	var req struct {
+		domain.Endpoint
+		Justification string `json:"justification"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	justification := strings.TrimSpace(req.Justification)
+	if justification == "" {
+		sendError(w, "El campo 'justificación' es obligatorio para modificar el endpoint", http.StatusBadRequest)
+		return
+	}
+
+	oldEndpoint, _ := h.orchestrator.GetEndpointByID(r.Context(), endpointID)
+
+	endpoint := req.Endpoint
 	endpoint.EndpointID = endpointID
 
 	if err := h.orchestrator.UpdateEndpoint(r.Context(), &endpoint); err != nil {
+		emitAuditLog("MODIFICACION", "Endpoint", idStr, endpoint.Hostname, "", justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	cambios := make(map[string]auditChange)
+	if oldEndpoint != nil {
+		if oldEndpoint.Hostname != endpoint.Hostname && endpoint.Hostname != "" {
+			cambios["hostname"] = auditChange{Antes: oldEndpoint.Hostname, Despues: endpoint.Hostname}
+		}
+		if oldEndpoint.Type != endpoint.Type && endpoint.Type != "" {
+			cambios["tipo"] = auditChange{Antes: oldEndpoint.Type, Despues: endpoint.Type}
+		}
+		if oldEndpoint.Status != endpoint.Status && endpoint.Status != "" {
+			cambios["status"] = auditChange{Antes: oldEndpoint.Status, Despues: endpoint.Status}
+		}
+		if oldEndpoint.Environment != endpoint.Environment {
+			cambios["environment"] = auditChange{Antes: oldEndpoint.Environment, Despues: endpoint.Environment}
+		}
+		if oldEndpoint.InternetExposed != endpoint.InternetExposed {
+			cambios["internet_exposed"] = auditChange{Antes: oldEndpoint.InternetExposed, Despues: endpoint.InternetExposed}
+		}
+		if oldEndpoint.ConfidentialityReq != endpoint.ConfidentialityReq && endpoint.ConfidentialityReq != "" {
+			cambios["confidentiality_req"] = auditChange{Antes: oldEndpoint.ConfidentialityReq, Despues: endpoint.ConfidentialityReq}
+		}
+		if oldEndpoint.IntegrityReq != endpoint.IntegrityReq && endpoint.IntegrityReq != "" {
+			cambios["integrity_req"] = auditChange{Antes: oldEndpoint.IntegrityReq, Despues: endpoint.IntegrityReq}
+		}
+		if oldEndpoint.AvailabilityReq != endpoint.AvailabilityReq && endpoint.AvailabilityReq != "" {
+			cambios["availability_req"] = auditChange{Antes: oldEndpoint.AvailabilityReq, Despues: endpoint.AvailabilityReq}
+		}
+	}
+
+	emitAuditLog("MODIFICACION", "Endpoint", idStr, endpoint.Hostname, "", justification, cambios, "SUCCESS", "")
 	sendJSON(w, map[string]any{"status": "success", "message": "Endpoint actualizado con éxito"}, http.StatusOK)
 }
 
@@ -762,16 +958,42 @@ func (h *OrchestratorHandler) GetEndpointIPs(w http.ResponseWriter, r *http.Requ
 // DELETE /api/endpoints/{id}
 func (h *OrchestratorHandler) DeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
-	if endpointID, err := strconv.ParseInt(idStr, 10, 64); err == nil {
-		if err := h.orchestrator.DeleteEndpoint(r.Context(), endpointID); err == nil {
-			sendJSON(w, map[string]any{"status": "success", "message": "Endpoint eliminado con éxito"}, http.StatusOK)
-			return
+	justification := extractJustification(r)
+	if justification == "" {
+		var req struct {
+			Justification string `json:"justification"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		justification = strings.TrimSpace(req.Justification)
+	}
+
+	if justification == "" {
+		sendError(w, "El campo 'justificación' es obligatorio para eliminar el endpoint", http.StatusBadRequest)
+		return
+	}
+
+	endpointID, parseErr := strconv.ParseInt(idStr, 10, 64)
+	nombre := ""
+	if parseErr == nil {
+		if oldEp, _ := h.orchestrator.GetEndpointByID(r.Context(), endpointID); oldEp != nil {
+			nombre = oldEp.Hostname
 		}
 	}
-	if err := h.orchestrator.DeleteNodeByID(r.Context(), idStr); err != nil {
+
+	var err error
+	if parseErr == nil {
+		err = h.orchestrator.DeleteEndpoint(r.Context(), endpointID)
+	} else {
+		err = h.orchestrator.DeleteNodeByID(r.Context(), idStr)
+	}
+
+	if err != nil {
+		emitAuditLog("ELIMINACION", "Endpoint", idStr, nombre, "", justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	emitAuditLog("ELIMINACION", "Endpoint", idStr, nombre, "", justification, nil, "SUCCESS", "")
 	sendJSON(w, map[string]any{"status": "success", "message": "Endpoint eliminado con éxito"}, http.StatusOK)
 }
 
@@ -783,11 +1005,21 @@ func (h *OrchestratorHandler) UpdateNetwork(w http.ResponseWriter, r *http.Reque
 		sendError(w, "ID de red inválido", http.StatusBadRequest)
 		return
 	}
+
 	var req createNetworkRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	justification := strings.TrimSpace(req.Justification)
+	if justification == "" {
+		sendError(w, "El campo 'justificación' es obligatorio para modificar la red", http.StatusBadRequest)
+		return
+	}
+
+	oldNet, _ := h.orchestrator.GetNetworkByID(r.Context(), networkID)
+
 	network := domain.Network{
 		NetworkID:   networkID,
 		Nombre:      req.Nombre,
@@ -796,27 +1028,75 @@ func (h *OrchestratorHandler) UpdateNetwork(w http.ResponseWriter, r *http.Reque
 		VLANID:      req.VLANID,
 		Descripcion: req.Descripcion,
 	}
+
 	linked, err := h.orchestrator.UpdateNetwork(r.Context(), &network, req.ProjectID)
 	if err != nil {
+		emitAuditLog("MODIFICACION", "Network", idStr, req.Nombre, fmt.Sprint(req.ProjectID), justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	cambios := make(map[string]auditChange)
+	if oldNet != nil {
+		if oldNet.Nombre != network.Nombre {
+			cambios["nombre"] = auditChange{Antes: oldNet.Nombre, Despues: network.Nombre}
+		}
+		if oldNet.CIDR != network.CIDR {
+			cambios["cidr"] = auditChange{Antes: oldNet.CIDR, Despues: network.CIDR}
+		}
+		if oldNet.Gateway != network.Gateway {
+			cambios["gateway"] = auditChange{Antes: oldNet.Gateway, Despues: network.Gateway}
+		}
+		if oldNet.VLANID != network.VLANID {
+			cambios["vlan_id"] = auditChange{Antes: oldNet.VLANID, Despues: network.VLANID}
+		}
+		if oldNet.Descripcion != network.Descripcion {
+			cambios["descripcion"] = auditChange{Antes: oldNet.Descripcion, Despues: network.Descripcion}
+		}
+	}
+
+	emitAuditLog("MODIFICACION", "Network", idStr, req.Nombre, fmt.Sprint(req.ProjectID), justification, cambios, "SUCCESS", "")
 	sendJSON(w, map[string]any{"status": "success", "linked_endpoints": linked, "message": "Red actualizada con éxito"}, http.StatusOK)
 }
 
 // DELETE /api/networks/{id}
 func (h *OrchestratorHandler) DeleteNetwork(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
-	if networkID, err := strconv.ParseInt(idStr, 10, 64); err == nil {
-		if err := h.orchestrator.DeleteNetwork(r.Context(), networkID); err == nil {
-			sendJSON(w, map[string]any{"status": "success", "message": "Red eliminada con éxito"}, http.StatusOK)
-			return
+	justification := extractJustification(r)
+	if justification == "" {
+		var req struct {
+			Justification string `json:"justification"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		justification = strings.TrimSpace(req.Justification)
+	}
+
+	if justification == "" {
+		sendError(w, "El campo 'justificación' es obligatorio para eliminar la red", http.StatusBadRequest)
+		return
+	}
+
+	nombre := ""
+	if networkID, parseErr := strconv.ParseInt(idStr, 10, 64); parseErr == nil {
+		if oldNet, _ := h.orchestrator.GetNetworkByID(r.Context(), networkID); oldNet != nil {
+			nombre = oldNet.Nombre
 		}
 	}
-	if err := h.orchestrator.DeleteNodeByID(r.Context(), idStr); err != nil {
+
+	var err error
+	if networkID, parseErr := strconv.ParseInt(idStr, 10, 64); parseErr == nil {
+		err = h.orchestrator.DeleteNetwork(r.Context(), networkID)
+	} else {
+		err = h.orchestrator.DeleteNodeByID(r.Context(), idStr)
+	}
+
+	if err != nil {
+		emitAuditLog("ELIMINACION", "Network", idStr, nombre, "", justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	emitAuditLog("ELIMINACION", "Network", idStr, nombre, "", justification, nil, "SUCCESS", "")
 	sendJSON(w, map[string]any{"status": "success", "message": "Red eliminada con éxito"}, http.StatusOK)
 }
 
@@ -828,32 +1108,99 @@ func (h *OrchestratorHandler) UpdateHardware(w http.ResponseWriter, r *http.Requ
 		sendError(w, "ID de hardware inválido", http.StatusBadRequest)
 		return
 	}
-	var hw domain.Hardware
-	if err := json.NewDecoder(r.Body).Decode(&hw); err != nil {
+
+	var req struct {
+		domain.Hardware
+		Justification string `json:"justification"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	justification := strings.TrimSpace(req.Justification)
+	if justification == "" {
+		sendError(w, "El campo 'justificación' es obligatorio para modificar el hardware", http.StatusBadRequest)
+		return
+	}
+
+	oldHW, _ := h.orchestrator.GetHardwareByID(r.Context(), hwID)
+
+	hw := req.Hardware
 	hw.HardwareID = hwID
 	if err := h.orchestrator.UpdateHardware(r.Context(), &hw); err != nil {
+		emitAuditLog("MODIFICACION", "Hardware", idStr, hw.Model, "", justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	cambios := make(map[string]auditChange)
+	if oldHW != nil {
+		if oldHW.Model != hw.Model && hw.Model != "" {
+			cambios["modelo"] = auditChange{Antes: oldHW.Model, Despues: hw.Model}
+		}
+		if oldHW.Type != hw.Type && hw.Type != "" {
+			cambios["tipo"] = auditChange{Antes: oldHW.Type, Despues: hw.Type}
+		}
+		if oldHW.Manufacturer != hw.Manufacturer && hw.Manufacturer != "" {
+			cambios["manufacturer"] = auditChange{Antes: oldHW.Manufacturer, Despues: hw.Manufacturer}
+		}
+		if oldHW.SerialNumber != hw.SerialNumber && hw.SerialNumber != "" {
+			cambios["serial_number"] = auditChange{Antes: oldHW.SerialNumber, Despues: hw.SerialNumber}
+		}
+		if oldHW.CPU != hw.CPU && hw.CPU != "" {
+			cambios["cpu"] = auditChange{Antes: oldHW.CPU, Despues: hw.CPU}
+		}
+		if oldHW.RAMGB != hw.RAMGB && hw.RAMGB > 0 {
+			cambios["ram_gb"] = auditChange{Antes: oldHW.RAMGB, Despues: hw.RAMGB}
+		}
+		if oldHW.StorageGB != hw.StorageGB && hw.StorageGB > 0 {
+			cambios["storage_gb"] = auditChange{Antes: oldHW.StorageGB, Despues: hw.StorageGB}
+		}
+	}
+
+	emitAuditLog("MODIFICACION", "Hardware", idStr, hw.Model, "", justification, cambios, "SUCCESS", "")
 	sendJSON(w, map[string]any{"status": "success", "message": "Hardware actualizado con éxito"}, http.StatusOK)
 }
 
 // DELETE /api/hardware/{id}
 func (h *OrchestratorHandler) DeleteHardware(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
-	if hwID, err := strconv.ParseInt(idStr, 10, 64); err == nil {
-		if err := h.orchestrator.DeleteHardware(r.Context(), hwID); err == nil {
-			sendJSON(w, map[string]any{"status": "success", "message": "Hardware eliminado con éxito"}, http.StatusOK)
-			return
+	justification := extractJustification(r)
+	if justification == "" {
+		var req struct {
+			Justification string `json:"justification"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		justification = strings.TrimSpace(req.Justification)
+	}
+
+	if justification == "" {
+		sendError(w, "El campo 'justificación' es obligatorio para eliminar el hardware", http.StatusBadRequest)
+		return
+	}
+
+	nombre := ""
+	if hwID, parseErr := strconv.ParseInt(idStr, 10, 64); parseErr == nil {
+		if oldHW, _ := h.orchestrator.GetHardwareByID(r.Context(), hwID); oldHW != nil {
+			nombre = oldHW.Model
 		}
 	}
-	if err := h.orchestrator.DeleteNodeByID(r.Context(), idStr); err != nil {
+
+	var err error
+	if hwID, parseErr := strconv.ParseInt(idStr, 10, 64); parseErr == nil {
+		err = h.orchestrator.DeleteHardware(r.Context(), hwID)
+	} else {
+		err = h.orchestrator.DeleteNodeByID(r.Context(), idStr)
+	}
+
+	if err != nil {
+		emitAuditLog("ELIMINACION", "Hardware", idStr, nombre, "", justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	emitAuditLog("ELIMINACION", "Hardware", idStr, nombre, "", justification, nil, "SUCCESS", "")
 	sendJSON(w, map[string]any{"status": "success", "message": "Hardware eliminado con éxito"}, http.StatusOK)
 }
 
@@ -865,32 +1212,93 @@ func (h *OrchestratorHandler) UpdateSoftware(w http.ResponseWriter, r *http.Requ
 		sendError(w, "ID de software inválido", http.StatusBadRequest)
 		return
 	}
-	var sw domain.Software
-	if err := json.NewDecoder(r.Body).Decode(&sw); err != nil {
+
+	var req struct {
+		domain.Software
+		Justification string `json:"justification"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	justification := strings.TrimSpace(req.Justification)
+	if justification == "" {
+		sendError(w, "El campo 'justificación' es obligatorio para modificar el software", http.StatusBadRequest)
+		return
+	}
+
+	oldSW, _ := h.orchestrator.GetSoftwareByID(r.Context(), swID)
+
+	sw := req.Software
 	sw.SoftwareID = swID
 	if err := h.orchestrator.UpdateSoftware(r.Context(), &sw); err != nil {
+		emitAuditLog("MODIFICACION", "Software", idStr, sw.Name, "", justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	cambios := make(map[string]auditChange)
+	if oldSW != nil {
+		if oldSW.Name != sw.Name && sw.Name != "" {
+			cambios["name"] = auditChange{Antes: oldSW.Name, Despues: sw.Name}
+		}
+		if oldSW.Version != sw.Version {
+			cambios["version"] = auditChange{Antes: oldSW.Version, Despues: sw.Version}
+		}
+		if oldSW.Vendor != sw.Vendor && sw.Vendor != "" {
+			cambios["vendor"] = auditChange{Antes: oldSW.Vendor, Despues: sw.Vendor}
+		}
+		if oldSW.Type != sw.Type && sw.Type != "" {
+			cambios["type"] = auditChange{Antes: oldSW.Type, Despues: sw.Type}
+		}
+		if oldSW.CPE != sw.CPE {
+			cambios["cpe"] = auditChange{Antes: oldSW.CPE, Despues: sw.CPE}
+		}
+	}
+
+	emitAuditLog("MODIFICACION", "Software", idStr, sw.Name, "", justification, cambios, "SUCCESS", "")
 	sendJSON(w, map[string]any{"status": "success", "message": "Software actualizado con éxito"}, http.StatusOK)
 }
 
 // DELETE /api/software/{id}
 func (h *OrchestratorHandler) DeleteSoftware(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
-	if swID, err := strconv.ParseInt(idStr, 10, 64); err == nil {
-		if err := h.orchestrator.DeleteSoftware(r.Context(), swID); err == nil {
-			sendJSON(w, map[string]any{"status": "success", "message": "Software eliminado con éxito"}, http.StatusOK)
-			return
+	justification := extractJustification(r)
+	if justification == "" {
+		var req struct {
+			Justification string `json:"justification"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		justification = strings.TrimSpace(req.Justification)
+	}
+
+	if justification == "" {
+		sendError(w, "El campo 'justificación' es obligatorio para eliminar el software", http.StatusBadRequest)
+		return
+	}
+
+	nombre := ""
+	if swID, parseErr := strconv.ParseInt(idStr, 10, 64); parseErr == nil {
+		if oldSW, _ := h.orchestrator.GetSoftwareByID(r.Context(), swID); oldSW != nil {
+			nombre = oldSW.Name
 		}
 	}
-	if err := h.orchestrator.DeleteNodeByID(r.Context(), idStr); err != nil {
+
+	var err error
+	if swID, parseErr := strconv.ParseInt(idStr, 10, 64); parseErr == nil {
+		err = h.orchestrator.DeleteSoftware(r.Context(), swID)
+	} else {
+		err = h.orchestrator.DeleteNodeByID(r.Context(), idStr)
+	}
+
+	if err != nil {
+		emitAuditLog("ELIMINACION", "Software", idStr, nombre, "", justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	emitAuditLog("ELIMINACION", "Software", idStr, nombre, "", justification, nil, "SUCCESS", "")
 	sendJSON(w, map[string]any{"status": "success", "message": "Software eliminado con éxito"}, http.StatusOK)
 }
 
@@ -901,16 +1309,52 @@ func (h *OrchestratorHandler) UpdateSoftwareInstallation(w http.ResponseWriter, 
 		sendError(w, "ID de instalación obligatorio", http.StatusBadRequest)
 		return
 	}
-	var inst domain.SoftwareInstallation
-	if err := json.NewDecoder(r.Body).Decode(&inst); err != nil {
+
+	var req struct {
+		domain.SoftwareInstallation
+		Justification string `json:"justification"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	justification := strings.TrimSpace(req.Justification)
+	if justification == "" {
+		sendError(w, "El campo 'justificación' es obligatorio para modificar la instalación", http.StatusBadRequest)
+		return
+	}
+
+	oldInst, _ := h.orchestrator.GetSoftwareInstallationByID(r.Context(), idStr)
+
+	inst := req.SoftwareInstallation
 	inst.InstallationID = idStr
 	if err := h.orchestrator.UpdateSoftwareInstallation(r.Context(), &inst); err != nil {
+		emitAuditLog("MODIFICACION", "SoftwareInstallation", idStr, inst.InstallPath, "", justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	cambios := make(map[string]auditChange)
+	if oldInst != nil {
+		if oldInst.InstallPath != inst.InstallPath && inst.InstallPath != "" {
+			cambios["install_path"] = auditChange{Antes: oldInst.InstallPath, Despues: inst.InstallPath}
+		}
+		if oldInst.Status != inst.Status && inst.Status != "" {
+			cambios["status"] = auditChange{Antes: oldInst.Status, Despues: inst.Status}
+		}
+		if oldInst.DetectedBy != inst.DetectedBy && inst.DetectedBy != "" {
+			cambios["detected_by"] = auditChange{Antes: oldInst.DetectedBy, Despues: inst.DetectedBy}
+		}
+		if oldInst.PackageManager != inst.PackageManager && inst.PackageManager != "" {
+			cambios["package_manager"] = auditChange{Antes: oldInst.PackageManager, Despues: inst.PackageManager}
+		}
+		if oldInst.CriticalityLevel != inst.CriticalityLevel && inst.CriticalityLevel != "" {
+			cambios["criticality_level"] = auditChange{Antes: oldInst.CriticalityLevel, Despues: inst.CriticalityLevel}
+		}
+	}
+
+	emitAuditLog("MODIFICACION", "SoftwareInstallation", idStr, inst.InstallPath, "", justification, cambios, "SUCCESS", "")
 	sendJSON(w, map[string]any{"status": "success", "message": "Instalación actualizada con éxito"}, http.StatusOK)
 }
 
@@ -921,29 +1365,71 @@ func (h *OrchestratorHandler) DeleteSoftwareInstallation(w http.ResponseWriter, 
 		sendError(w, "ID de instalación obligatorio", http.StatusBadRequest)
 		return
 	}
+
+	justification := extractJustification(r)
+	if justification == "" {
+		var req struct {
+			Justification string `json:"justification"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		justification = strings.TrimSpace(req.Justification)
+	}
+
+	if justification == "" {
+		sendError(w, "El campo 'justificación' es obligatorio para eliminar la instalación", http.StatusBadRequest)
+		return
+	}
+
+	oldInst, _ := h.orchestrator.GetSoftwareInstallationByID(r.Context(), idStr)
+	nombre := ""
+	if oldInst != nil {
+		nombre = oldInst.InstallPath
+	}
+
 	if err := h.orchestrator.DeleteSoftwareInstallation(r.Context(), idStr); err != nil {
-		// Si falló el borrado de instalación específico, intentar borrado genérico
 		if err2 := h.orchestrator.DeleteNodeByID(r.Context(), idStr); err2 == nil {
+			emitAuditLog("ELIMINACION", "SoftwareInstallation", idStr, nombre, "", justification, nil, "SUCCESS", "")
 			sendJSON(w, map[string]any{"status": "success", "message": "Instalación eliminada con éxito"}, http.StatusOK)
 			return
 		}
+		emitAuditLog("ELIMINACION", "SoftwareInstallation", idStr, nombre, "", justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	emitAuditLog("ELIMINACION", "SoftwareInstallation", idStr, nombre, "", justification, nil, "SUCCESS", "")
 	sendJSON(w, map[string]any{"status": "success", "message": "Instalación eliminada con éxito"}, http.StatusOK)
 }
 
-// DELETE /api/nodes/{id} (Borrado genérico de cualquier nodo del grafo)
+// DELETE /api/nodes/{id}
 func (h *OrchestratorHandler) DeleteNode(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	if idStr == "" {
 		sendError(w, "ID de nodo obligatorio", http.StatusBadRequest)
 		return
 	}
+
+	justification := extractJustification(r)
+	if justification == "" {
+		var req struct {
+			Justification string `json:"justification"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		justification = strings.TrimSpace(req.Justification)
+	}
+
+	if justification == "" {
+		sendError(w, "El campo 'justificación' es obligatorio para eliminar el nodo", http.StatusBadRequest)
+		return
+	}
+
 	if err := h.orchestrator.DeleteNodeByID(r.Context(), idStr); err != nil {
+		emitAuditLog("ELIMINACION", "GenericNode", idStr, "", "", justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	emitAuditLog("ELIMINACION", "GenericNode", idStr, "", "", justification, nil, "SUCCESS", "")
 	sendJSON(w, map[string]any{"status": "success", "message": "Nodo eliminado con éxito"}, http.StatusOK)
 }
 
@@ -967,16 +1453,36 @@ func (h *OrchestratorHandler) AddContainerToEndpoint(w http.ResponseWriter, r *h
 		return
 	}
 
-	var container domain.Container
-	if err := json.NewDecoder(r.Body).Decode(&container); err != nil {
+	var payload struct {
+		domain.Container
+		Justification string `json:"justification"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		sendError(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
+	container := payload.Container
 	if err := h.orchestrator.AddContainerToEndpoint(r.Context(), endpointID, &container); err != nil {
+		emitAuditLog("CREACION", "Container", container.ContainerID, container.Name, "", payload.Justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	cambios := map[string]auditChange{
+		"container_id":     {Despues: container.ContainerID},
+		"name":             {Despues: container.Name},
+		"state":            {Despues: container.State},
+		"image_id":         {Despues: container.ImageID},
+		"host_id":          {Despues: endpointID},
+		"privileged":       {Despues: container.Privileged},
+		"internet_exposed": {Despues: container.InternetExposed},
+	}
+	if len(container.IPs) > 0 {
+		cambios["ips"] = auditChange{Despues: container.IPs}
+	}
+
+	emitAuditLog("CREACION", "Container", container.ContainerID, container.Name, "", payload.Justification, cambios, "SUCCESS", "")
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
 }
 
@@ -984,23 +1490,57 @@ func (h *OrchestratorHandler) AddContainerToEndpoint(w http.ResponseWriter, r *h
 func (h *OrchestratorHandler) UpdateContainer(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 
-	var container domain.Container
-	if err := json.NewDecoder(r.Body).Decode(&container); err != nil {
+	var req struct {
+		domain.Container
+		Justification string `json:"justification"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	justification := strings.TrimSpace(req.Justification)
+	if justification == "" {
+		sendError(w, "El campo 'justificación' es obligatorio para modificar el contenedor", http.StatusBadRequest)
+		return
+	}
+
+	oldCont, _ := h.orchestrator.GetContainerByID(r.Context(), idStr)
+
+	container := req.Container
 	container.ContainerID = idStr
 
 	if err := h.orchestrator.UpdateContainer(r.Context(), &container); err != nil {
+		emitAuditLog("MODIFICACION", "Container", idStr, container.Name, "", justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	cambios := make(map[string]auditChange)
+	if oldCont != nil {
+		if oldCont.Name != container.Name && container.Name != "" {
+			cambios["name"] = auditChange{Antes: oldCont.Name, Despues: container.Name}
+		}
+		if oldCont.State != container.State && container.State != "" {
+			cambios["state"] = auditChange{Antes: oldCont.State, Despues: container.State}
+		}
+		if oldCont.ImageID != container.ImageID && container.ImageID != "" {
+			cambios["image_id"] = auditChange{Antes: oldCont.ImageID, Despues: container.ImageID}
+		}
+		if oldCont.InternetExposed != container.InternetExposed {
+			cambios["internet_exposed"] = auditChange{Antes: oldCont.InternetExposed, Despues: container.InternetExposed}
+		}
+		if oldCont.Privileged != container.Privileged {
+			cambios["privileged"] = auditChange{Antes: oldCont.Privileged, Despues: container.Privileged}
+		}
+	}
+
+	emitAuditLog("MODIFICACION", "Container", idStr, container.Name, "", justification, cambios, "SUCCESS", "")
 	sendJSON(w, map[string]any{"status": "success", "message": "Contenedor actualizado con éxito"}, http.StatusOK)
 }
 
 // DELETE /api/containers/{id}
 func (h *OrchestratorHandler) DeleteContainer(w http.ResponseWriter, r *http.Request) {
-	// Se puede delegar en el borrado genérico o tener lógica específica si hace falta
 	h.DeleteNode(w, r)
 }
 
@@ -1022,5 +1562,5 @@ func (h *OrchestratorHandler) GetTTPMatrix(w http.ResponseWriter, r *http.Reques
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-	json.NewEncoder(w).Encode(matrix)
+	_ = json.NewEncoder(w).Encode(matrix)
 }
