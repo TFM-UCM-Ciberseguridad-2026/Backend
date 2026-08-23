@@ -364,7 +364,38 @@ func (h *OrchestratorHandler) GetExploitationPaths(w http.ResponseWriter, r *htt
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Comprobar si hay análisis en background
+	isPending, err := h.orchestrator.IsAnalysisPending(r.Context(), projectID)
+	if err == nil && isPending {
+		w.Header().Set("X-Analysis-Pending", "true")
+		w.Header().Set("X-Analysis-Warning", url.PathEscape("Se ha detectado una imagen y se está analizando en segundo plano. Podrían surgir más rutas de ataque en el futuro."))
+	}
+
 	sendJSON(w, paths, http.StatusOK)
+}
+
+// GET /api/infrastructure/analysis-pending?project_id={id}
+// Endpoint ligero para que el frontend haga polling y detecte cuando el enriquecimiento NVD en background termina.
+func (h *OrchestratorHandler) GetAnalysisPending(w http.ResponseWriter, r *http.Request) {
+	projectIDStr := r.URL.Query().Get("project_id")
+	var projectID int64
+	if projectIDStr != "" {
+		var err error
+		projectID, err = strconv.ParseInt(projectIDStr, 10, 64)
+		if err != nil {
+			sendError(w, "Invalid project_id", http.StatusBadRequest)
+			return
+		}
+	}
+
+	isPending, err := h.orchestrator.IsAnalysisPending(r.Context(), projectID)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]bool{"pending": isPending}, http.StatusOK)
 }
 
 /*

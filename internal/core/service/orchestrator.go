@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -77,6 +79,8 @@ type Orchestrator struct {
 	capecProvider       ports.CAPECProvider
 	ttpPort             ports.TTPPort
 	mitreAttackProvider ports.MitreATTACKProvider
+	activeBgEnrichments int64         // contador atómico de goroutines de enriquecimiento activas
+	nvdSyncSem          chan struct{} // semáforo global: limita a 2 llamadas NVD síncronas simultáneas en total
 	ttpMapper           ports.TTPMapper
 	threatActorPort     ports.ThreatActorPort
 	notifier            ports.NotificationPort // nil si no se inyecta
@@ -118,6 +122,7 @@ func NewOrchestrator(
 		patchPort:        patchPort,
 		dbHelper:         dbHelper,
 		vulnScannerPort:  vulnScannerPort,
+		nvdSyncSem:       make(chan struct{}, 2), // máximo 2 llamadas NVD síncronas en total a la vez
 		ttpQueueHigh:     make(chan ttpTask, 1000),
 		ttpQueueLow:      make(chan ttpTask, 10000),
 		ttpSync: TTPBackgroundSyncManager{
@@ -1249,6 +1254,11 @@ func (o *Orchestrator) GenerateExploitationPaths(ctx context.Context, projectID 
 	return o.infraPort.GetExploitationPaths(ctx, projectID)
 }
 
+// IsAnalysisPending comprueba si hay enriquecimiento NVD activo en background.
+func (o *Orchestrator) IsAnalysisPending(ctx context.Context, projectID int64) (bool, error) {
+	return atomic.LoadInt64(&o.activeBgEnrichments) > 0, nil
+}
+
 // SaveContainerImage registra una imagen de contenedor en Neo4j.
 func (o *Orchestrator) SaveContainerImage(ctx context.Context, image *domain.ContainerImage) error {
 	return o.containerPort.SaveContainerImage(ctx, image)
@@ -1273,19 +1283,33 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		return fmt.Errorf("error escaneando imagen %s: %w", imageName, err)
 	}
 
-	// 2. Guardar las vulnerabilidades y enlazarlas a la imagen
+	// 2. Guardar las vulnerabilidades y enlazarlas a la imagen de forma síncrona
+	var vulnsToEnrich []domain.Vulnerability
 	for _, v := range vulns {
+		// Obtener vulnerabilidad existente para no perder enriquecimiento previo (ej. NVD)
+		if existingVuln, err := o.vulnPort.GetByID(ctx, v.CVEID); err == nil && existingVuln != nil {
+			v.NVDEnriched = existingVuln.NVDEnriched
+			if len(v.CWE) == 0 {
+				v.CWE = existingVuln.CWE
+			}
+			if !v.Exploit {
+				v.Exploit = existingVuln.Exploit
+			}
+			if !v.KEV {
+				v.KEV = existingVuln.KEV
+			}
+			if v.CVSSVector == "" {
+				v.CVSSVector = existingVuln.CVSSVector
+			}
+			if v.NVDVector == "" {
+				v.NVDVector = existingVuln.NVDVector
+			}
+		}
+
 		// Guardar Vulnerabilidad
 		err = o.saveVulnerabilityWithTTPs(ctx, &v)
 		if err != nil {
-			// Podría fallar si ya existe, idealmente debería haber un Update o ignorar error de duplicado.
-			// Para esta PoC ignoramos si ya existe.
-		}
-
-		// Enlazar a la imagen
-		err = o.containerPort.LinkVulnerabilityToImage(ctx, imageID, v.CVEID)
-		if err != nil {
-			return fmt.Errorf("error enlazando CVE %s a imagen %s: %w", v.CVEID, imageID, err)
+			// Ignoramos error de duplicado
 		}
 		// Crear un Finding (Hallazgo) para esta imagen y vulnerabilidad
 		now := time.Now().UTC()
@@ -1309,7 +1333,112 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 			return fmt.Errorf("error creando finding para imagen %s y CVE %s: %w", imageID, v.CVEID, err)
 		}
 
+		// Filtrar para enriquecimiento asíncrono: toda vulnerabilidad no enriquecida
+		if !v.NVDEnriched {
+			vulnsToEnrich = append(vulnsToEnrich, v)
+		}
 		o.EnqueueCVE(v.CVEID, 0) // 0 = sin contexto de proyecto (cron Docker Scout)
+	}
+
+	// Ordenar por BaseScore descendente (CRITICAL -> HIGH -> MEDIUM -> LOW) para enriquecer primero las más severas
+	sort.Slice(vulnsToEnrich, func(i, j int) bool {
+		return vulnsToEnrich[i].BaseScore > vulnsToEnrich[j].BaseScore
+	})
+
+	// 3. Enriquecer síncronamente hasta 2 CVEs más críticos, limitado globalmente con semáforo
+	// para que múltiples escaneos simultáneos no saturen NVD (límite global: 2 slots en total).
+	if o.vulnScannerPort != nil && len(vulnsToEnrich) > 0 {
+		topSyncCount := 2
+		if len(vulnsToEnrich) < topSyncCount {
+			topSyncCount = len(vulnsToEnrich)
+		}
+
+		enriched := 0
+		fmt.Printf("[Scout Sync] Intentando enriquecer TOP %d CVEs síncronamente (sem global)...\n", topSyncCount)
+		for i := 0; i < len(vulnsToEnrich) && enriched < topSyncCount; i++ {
+			// Intentar adquirir slot del semáforo sin bloquear (non-blocking)
+			select {
+			case o.nvdSyncSem <- struct{}{}:
+				// Slot adquirido: ejecutar enriquecimiento y liberar
+				v := vulnsToEnrich[i]
+				enrichedData, err := o.vulnScannerPort.FetchByCVE(ctx, v.CVEID)
+				<-o.nvdSyncSem // liberar slot inmediatamente tras la llamada
+				if err == nil && enrichedData != nil {
+					v.CWE = enrichedData.CWE
+					v.Exploit = enrichedData.Exploit
+					v.KEV = enrichedData.KEV
+					if v.CVSSVector == "" {
+						v.CVSSVector = enrichedData.CVSSVector
+					}
+					if v.NVDVector == "" {
+						v.NVDVector = enrichedData.NVDVector
+					}
+					if v.BaseScore == 0 {
+						v.BaseScore = enrichedData.BaseScore
+					}
+					if enrichedData.Description != "" {
+						v.Description = enrichedData.Description
+					}
+					v.NVDEnriched = true
+					_ = o.vulnPort.Save(ctx, &v)
+					descSnippet := v.Description
+					if len(descSnippet) > 40 {
+						descSnippet = descSnippet[:40]
+					}
+					fmt.Printf("[Scout Sync] CVE %s enriquecido: %s...\n", v.CVEID, descSnippet)
+				}
+				vulnsToEnrich[i] = v
+				enriched++
+				if enriched < topSyncCount {
+					time.Sleep(1 * time.Second)
+				}
+			default:
+				// Semáforo lleno: otro escaneo ya tiene 2 slots. Mover este CVE a background.
+				fmt.Printf("[Scout Sync] Semáforo NVD lleno, CVE %s irá a background\n", vulnsToEnrich[i].CVEID)
+			}
+		}
+
+		vulnsToEnrich = vulnsToEnrich[topSyncCount:]
+	}
+
+	// 4. Procesamiento en Background (Goroutine) para el resto de vulnerabilidades
+	if o.vulnScannerPort != nil && len(vulnsToEnrich) > 0 {
+		atomic.AddInt64(&o.activeBgEnrichments, 1)
+		go func(vulns []domain.Vulnerability, port ports.VulnerabilityAPIscanner, repo ports.VulnerabilityPort) {
+			defer atomic.AddInt64(&o.activeBgEnrichments, -1)
+			bgCtx := context.Background() // Contexto separado porque el de la request puede expirar
+			fmt.Printf("[Scout Sync Async] Iniciando enriquecimiento NVD de %d CVEs restantes en background...\n", len(vulns))
+			for _, v := range vulns {
+				enriched, err := port.FetchByCVE(bgCtx, v.CVEID)
+				if err == nil {
+					if enriched != nil {
+						v.CWE = enriched.CWE
+						v.Exploit = enriched.Exploit
+						v.KEV = enriched.KEV
+						if v.CVSSVector == "" {
+							v.CVSSVector = enriched.CVSSVector
+						}
+						if v.NVDVector == "" {
+							v.NVDVector = enriched.NVDVector
+						}
+						if v.BaseScore == 0 {
+							v.BaseScore = enriched.BaseScore
+						}
+						if enriched.Description != "" {
+							v.Description = enriched.Description
+						}
+					}
+					v.NVDEnriched = true
+					// Actualizar la vulnerabilidad en la base de datos
+					_ = repo.Save(bgCtx, &v)
+				} else {
+					fmt.Printf("[Scout Sync Async] Error enriqueciendo %s: %v\n", v.CVEID, err)
+				}
+				// Evitar saturar el NVD (Límite sin API Key es 5 peticiones cada 30s -> ~1 cada 6s)
+				time.Sleep(7 * time.Second)
+			}
+			fmt.Println("[Scout Sync Async] Enriquecimiento NVD finalizado.")
+		}(vulnsToEnrich, o.vulnScannerPort, o.vulnPort)
 	}
 
 	return nil

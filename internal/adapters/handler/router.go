@@ -75,6 +75,9 @@ func NewRouter(h *OrchestratorHandler, hub *WSHub) *http.ServeMux {
 	/* GET /api/infrastructure/exploitation-paths: Obtiene las rutas de explotación calculadas en la infraestructura. */
 	mux.HandleFunc("GET /api/infrastructure/exploitation-paths", h.GetExploitationPaths)
 
+	/* GET /api/infrastructure/analysis-pending: Polling endpoint para detectar si el enriquecimiento NVD de background ha finalizado. */
+	mux.HandleFunc("GET /api/infrastructure/analysis-pending", h.GetAnalysisPending)
+
 	/* POST /api/infrastructure/map-ttps: Inicia manualmente el mapeo (directo e indirecto) de TTPs en background. */
 	mux.HandleFunc("POST /api/infrastructure/map-ttps", h.MapTTPsManually)
 
