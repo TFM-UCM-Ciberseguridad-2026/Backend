@@ -948,7 +948,13 @@ func (h *OrchestratorHandler) DeleteNode(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *OrchestratorHandler) GetTTPSyncStatus(w http.ResponseWriter, r *http.Request) {
-	status := h.orchestrator.GetTTPSyncStatus()
+	var projectID int64
+	if pidStr := r.URL.Query().Get("project_id"); pidStr != "" {
+		if pid, err := strconv.ParseInt(pidStr, 10, 64); err == nil {
+			projectID = pid
+		}
+	}
+	status := h.orchestrator.GetTTPSyncStatus(projectID)
 	sendJSON(w, status, http.StatusOK)
 }
 
@@ -963,8 +969,17 @@ func (h *OrchestratorHandler) MapTTPsManually(w http.ResponseWriter, r *http.Req
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
 	projectID := body.ProjectID
-	go h.orchestrator.StartBackgroundTTPMapping(projectID)
-	sendJSON(w, map[string]any{"status": "success", "message": "Mapeo de TTPs iniciado en segundo plano"}, http.StatusOK)
+	enqueued := h.orchestrator.StartBackgroundTTPMapping(projectID)
+
+	msg := "Mapeo de TTPs iniciado en segundo plano"
+	if enqueued == 0 {
+		msg = "No hay vulnerabilidades nuevas que mapear"
+	}
+	sendJSON(w, map[string]any{
+		"status":   "success",
+		"message":  msg,
+		"enqueued": enqueued,
+	}, http.StatusOK)
 }
 
 

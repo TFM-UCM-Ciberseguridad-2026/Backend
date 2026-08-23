@@ -26,12 +26,16 @@ Propósito arquitectónico y teórico:
 4. Neutralidad Tecnológica: No expone tipos HTTP ni dependencias de frameworks web, garantizando que las reglas de negocio puedan ser llamadas por un servidor HTTP, un CLI de consola o un proceso de ejecución programada (cron).
 */
 
-type TTPBackgroundSync struct {
-	mu         sync.RWMutex
-	processing bool
-	currentCVE string
-	logs       []string
-	queuedCVEs map[string]bool // Registro de CVEs encoladas o en proceso
+type ProjectTTPSyncState struct {
+	Processing bool
+	CurrentCVE string
+	Logs       []string
+	QueuedCVEs map[string]bool
+}
+
+type TTPBackgroundSyncManager struct {
+	mu            sync.RWMutex
+	projectStates map[int64]*ProjectTTPSyncState
 }
 
 type TTPBackgroundSyncResponse struct {
@@ -76,8 +80,9 @@ type Orchestrator struct {
 	ttpMapper           ports.TTPMapper
 	threatActorPort     ports.ThreatActorPort
 	notifier            ports.NotificationPort // nil si no se inyecta
-	ttpSync             TTPBackgroundSync
-	ttpQueue            chan ttpTask
+	ttpSync             TTPBackgroundSyncManager
+	ttpQueueHigh        chan ttpTask
+	ttpQueueLow         chan ttpTask
 }
 
 func NewOrchestrator(
@@ -113,10 +118,10 @@ func NewOrchestrator(
 		patchPort:        patchPort,
 		dbHelper:         dbHelper,
 		vulnScannerPort:  vulnScannerPort,
-		ttpQueue:         make(chan ttpTask, 1000),
-		ttpSync: TTPBackgroundSync{
-			logs:       []string{},
-			queuedCVEs: make(map[string]bool),
+		ttpQueueHigh:     make(chan ttpTask, 1000),
+		ttpQueueLow:      make(chan ttpTask, 10000),
+		ttpSync: TTPBackgroundSyncManager{
+			projectStates: make(map[int64]*ProjectTTPSyncState),
 		},
 	}
 }
@@ -417,7 +422,7 @@ func (o *Orchestrator) AssociateVulnerabilitiesAndRemediations(ctx context.Conte
 	if err := o.relationshipPort.LinkFindingToVulnerability(ctx, findingID, vuln.CVEID); err != nil {
 		return err
 	}
-	o.EnqueueCVE(vuln.CVEID, 0) // 0 = sin contexto de proyecto (alta manual de vulnerabilidad)
+	go o.StartBackgroundTTPMapping(0) // 0 = sin contexto de proyecto (barrido de novedades tras alta manual)
 	return o.relationshipPort.LinkFindingToRemediation(ctx, findingID, rem.RemediationID)
 }
 
@@ -565,9 +570,10 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		} else {
 			result.FindingsExisting++
 		}
-		
-		o.EnqueueCVE(vCopy.CVEID, 0) // 0 = sin contexto de proyecto (escaneo por CPE)
 	}
+	
+	// Lanzar barrido inteligente para mapear solo las vulnerabilidades nuevas de este escaneo
+	go o.StartBackgroundTTPMapping(0)
 
 	return result, nil
 }
@@ -824,6 +830,7 @@ func (o *Orchestrator) SyncNistDaily(ctx context.Context) error {
 		_ = o.RegisterPatchesForVulnerability(ctx, vCopy.CVEID, vCopy.Patches)
 		o.EnqueueCVE(vCopy.CVEID, 0) // 0 = sin contexto de proyecto (cron diario NIST)
 	}
+
 	return nil
 }
 
@@ -1604,28 +1611,68 @@ func (o *Orchestrator) SyncATTACKCatalog(ctx context.Context) (int, error) {
 	return len(ttps), nil
 }
 
-func (o *Orchestrator) StartBackgroundTTPMapping(projectID int64) {
-	// Disparo manual: ejecuta un barrido acotado al proyecto indicado (0 = global)
-	go o.runSweep(context.Background(), projectID)
+func (o *Orchestrator) StartBackgroundTTPMapping(projectID int64) int {
+	// Disparo manual: ejecuta un barrido acotado al proyecto indicado y devuelve cuántos CVEs encoló
+	return o.runSweep(context.Background(), projectID)
 }
 
 func (o *Orchestrator) StartTTPWorker(ctx context.Context) {
 	// 1. Worker Consumidor Principal
 	go func() {
+		var highCount int
 		for {
+			var task ttpTask
+			var ok bool
+
+			// Prevención de Inanición (Starvation): 
+			// Si hemos procesado 10 tareas de alta prioridad seguidas, intentamos 
+			// forzar el consumo de 1 tarea de baja prioridad si está disponible.
+			if highCount >= 10 {
+				select {
+				case task, ok = <-o.ttpQueueLow:
+					if !ok {
+						return
+					}
+					highCount = 0
+					goto process
+				default:
+					highCount = 0
+				}
+			}
+
+			// Prioridad: Intentar leer primero de High
 			select {
 			case <-ctx.Done():
 				return
-			case task, ok := <-o.ttpQueue:
+			case task, ok = <-o.ttpQueueHigh:
 				if !ok {
 					return
 				}
-				o.startProcessingCVE(task.cveID)
-				if err := o.processSingleCVE(ctx, task); err != nil {
-					o.addTTPLog(fmt.Sprintf("Error procesando %s: %v", task.cveID, err))
+				highCount++
+			default:
+				// Si High está vacía, bloquear esperando en cualquiera de las dos
+				select {
+				case <-ctx.Done():
+					return
+				case task, ok = <-o.ttpQueueHigh:
+					if !ok {
+						return
+					}
+					highCount++
+				case task, ok = <-o.ttpQueueLow:
+					if !ok {
+						return
+					}
+					highCount = 0
 				}
-				o.endProcessingCVE(task.cveID)
 			}
+
+		process:
+			o.startProcessingCVE(task.cveID, task.projectID)
+			if err := o.processSingleCVE(ctx, task); err != nil {
+				o.addTTPLog(fmt.Sprintf("Error procesando %s: %v", task.cveID, err), task.projectID)
+			}
+			o.endProcessingCVE(task.cveID, task.projectID)
 		}
 	}()
 
@@ -1642,17 +1689,17 @@ func (o *Orchestrator) StartTTPWorker(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				o.runSweep(ctx, 0)
+				_ = o.runSweep(ctx, 0)
 			}
 		}
 	}()
 }
 
-func (o *Orchestrator) runSweep(ctx context.Context, projectID int64) {
+func (o *Orchestrator) runSweep(ctx context.Context, projectID int64) int {
 	vulns, err := o.vulnPort.GetUnmappedVulnerabilities(ctx, projectID)
 	if err != nil {
 		log.Printf("[TTP-BG-SWEEP] Error obteniendo vulnerabilidades no mapeadas: %v", err)
-		return
+		return 0
 	}
 	if len(vulns) > 0 {
 		log.Printf("[TTP-BG-SWEEP] Encolando %d vulnerabilidades sin TTP (projectID=%d)...", len(vulns), projectID)
@@ -1660,44 +1707,69 @@ func (o *Orchestrator) runSweep(ctx context.Context, projectID int64) {
 			o.EnqueueCVE(v.CVEID, projectID)
 		}
 	}
+	return len(vulns)
+}
+
+func (o *Orchestrator) getProjectState(projectID int64) *ProjectTTPSyncState {
+	o.ttpSync.mu.Lock()
+	defer o.ttpSync.mu.Unlock()
+	state, exists := o.ttpSync.projectStates[projectID]
+	if !exists {
+		state = &ProjectTTPSyncState{
+			Logs:       []string{},
+			QueuedCVEs: make(map[string]bool),
+		}
+		o.ttpSync.projectStates[projectID] = state
+	}
+	return state
 }
 
 func (o *Orchestrator) EnqueueCVE(cveID string, projectID int64) {
+	state := o.getProjectState(projectID)
+
 	o.ttpSync.mu.Lock()
-	if o.ttpSync.queuedCVEs[cveID] {
+	if state.QueuedCVEs[cveID] {
 		o.ttpSync.mu.Unlock()
 		return // Ya está encolado o procesándose
 	}
-	o.ttpSync.queuedCVEs[cveID] = true
-	o.ttpSync.processing = true
+	state.QueuedCVEs[cveID] = true
+	state.Processing = true
 	o.ttpSync.mu.Unlock()
 
+	queue := o.ttpQueueHigh
+	if projectID == 0 {
+		queue = o.ttpQueueLow
+	}
+
 	select {
-	case o.ttpQueue <- ttpTask{cveID: cveID, projectID: projectID}:
+	case queue <- ttpTask{cveID: cveID, projectID: projectID}:
 		// Encolado con éxito
 	default:
 		// Sacar del mapa si se descarta de la cola (para que pueda volver a re-encolarse en el barrido)
 		o.ttpSync.mu.Lock()
-		delete(o.ttpSync.queuedCVEs, cveID)
+		delete(state.QueuedCVEs, cveID)
 		o.ttpSync.mu.Unlock()
-		o.addTTPLog(fmt.Sprintf("Advertencia: Cola de mapeo TTP llena, descartado temporalmente: %s", cveID))
+		o.addTTPLog(fmt.Sprintf("Advertencia: Cola de mapeo TTP llena, descartado temporalmente: %s", cveID), projectID)
 	}
 }
 
-func (o *Orchestrator) startProcessingCVE(cveID string) {
+func (o *Orchestrator) startProcessingCVE(cveID string, projectID int64) {
+	state := o.getProjectState(projectID)
 	o.ttpSync.mu.Lock()
 	defer o.ttpSync.mu.Unlock()
-	o.ttpSync.currentCVE = cveID
-	o.ttpSync.processing = true
+	state.CurrentCVE = cveID
+	state.Processing = true
 }
 
-func (o *Orchestrator) endProcessingCVE(cveID string) {
+func (o *Orchestrator) endProcessingCVE(cveID string, projectID int64) {
+	state := o.getProjectState(projectID)
 	o.ttpSync.mu.Lock()
 	defer o.ttpSync.mu.Unlock()
-	o.ttpSync.currentCVE = ""
-	delete(o.ttpSync.queuedCVEs, cveID)
-	if len(o.ttpQueue) == 0 {
-		o.ttpSync.processing = false
+	state.CurrentCVE = ""
+	delete(state.QueuedCVEs, cveID)
+	
+	if len(state.QueuedCVEs) == 0 {
+		state.Processing = false
 	}
 }
 
@@ -1752,7 +1824,7 @@ func (o *Orchestrator) processSingleCVE(ctx context.Context, task ttpTask) error
 		return err
 	}
 
-	o.addTTPLog(fmt.Sprintf("CVE %s mapeado a TTPs %v en %v (Confianza: %s)", v.CVEID, ttps, duration.Round(time.Millisecond), confidence))
+	o.addTTPLog(fmt.Sprintf("CVE %s mapeado a TTPs %v en %v (Confianza: %s)", v.CVEID, ttps, duration.Round(time.Millisecond), confidence), task.projectID)
 	if len(ttps) > 0 {
 		err = o.vulnPort.LinkTTPsToVulnerability(ctx, v.CVEID, mappedCWE, ttps, confidence, source)
 		if err != nil {
@@ -1773,25 +1845,46 @@ func (o *Orchestrator) processSingleCVE(ctx context.Context, task ttpTask) error
 	return nil
 }
 
-func (o *Orchestrator) addTTPLog(msg string) {
+func (o *Orchestrator) addTTPLog(msg string, projectID int64) {
+	state := o.getProjectState(projectID)
 	o.ttpSync.mu.Lock()
 	defer o.ttpSync.mu.Unlock()
 	logLine := fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), msg)
-	o.ttpSync.logs = append(o.ttpSync.logs, logLine)
-	fmt.Printf("[TTP-BG] %s\n", msg)
+	state.Logs = append(state.Logs, logLine)
+	
+	prefix := "[TTP-BG-GLOBAL]"
+	if projectID > 0 {
+		prefix = fmt.Sprintf("[TTP-PROJ-%d]", projectID)
+	}
+	fmt.Printf("%s %s\n", prefix, msg)
 }
 
-func (o *Orchestrator) GetTTPSyncStatus() TTPBackgroundSyncResponse {
+func (o *Orchestrator) GetTTPSyncStatus(projectID int64) TTPBackgroundSyncResponse {
 	o.ttpSync.mu.RLock()
 	defer o.ttpSync.mu.RUnlock()
 
-	logsCopy := make([]string, len(o.ttpSync.logs))
-	copy(logsCopy, o.ttpSync.logs)
+	state, exists := o.ttpSync.projectStates[projectID]
+	if !exists {
+		return TTPBackgroundSyncResponse{
+			Processing:  false,
+			CurrentCVE:  "",
+			QueueLength: 0,
+			Logs:        []string{},
+		}
+	}
+
+	logsCopy := make([]string, len(state.Logs))
+	copy(logsCopy, state.Logs)
+
+	queueLen := len(o.ttpQueueHigh)
+	if projectID == 0 {
+		queueLen = len(o.ttpQueueLow)
+	}
 
 	return TTPBackgroundSyncResponse{
-		Processing:  o.ttpSync.processing,
-		CurrentCVE:  o.ttpSync.currentCVE,
-		QueueLength: len(o.ttpQueue),
+		Processing:  state.Processing,
+		CurrentCVE:  state.CurrentCVE,
+		QueueLength: queueLen,
 		Logs:        logsCopy,
 	}
 }
