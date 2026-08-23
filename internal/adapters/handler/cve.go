@@ -1602,8 +1602,6 @@ func (h *OrchestratorHandler) GetTTPMatrix(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 	_ = json.NewEncoder(w).Encode(matrix)
 }
-	json.NewEncoder(w).Encode(matrix)
-}
 
 // GET /api/cpe/search?query=... o ?q=... o ?vendor=...&product=...&version=...
 func (h *OrchestratorHandler) SearchCPE(w http.ResponseWriter, r *http.Request) {
