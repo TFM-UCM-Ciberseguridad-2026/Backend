@@ -16,11 +16,13 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/service"
 )
+
 
 type OrchestratorHandler struct {
 	orchestrator *service.Orchestrator
@@ -1055,3 +1057,33 @@ func (h *OrchestratorHandler) GetTTPMatrix(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 	json.NewEncoder(w).Encode(matrix)
 }
+
+// GET /api/cpe/search?query=... o ?q=... o ?vendor=...&product=...&version=...
+func (h *OrchestratorHandler) SearchCPE(w http.ResponseWriter, r *http.Request) {
+	rawInput := r.URL.Query().Get("query")
+	if rawInput == "" {
+		rawInput = r.URL.Query().Get("q")
+	}
+
+	if rawInput == "" {
+		vendor := r.URL.Query().Get("vendor")
+		product := r.URL.Query().Get("product")
+		version := r.URL.Query().Get("version")
+		rawInput = strings.TrimSpace(fmt.Sprintf("%s %s %s", vendor, product, version))
+	}
+
+	if rawInput == "" {
+		sendJSON(w, []domain.CPEFinalItem{}, http.StatusOK)
+		return
+	}
+
+	items, err := h.orchestrator.ExecuteCPEPipeline(r.Context(), rawInput)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, items, http.StatusOK)
+}
+
+
