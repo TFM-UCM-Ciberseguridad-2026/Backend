@@ -1337,6 +1337,10 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		if !v.NVDEnriched {
 			vulnsToEnrich = append(vulnsToEnrich, v)
 		}
+		// Filtrar para enriquecimiento asíncrono: toda vulnerabilidad no enriquecida
+		if !v.NVDEnriched {
+			vulnsToEnrich = append(vulnsToEnrich, v)
+		}
 		o.EnqueueCVE(v.CVEID, 0) // 0 = sin contexto de proyecto (cron Docker Scout)
 	}
 
