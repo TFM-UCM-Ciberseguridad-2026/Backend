@@ -11,6 +11,14 @@ Propósito arquitectónico y teórico:
 3. Entidad del Inventario: Permite catalogar el software detectado en los sistemas locales para realizar auditorías automáticas de seguridad mediante análisis de CPEs y cruce con base de datos de CVEs.
 */
 
+// Constantes de estado de resolución CPE
+const (
+	CPEStatusVerifiedAuto        = "VERIFIED_AUTO"        // Coincidencia exacta o alias confirmado en base de datos
+	CPEStatusVerifiedManual      = "VERIFIED_MANUAL"      // Confirmado manualmente por el usuario
+	CPEStatusPendingConfirmation = "PENDING_CONFIRMATION" // Coincidencia difusa encontrada, pendiente de validación por el usuario
+	CPEStatusNotInNVD            = "NOT_IN_NVD"            // Software interno/propietario no catalogado en NIST NVD
+)
+
 // Software representa la entidad de dominio de una aplicación, sistema operativo o componente catalogado (nodo Software en Neo4j).
 type Software struct {
 	SoftwareID  int64      `json:"software_id"`
@@ -21,4 +29,9 @@ type Software struct {
 	PURL        string     `json:"purl"`
 	ReleaseDate *time.Time `json:"release_date"`
 	Vendor      string     `json:"vendor"`
+	CPEStatus   string     `json:"cpe_status"`
+	URL         string     `json:"url,omitempty"`
 }
+
+
+

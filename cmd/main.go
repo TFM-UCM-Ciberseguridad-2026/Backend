@@ -66,6 +66,7 @@ func main() {
 
 	capecRepo := neo4j.NewCAPECRepository(driver)
 	capecProvider := provider.NewCapecSTIXProvider("", 120)
+	cpeGuesserAdapter := provider.NewCPEGuesserAdapter("", nil)
 
 	orchestrator := service.NewOrchestrator(
 		projectRepo,
@@ -83,10 +84,18 @@ func main() {
 		patchRepo,
 		dbHelper,
 		nistAPIAdapter,
-	).WithRisk(riskRepo, epssAdapter, kevAdapter).WithScout(scoutAdapter).WithPatchProvider(osvAdapter).WithTTPMapper(ollamaClient)
+	).WithRisk(riskRepo, epssAdapter, kevAdapter).
+		WithScout(scoutAdapter).
+		WithPatchProvider(osvAdapter).
+		WithTTPMapper(ollamaClient).
+		WithCPEResolution(nistAPIAdapter).
+		WithCPEGuesser(cpeGuesserAdapter)
+
+
 
 	// Inyectar el repositorio y proveedor para el catálogo de CAPEC
 	orchestrator.WithCAPEC(capecRepo, capecProvider)
+
 
 	// Iniciar el worker de TTPs en segundo plano
 	orchestrator.StartTTPWorker(context.Background())

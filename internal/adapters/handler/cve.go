@@ -21,6 +21,7 @@ import (
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/service"
 )
 
+
 type OrchestratorHandler struct {
 	orchestrator *service.Orchestrator
 }
@@ -539,10 +540,47 @@ func (h *OrchestratorHandler) GetExploitationPaths(w http.ResponseWriter, r *htt
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Comprobar si hay análisis en background
+	isPending, err := h.orchestrator.IsAnalysisPending(r.Context(), projectID)
+	if err == nil && isPending {
+		w.Header().Set("X-Analysis-Pending", "true")
+		w.Header().Set("X-Analysis-Warning", url.PathEscape("Se ha detectado una imagen y se está analizando en segundo plano. Podrían surgir más rutas de ataque en el futuro."))
+	}
+
 	sendJSON(w, paths, http.StatusOK)
 }
 
-// POST /api/installations/{id}/scan-vulns
+// GET /api/infrastructure/analysis-pending?project_id={id}
+// Endpoint ligero para que el frontend haga polling y detecte cuando el enriquecimiento NVD en background termina.
+func (h *OrchestratorHandler) GetAnalysisPending(w http.ResponseWriter, r *http.Request) {
+	projectIDStr := r.URL.Query().Get("project_id")
+	var projectID int64
+	if projectIDStr != "" {
+		var err error
+		projectID, err = strconv.ParseInt(projectIDStr, 10, 64)
+		if err != nil {
+			sendError(w, "Invalid project_id", http.StatusBadRequest)
+			return
+		}
+	}
+
+	isPending, err := h.orchestrator.IsAnalysisPending(r.Context(), projectID)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]bool{"pending": isPending}, http.StatusOK)
+}
+
+/*
+ScanSoftwareVulnerabilities maneja la solicitud HTTP POST para ejecutar el escaneo y registro automático de vulnerabilidades.
+Ruta: POST /api/installations/{id}/scan-vulns?software_id={software_id}
+- 'id': Corresponde al ID de la instalación del software.
+- 'software_id': ID numérico (Query Parameter) que apunta al software instalado.
+Llama directamente al servicio Orchestrator y devuelve un JSON indicando estado exitoso o el respectivo código de error HTTP.
+*/
 func (h *OrchestratorHandler) ScanSoftwareVulnerabilities(w http.ResponseWriter, r *http.Request) {
 	instID := r.PathValue("id")
 	swIDStr := r.URL.Query().Get("software_id")
@@ -1564,3 +1602,35 @@ func (h *OrchestratorHandler) GetTTPMatrix(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 	_ = json.NewEncoder(w).Encode(matrix)
 }
+	json.NewEncoder(w).Encode(matrix)
+}
+
+// GET /api/cpe/search?query=... o ?q=... o ?vendor=...&product=...&version=...
+func (h *OrchestratorHandler) SearchCPE(w http.ResponseWriter, r *http.Request) {
+	rawInput := r.URL.Query().Get("query")
+	if rawInput == "" {
+		rawInput = r.URL.Query().Get("q")
+	}
+
+	if rawInput == "" {
+		vendor := r.URL.Query().Get("vendor")
+		product := r.URL.Query().Get("product")
+		version := r.URL.Query().Get("version")
+		rawInput = strings.TrimSpace(fmt.Sprintf("%s %s %s", vendor, product, version))
+	}
+
+	if rawInput == "" {
+		sendJSON(w, []domain.CPEFinalItem{}, http.StatusOK)
+		return
+	}
+
+	items, err := h.orchestrator.ExecuteCPEPipeline(r.Context(), rawInput)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, items, http.StatusOK)
+}
+
+

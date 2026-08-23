@@ -42,6 +42,23 @@ type SoftwarePort interface {
 	DeleteByID(ctx context.Context, id int64) error
 }
 
+// CPEResolverPort define las operaciones de consulta y validación externa contra la API CPE de NIST NVD.
+type CPEResolverPort interface {
+	SearchCPECandidates(ctx context.Context, vendor, product, version string) ([]domain.CPESuggestion, error)
+	ValidateExactCPE(ctx context.Context, cpeString string) (bool, error)
+	FetchNVDProductsByCPEMatch(ctx context.Context, cpeBase string, limit int) ([]domain.NVDProductItem, error)
+}
+
+// CPEGuesserPort define la interfaz para realizar búsquedas difusas de prefijos base en CIRCL CPE Guesser.
+type CPEGuesserPort interface {
+	SearchBaseCPEs(ctx context.Context, tokens []string, topK int) ([]string, error)
+}
+
+
+
+
+
+
 type FindingPort interface {
 	Save(ctx context.Context, finding *domain.Finding) error
 	Update(ctx context.Context, finding *domain.Finding) error
@@ -174,6 +191,8 @@ type VulnerabilityAPIscanner interface {
 	FetchByCPE(ctx context.Context, cpe string) ([]domain.Vulnerability, error)
 	// FetchByDate obtiene las vulnerabilidades modificadas en un rango de fechas.
 	FetchByDate(ctx context.Context, startDate, endDate time.Time) ([]domain.Vulnerability, error)
+	// FetchByCVE obtiene el detalle completo de una vulnerabilidad específica.
+	FetchByCVE(ctx context.Context, cve string) (*domain.Vulnerability, error)
 }
 
 //Los CRUDS para el mitre... consutarlo con Julve
@@ -214,6 +233,8 @@ type InfrastructurePort interface {
 	GetTTPMatrix(ctx context.Context, projectID *int64) ([]domain.TTPMatrixItem, error)
 	GetTotalMitreTTPs(ctx context.Context) (int, error)
 	GetExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error)
+	// IsAnalysisPending comprueba si hay vulnerabilidades de red pendientes de enriquecimiento en background.
+	IsAnalysisPending(ctx context.Context, projectID int64) (bool, error)
 	ImportGraphData(ctx context.Context, data *domain.GraphData) error
 }
 
