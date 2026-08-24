@@ -2060,3 +2060,32 @@ func (o *Orchestrator) GetTTPMatrix(ctx context.Context, projectID *int64) ([]do
 	return o.infraPort.GetTTPMatrix(ctx, projectID)
 }
 
+// Métodos auxiliares de consulta de estado previo para auditoría
+func (o *Orchestrator) GetEndpointByID(ctx context.Context, id int64) (*domain.Endpoint, error) {
+	return o.endpointPort.GetByID(ctx, id)
+}
+
+func (o *Orchestrator) GetNetworkByID(ctx context.Context, id int64) (*domain.Network, error) {
+	return o.networkPort.GetByID(ctx, id)
+}
+
+func (o *Orchestrator) GetHardwareByID(ctx context.Context, id int64) (*domain.Hardware, error) {
+	return o.hardwarePort.GetByID(ctx, id)
+}
+
+func (o *Orchestrator) GetSoftwareByID(ctx context.Context, id int64) (*domain.Software, error) {
+	return o.softwarePort.GetByID(ctx, id)
+}
+
+func (o *Orchestrator) GetSoftwareInstallationByID(ctx context.Context, id string) (*domain.SoftwareInstallation, error) {
+	return o.softwareInstPort.GetByID(ctx, id)
+}
+
+func (o *Orchestrator) GetContainerByID(ctx context.Context, id string) (*domain.Container, error) {
+	return o.containerPort.GetContainer(ctx, id)
+}
+
+func (o *Orchestrator) GetProjectByID(ctx context.Context, id int64) (*domain.Project, error) {
+	return o.projectPort.GetByID(ctx, id)
+}
+
