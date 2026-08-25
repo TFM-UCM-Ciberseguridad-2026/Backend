@@ -149,7 +149,7 @@ func main() {
 	
 	fmt.Println("[INFO] Se ha reportado una nueva vulnerabilidad local (CVE-ESCAPE-0DAY) en 'backend-api-container'.")
 	fmt.Println("[INFO] Esta vulnerabilidad tiene impacto Crítico localmente (C:H, I:H, A:H) permitiendo escapar al host.")
-	fmt.Println("[INFO] Recalculando Attack Paths...\n")
+	fmt.Print("[INFO] Recalculando Attack Paths...\n\n")
 
 	paths2, err := infraRepo.GetExploitationPaths(ctx, 0)
 	if err != nil {

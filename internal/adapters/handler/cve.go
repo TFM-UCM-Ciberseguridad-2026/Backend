@@ -8,11 +8,8 @@ Emite logs estructurados en JSON (sin campo operador) con diffs exactos y justif
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -33,69 +30,7 @@ func NewOrchestratorHandler(o *service.Orchestrator) *OrchestratorHandler {
 
 // ESTRUCTURAS Y EMISOR DE AUDITORÍA (STDOUT + FICHERO PERSISTENTE)
 
-var auditWriter io.Writer = os.Stdout
 
-func init() {
-	logPath := os.Getenv("AUDIT_LOG_PATH")
-	if logPath == "" {
-		logPath = "logs/audit.log"
-	}
-	dir := filepath.Dir(logPath)
-	if dir != "" && dir != "." {
-		_ = os.MkdirAll(dir, 0755)
-	}
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err == nil {
-		auditWriter = io.MultiWriter(os.Stdout, f)
-	} else {
-		auditWriter = os.Stdout
-	}
-}
-
-type auditChange struct {
-	Antes   any `json:"antes,omitempty"`
-	Despues any `json:"despues,omitempty"`
-}
-
-type auditAction struct {
-	Tipo         string `json:"tipo"`          // CREACION, MODIFICACION, ELIMINACION
-	TipoActivo   string `json:"tipo_activo"`   // Endpoint, Network, Container, etc.
-	IDActivo     string `json:"id_activo"`
-	NombreActivo string `json:"nombre_activo,omitempty"`
-	ProyectoID   string `json:"proyecto_id,omitempty"`
-}
-
-type auditLogEntry struct {
-	FechaHora         string                 `json:"fecha_hora"`
-	Nivel             string                 `json:"nivel"` // "AUDIT"
-	Accion            auditAction            `json:"accion"`
-	Justificacion     string                 `json:"justificacion,omitempty"`
-	CambiosRealizados map[string]auditChange `json:"cambios_realizados,omitempty"`
-	Estado            string                 `json:"estado"` // SUCCESS / ERROR
-	DetallesError     string                 `json:"detalles_error,omitempty"`
-}
-
-func emitAuditLog(tipoAccion, tipoActivo, idActivo, nombreActivo, proyectoID, justificacion string, cambios map[string]auditChange, estado, errStr string) {
-	entry := auditLogEntry{
-		FechaHora: time.Now().UTC().Format(time.RFC3339Nano),
-		Nivel:     "AUDIT",
-		Accion: auditAction{
-			Tipo:         tipoAccion,
-			TipoActivo:   tipoActivo,
-			IDActivo:     idActivo,
-			NombreActivo: nombreActivo,
-			ProyectoID:   proyectoID,
-		},
-		Justificacion:     justificacion,
-		CambiosRealizados: cambios,
-		Estado:            estado,
-		DetallesError:     errStr,
-	}
-
-	if b, err := json.Marshal(entry); err == nil {
-		fmt.Fprintln(auditWriter, string(b)) // Escribe simultáneamente en consola y fichero
-	}
-}
 
 func extractJustification(r *http.Request) string {
 	if q := r.URL.Query().Get("justification"); strings.TrimSpace(q) != "" {
@@ -780,11 +715,59 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 		appliedAt, req.AppliedBy, req.Notes,
 	)
 	if err != nil {
+		emitAuditLog(
+			"CREACION",
+			"AppliedPatch",
+			fmt.Sprintf("%s:%s:%d", installationID, req.CVEID, req.PatchID),
+			req.CVEID,
+			"",
+			req.Notes,
+			nil,
+			"ERROR",
+			err.Error(),
+		)
 		sendError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	emitAuditLog("CREACION", "AppliedPatch", fmt.Sprint(req.PatchID), req.CVEID, "", req.Notes, nil, "SUCCESS", "")
+	cambios := map[string]auditChange{
+		"cve_id": {
+			Antes:   nil,
+			Despues: req.CVEID,
+		},
+		"installation_id": {
+			Antes:   nil,
+			Despues: installationID,
+		},
+		"patch_id": {
+			Antes:   nil,
+			Despues: req.PatchID,
+		},
+		"remediation_level": {
+			Antes:   nil,
+			Despues: req.RemediationLevel,
+		},
+		"applied_by": {
+			Antes:   nil,
+			Despues: req.AppliedBy,
+		},
+		"affected_findings": {
+			Antes:   nil,
+			Despues: affected,
+		},
+	}
+
+	emitAuditLog(
+		"CREACION",
+		"AppliedPatch",
+		fmt.Sprintf("%s:%s:%d", installationID, req.CVEID, req.PatchID),
+		req.CVEID,
+		"",
+		req.Notes,
+		cambios,
+		"SUCCESS",
+		"",
+	)
 	sendJSON(w, map[string]any{
 		"status":            "parche declarado como aplicado",
 		"application":       application,
@@ -792,7 +775,9 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 	}, http.StatusCreated)
 }
 
-// GET /api/patch-queue
+// GET /api/patch-queue?project_id={id}&page={p}&limit={n}
+// Cola de parcheo: findings pendientes ordenados por prioridad y paginados. Sin project_id recorre
+// toda la infraestructura.
 func (h *OrchestratorHandler) GetPatchQueue(w http.ResponseWriter, r *http.Request) {
 	var projectID *int64
 	if raw := r.URL.Query().Get("project_id"); raw != "" {
@@ -804,26 +789,29 @@ func (h *OrchestratorHandler) GetPatchQueue(w http.ResponseWriter, r *http.Reque
 		projectID = &parsed
 	}
 
-	limit := 0
-	if raw := r.URL.Query().Get("limit"); raw != "" {
+	page := 1
+	if raw := r.URL.Query().Get("page"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed <= 0 {
-			sendError(w, "Invalid limit", http.StatusBadRequest)
-			return
+		if err == nil && parsed > 0 {
+			page = parsed
 		}
-		limit = parsed
 	}
 
-	queue, err := h.orchestrator.GetPatchQueue(r.Context(), projectID, limit)
+	limit := 20
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	res, err := h.orchestrator.GetPatchQueue(r.Context(), projectID, page, limit)
 	if err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	sendJSON(w, map[string]any{
-		"count": len(queue),
-		"queue": queue,
-	}, http.StatusOK)
+	sendJSON(w, res, http.StatusOK)
 }
 
 // GET /api/installations/{id}/applied-patches
@@ -1607,6 +1595,106 @@ func (h *OrchestratorHandler) DeleteContainer(w http.ResponseWriter, r *http.Req
 	h.DeleteNode(w, r)
 }
 
+// POST /api/projects/{id}/patches/refresh
+func (h *OrchestratorHandler) RefreshProjectPatches(w http.ResponseWriter, r *http.Request) {
+	rawProjectID := r.PathValue("id")
+	projectID, err := strconv.ParseInt(rawProjectID, 10, 64)
+	if err != nil || projectID <= 0 {
+		sendError(w, "Invalid project ID", http.StatusBadRequest)
+		return
+	}
+
+	limit := 20
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			sendError(w, "Invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+
+	offset := 0
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			sendError(w, "Invalid offset", http.StatusBadRequest)
+			return
+		}
+		offset = parsed
+	}
+
+	result, err := h.orchestrator.RefreshProjectPatches(r.Context(), projectID, limit, offset)
+	if err != nil {
+		emitAuditLog(
+			"MODIFICACION",
+			"ProjectPatchRefresh",
+			fmt.Sprint(projectID),
+			"RefreshProjectPatches",
+			fmt.Sprint(projectID),
+			"Refresh patches/fixed_versions para CVEs abiertos del proyecto",
+			nil,
+			"ERROR",
+			err.Error(),
+		)
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	cambios := map[string]auditChange{
+		"total_cves": {
+			Antes:   nil,
+			Despues: result.TotalCVEs,
+		},
+		"offset": {
+			Antes:   nil,
+			Despues: result.Offset,
+		},
+		"limit": {
+			Antes:   nil,
+			Despues: result.Limit,
+		},
+		"processed": {
+			Antes:   nil,
+			Despues: result.Processed,
+		},
+		"has_more": {
+			Antes:   nil,
+			Despues: result.HasMore,
+		},
+		"next_offset": {
+			Antes:   nil,
+			Despues: result.NextOffset,
+		},
+		"refreshed": {
+			Antes:   nil,
+			Despues: result.Refreshed,
+		},
+		"not_found": {
+			Antes:   nil,
+			Despues: result.NotFound,
+		},
+		"failed": {
+			Antes:   nil,
+			Despues: result.Failed,
+		},
+	}
+
+	emitAuditLog(
+		"MODIFICACION",
+		"ProjectPatchRefresh",
+		fmt.Sprint(projectID),
+		"RefreshProjectPatches",
+		fmt.Sprint(projectID),
+		"Refresh patches/fixed_versions para CVEs abiertos del proyecto",
+		cambios,
+		"SUCCESS",
+		"",
+	)
+
+	sendJSON(w, result, http.StatusOK)
+}
+
 func (h *OrchestratorHandler) GetTTPMatrix(w http.ResponseWriter, r *http.Request) {
 	var projectID *int64
 	projectIDStr := r.URL.Query().Get("project_id")
@@ -1655,5 +1743,3 @@ func (h *OrchestratorHandler) SearchCPE(w http.ResponseWriter, r *http.Request) 
 
 	sendJSON(w, items, http.StatusOK)
 }
-
-

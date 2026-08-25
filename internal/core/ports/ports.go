@@ -296,9 +296,12 @@ type RiskPort interface {
 	// y devuelve todo lo necesario para calcular el riesgo de cada finding.
 	GetFindingContextsByEndpoint(ctx context.Context, endpointID int64) ([]domain.FindingRiskContext, error)
 
-	// GetPatchQueue devuelve los findings pendientes ordenados por prioridad.
+	// GetPatchQueue devuelve los findings pendientes ordenados por prioridad y paginados.
 	// projectID nulo recorre toda la infraestructura.
-	GetPatchQueue(ctx context.Context, projectID *int64, limit int) ([]domain.PatchQueueItem, error)
+	GetPatchQueue(ctx context.Context, projectID *int64, page int, limit int) (*domain.PatchQueueResponse, error)
+
+	// GetOpenFindingCVEsByProject devuelve los CVEs de findings abiertos de un proyecto.
+	GetOpenFindingCVEsByProject(ctx context.Context, projectID int64) ([]string, error)
 
 	// GetEndpointIDsByInstallation devuelve los endpoints que alojan una instalación,
 	// directamente o vía contenedor. Inverso de GetInstallationIDsByEndpoint.

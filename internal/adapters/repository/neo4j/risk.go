@@ -2,6 +2,7 @@ package neo4j
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -412,9 +413,31 @@ func (r *riskRepo) GetSoftwareCriticalityLevel(ctx context.Context, installation
 	return res.(string), nil
 }
 
-// GetPatchQueue devuelve los findings pendientes ordenados por prioridad. projectID nulo
-// recorre toda la infraestructura.
-func (r *riskRepo) GetPatchQueue(ctx context.Context, projectID *int64, limit int) ([]domain.PatchQueueItem, error) {
+// GetPatchQueue devuelve los findings pendientes ordenados por prioridad y paginados.
+func (r *riskRepo) GetPatchQueue(ctx context.Context, projectID *int64, page int, limit int) (*domain.PatchQueueResponse, error) {
+	if page <= 0 {
+		page = 1
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	offset := (page - 1) * limit
+
+	var projectParam any
+	if projectID != nil {
+		projectParam = *projectID
+	}
+
+	countQuery := `
+		MATCH (e:Endpoint)
+		MATCH path = (e)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)
+		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset))
+		MATCH (asset)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+		  AND ($project_id IS NULL OR EXISTS { (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e) })
+		RETURN count(DISTINCT f) AS total
+	`
+
 	query := `
 		MATCH (e:Endpoint)
 		MATCH path = (e)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)
@@ -431,6 +454,8 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, projectID *int64, limit in
 		       asset.id            AS installation_id,
 		       coalesce(s.name, asset.name, asset.id) AS software_name,
 		       coalesce(s.version, 'N/A') AS software_version,
+		       s.vendor            AS software_vendor,
+		       s.cpe               AS software_cpe,
 		       coalesce(rem.fixed_version, v.fixed_version) AS fixed_version,
 		       e.id                AS endpoint_id,
 		       e.hostname          AS hostname,
@@ -442,23 +467,26 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, projectID *int64, limit in
 		       f.urgency_boost     AS urgency_boost,
 		       f.priority_score    AS priority_score,
 		       EXISTS { (:Patch)-[:FIXES]->(v) } AS patch_available
-		// coalesce porque en Cypher los NULL ordenan primero con DESC: sin él, los
-		// findings a los que aún no se les ha calculado la prioridad encabezarían la cola.
 		ORDER BY coalesce(priority_score, 0.0) DESC, coalesce(risk_score, 0.0) DESC, finding_id ASC
+		SKIP $offset
 		LIMIT $limit
 	`
-
-	var projectParam any
-	if projectID != nil {
-		projectParam = *projectID
-	}
 
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
+	var totalCount int
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		countResult, err := tx.Run(ctx, countQuery, map[string]any{"project_id": projectParam})
+		if err == nil && countResult.Next(ctx) {
+			if t, ok := countResult.Record().Get("total"); ok {
+				totalCount = int(toInt64(t))
+			}
+		}
+
 		result, err := tx.Run(ctx, query, map[string]any{
 			"project_id": projectParam,
+			"offset":     int64(offset),
 			"limit":      int64(limit),
 		})
 		if err != nil {
@@ -469,13 +497,15 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, projectID *int64, limit in
 		for result.Next(ctx) {
 			props := result.Record().AsMap()
 			items = append(items, domain.PatchQueueItem{
-				Position:         len(items) + 1,
+				Position:         offset + len(items) + 1,
 				FindingID:        getInt64(props, "finding_id"),
 				CVEID:            getString(props, "cve_id"),
 				Status:           getString(props, "status"),
 				InstallationID:   getString(props, "installation_id"),
 				SoftwareName:     getString(props, "software_name"),
 				SoftwareVersion:  getString(props, "software_version"),
+				SoftwareVendor:   getString(props, "software_vendor"),
+				SoftwareCPE:      getString(props, "software_cpe"),
 				FixedVersion:     getString(props, "fixed_version"),
 				EndpointID:       getInt64(props, "endpoint_id"),
 				Hostname:         getString(props, "hostname"),
@@ -495,10 +525,24 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, projectID *int64, limit in
 	if err != nil {
 		return nil, err
 	}
-	if res == nil {
-		return []domain.PatchQueueItem{}, nil
+
+	queueItems := make([]domain.PatchQueueItem, 0)
+	if res != nil {
+		queueItems = res.([]domain.PatchQueueItem)
 	}
-	return res.([]domain.PatchQueueItem), nil
+
+	totalPages := 1
+	if totalCount > 0 {
+		totalPages = (totalCount + limit - 1) / limit
+	}
+
+	return &domain.PatchQueueResponse{
+		Queue:      queueItems,
+		Total:      totalCount,
+		Page:       page,
+		Limit:      limit,
+		TotalPages: totalPages,
+	}, nil
 }
 
 // GetEndpointIDsByInstallation es el recorrido inverso de GetInstallationIDsByEndpoint.
@@ -881,4 +925,43 @@ func (r *riskRepo) GetProjectIDByEndpoint(ctx context.Context, endpointID int64)
 	}
 
 	return res.(int64), nil
+}
+
+// GetOpenFindingCVEsByProject devuelve la lista de CVEs de todos los findings abiertos asociados a un proyecto.
+func (r *riskRepo) GetOpenFindingCVEsByProject(ctx context.Context, projectID int64) ([]string, error) {
+	query := `
+		MATCH (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e:Endpoint)
+		MATCH path = (e)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)
+		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset))
+		MATCH (asset)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+		RETURN DISTINCT v.cve_id AS cve_id
+		ORDER BY cve_id ASC
+	`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"project_id": projectID})
+		if err != nil {
+			return nil, err
+		}
+
+		cves := make([]string, 0)
+		for result.Next(ctx) {
+			value, _ := result.Record().Get("cve_id")
+			if cve, ok := value.(string); ok && strings.TrimSpace(cve) != "" {
+				cves = append(cves, cve)
+			}
+		}
+		return cves, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []string{}, nil
+	}
+	return res.([]string), nil
 }
