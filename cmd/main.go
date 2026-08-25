@@ -93,19 +93,32 @@ func main() {
 
 
 
+	// Hub WebSocket para notificaciones en tiempo real del worker de TTPs
+	wsHub := handler.NewWSHub()
+	orchestrator.WithNotifier(wsHub)
+
 	// Inyectar el repositorio y proveedor para el catálogo de CAPEC
 	orchestrator.WithCAPEC(capecRepo, capecProvider)
 
-
-	// Iniciar el worker de TTPs en segundo plano
-	orchestrator.StartTTPWorker(context.Background())
+	// Iniciar el worker de TTPs en segundo plano esperando la sincronización
+	go func() {
+		select {
+		case <-orchestrator.CapecReady:
+		case <-time.After(30 * time.Second): // timeout de seguridad
+			log.Printf("[TTP-BG-SWEEP] Timeout esperando CAPEC ready, arrancando de todos modos")
+		}
+		orchestrator.StartTTPWorker(context.Background())
+	}()
 
 	// Inyectar el repositorio y proveedor para el catálogo de MITRE ATT&CK
 	orchestrator.WithMitreATTACK(ttpRepo, mitreAttackProvider, actorRepo)
 
 	// Iniciar sincronización de catálogos en segundo plano (coordinada secuencialmente para evitar condiciones de carrera)
 	go func() {
-		time.Sleep(5 * time.Second) // margen inicial para que el backend esté completamente listo
+		defer func() {
+			close(orchestrator.CapecReady)
+			log.Printf("[CAPEC Sync] Canal capecReady cerrado, worker liberado.")
+		}()
 		initCtx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 		defer cancel()
 
@@ -183,7 +196,7 @@ func main() {
 				time.Sleep(15 * time.Second)
 			}
 			if err != nil {
-				log.Printf("[CAPEC Sync] Falló la importación de CAPEC tras 3 intentos.")
+				log.Printf("[CAPEC Sync] Fallo en la sincronización, continuando con catálogo posiblemente vacío: %v", err)
 			}
 		} else {
 			log.Printf("[CAPEC Sync] Catálogo de CAPEC ya inicializado con %d patrones y %d enlaces TTP.", capecCount, mapsToTtpCount)
@@ -192,7 +205,7 @@ func main() {
 
 	// 5. Inicialización de los Controladores HTTP (Adaptadores Inbound)
 	h := handler.NewOrchestratorHandler(orchestrator)
-	router := handler.NewRouter(h)
+	router := handler.NewRouter(h, wsHub)
 
 	// Middleware CORS para evitar bloqueos del navegador en desarrollo
 	corsHandler := middleware.CORS(router)

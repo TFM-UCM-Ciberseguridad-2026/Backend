@@ -32,7 +32,7 @@ type VulnerabilityPort interface {
 	DeleteByID(ctx context.Context, cveID string) error
 	LinkVulnerabilityToCWEs(ctx context.Context, cveID string, cwes []string) error
 	LinkTTPsToVulnerability(ctx context.Context, cveID, cweID string, ttps []string, confidence, source string) error
-	GetUnmappedVulnerabilities(ctx context.Context) ([]domain.Vulnerability, error)
+	GetUnmappedVulnerabilities(ctx context.Context, projectID int64) ([]domain.Vulnerability, error) // projectID=0 → sin filtro (sweep global)
 }
 
 type SoftwarePort interface {
@@ -347,4 +347,21 @@ type RiskPort interface {
 
 	// GetAllProjectIDs devuelve los IDs de todos los proyectos para el recálculo diario.
 	GetAllProjectIDs(ctx context.Context) ([]int64, error)
+}
+
+// TTPMappedEvent se emite por el worker de TTPs cada vez que una CVE queda mapeada.
+// ProjectID = 0 indica origen global (sweep automático, cron, o escaneo sin contexto de proyecto).
+type TTPMappedEvent struct {
+	CVEID      string  `json:"cve_id"`
+	TTPs       []string `json:"ttps"`
+	Confidence string  `json:"confidence"`
+	Source     string  `json:"source"`
+	ProjectID  int64   `json:"project_id"` // 0 = global
+	Log        string  `json:"log"`
+}
+
+// NotificationPort desacopla el worker de TTPs de cualquier detalle de transporte (WebSocket, SSE, etc.).
+// La implementación concreta (WSHub) vive en la capa de adapters/handler.
+type NotificationPort interface {
+	NotifyTTPMapped(ctx context.Context, event TTPMappedEvent) error
 }

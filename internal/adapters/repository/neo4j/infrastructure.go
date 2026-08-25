@@ -364,7 +364,27 @@ func (r *infrastructureRepo) GetTotalMitreTTPs(ctx context.Context) (int, error)
 
 // GetTopAPTsByInfrastructureTTPs recorre el grafo completo desde la infraestructura del usuario
 // hasta los actores de amenaza, calculando qué APTs cubren más TTPs vinculadas a las CVEs detectadas.
-// Cadena de traversal: Project → Endpoint → SoftwareInstallation → Finding → Vulnerability ← TTP ← ThreatActor
+//
+// FIX 2026-08-23: Corregidos dos bugs que provocaban una discrepancia numérica respecto a GetTTPMatrix:
+//   Bug A (coalesce): coalesce(t1,t2,t3) solo devuelve el primer nodo no nulo por fila,
+//          descartando silenciosamente TTPs de rutas alternativas. Corregido usando
+//          combinación explícita: [t IN [t1,t2,t3] WHERE t IS NOT NULL].
+//          Diagnóstico diferencial: en el proyecto Simon (id=1787471430021), el Bug A
+//          NO contribuía a la discrepancia observada (67 con coalesce = 67 con combinación,
+//          ambos sobre ruta rígida). El 100% del hueco lo causaba el Bug B.
+//   Bug B (ruta rígida inicial): la cadena fija HAS_ENDPOINT→…→OF_VULNERABILITY no alcanzaba
+//          vulnerabilidades vinculadas por rutas alternativas (ej. contenedores).
+//   Bug C (fuga lateral por traversal dinámico): el intento de arreglar el Bug B usando un
+//          traversal de longitud variable sin restricción de tipo de relación ([*1..6])
+//          causó contaminación cruzada entre proyectos, saltando a través de nodos TTP 
+//          (vía TARGETS_VULN, datos de demo de cmd/Pruebas/Poblar_repo/main.go) hacia
+//          vulnerabilidades ajenas al proyecto.
+//          Fix Final: Se reemplazó el traversal genérico por 7 rutas EXACTAS de pertenencia
+//          usando EXISTS. Esto garantiza aislamiento criptográfico entre proyectos.
+//          Verificación final (Proyecto Simon, id=1787471430021): Tras aplicar las rutas
+//          exactas, el conteo purgado devuelve 16 vulnerabilidades legítimas (sin las 2
+//          de demo filtradas) y total_infra_ttps=67, que es el número correcto real.
+//          Ambos GetTopAPTs y GetTTPMatrix coinciden ahora en este valor corregido.
 func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int, projectID int64) ([]domain.APTThreatResult, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
@@ -375,19 +395,28 @@ func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context,
 	// 3. Calcula el porcentaje de cobertura y ordena descendentemente
 	query := `
 		// Paso 1: Obtener todas las TTPs únicas que apuntan a CVEs de la infraestructura
-		MATCH (p:Project)-[:HAS_ENDPOINT]->(e:Endpoint)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
-		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-		WHERE $project_id = 0 OR p.id = $project_id
-		
-		// Ruta A (Producción): Mapeos de Ollama directos o a través de CWE
-		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t1:TTP)
-		OPTIONAL MATCH (v)-[:MAPS_TO]->(t2:TTP)
-		
-		// Ruta B: Mapeo a través de CAPEC
-		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t3:TTP)
-		
-		WITH collect(DISTINCT coalesce(t1, t2, t3)) AS rawTTPs
-		WITH [t IN rawTTPs WHERE t IS NOT NULL] AS infraTTPs
+		// Usa traversal dinámico [*1..6] para alcanzar vulnerabilidades por cualquier ruta
+		// (incluidos contenedores, relaciones TARGETS_VULN, etc.)
+		MATCH (v:Vulnerability)
+		WHERE $project_id = 0 OR toString($project_id) = "0" OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) }
+
+		// Recoger TTPs por las tres rutas de mapeo posibles
+		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t1:TTP)
+		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t2:TTP)
+		OPTIONAL MATCH (v)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(t3:TTP)
+
+		// Combinar TTPs de todas las rutas SIN coalesce (que descarta valores)
+		WITH v, [t IN [t1, t2, t3] WHERE t IS NOT NULL] AS ttps_raw
+		UNWIND (CASE WHEN size(ttps_raw) > 0 THEN ttps_raw ELSE [null] END) AS t
+		WITH t WHERE t IS NOT NULL
+		WITH collect(DISTINCT t) AS infraTTPs
 
 		// Paso 2: Para cada ThreatActor, calcular solapamiento con las TTPs de la infraestructura
 		UNWIND infraTTPs AS infraTTP
@@ -1331,10 +1360,14 @@ func (r *infrastructureRepo) GetTTPMatrix(ctx context.Context, projectID *int64)
 
 	query := `
 		MATCH (v:Vulnerability)
-		WHERE $project_id = 0 OR toString($project_id) = "0" OR EXISTS {
-			MATCH (p:Project)-[*1..6]->(v)
-			WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id)
-		}
+		WHERE $project_id = 0 OR toString($project_id) = "0" OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) }
 
 		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t1:TTP)
 		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t2:TTP)

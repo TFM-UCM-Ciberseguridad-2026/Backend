@@ -1472,15 +1472,40 @@ func (h *OrchestratorHandler) DeleteNode(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *OrchestratorHandler) GetTTPSyncStatus(w http.ResponseWriter, r *http.Request) {
-	status := h.orchestrator.GetTTPSyncStatus()
+	var projectID int64
+	if pidStr := r.URL.Query().Get("project_id"); pidStr != "" {
+		if pid, err := strconv.ParseInt(pidStr, 10, 64); err == nil {
+			projectID = pid
+		}
+	}
+	status := h.orchestrator.GetTTPSyncStatus(projectID)
 	sendJSON(w, status, http.StatusOK)
 }
 
 // POST /api/infrastructure/map-ttps
+// Body JSON opcional: {"project_id": 123}
+// Si project_id está ausente o es 0, el sweep cubre toda la base de datos (comportamiento previo).
 func (h *OrchestratorHandler) MapTTPsManually(w http.ResponseWriter, r *http.Request) {
-	go h.orchestrator.StartBackgroundTTPMapping()
-	sendJSON(w, map[string]any{"status": "success", "message": "Mapeo de TTPs iniciado en segundo plano"}, http.StatusOK)
+	var body struct {
+		ProjectID int64 `json:"project_id"`
+	}
+	// Ignorar errores de decode: si el body está vacío o no tiene project_id, projectID queda en 0
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	projectID := body.ProjectID
+	enqueued := h.orchestrator.StartBackgroundTTPMapping(projectID)
+
+	msg := "Mapeo de TTPs iniciado en segundo plano"
+	if enqueued == 0 {
+		msg = "No hay vulnerabilidades nuevas que mapear"
+	}
+	sendJSON(w, map[string]any{
+		"status":   "success",
+		"message":  msg,
+		"enqueued": enqueued,
+	}, http.StatusOK)
 }
+
 
 // POST /api/endpoints/{id}/containers
 func (h *OrchestratorHandler) AddContainerToEndpoint(w http.ResponseWriter, r *http.Request) {
