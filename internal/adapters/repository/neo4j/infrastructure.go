@@ -1444,3 +1444,131 @@ func (r *infrastructureRepo) GetTTPMatrix(ctx context.Context, projectID *int64)
 
 	return res.([]domain.TTPMatrixItem), nil
 }
+
+// GetTTPStats devuelve las métricas agregadas para el dashboard de inteligencia de amenazas.
+func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (*domain.TTPStats, error) {
+	params := map[string]interface{}{"project_id": projectID}
+
+	totalQuery := `
+		MATCH (v:Vulnerability)
+		WHERE $project_id = 0 OR toString($project_id) = "0" OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) }
+		OPTIONAL MATCH (v)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(:TTP)
+		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(:TTP)
+		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(:TTP)
+		WITH v, count(*) AS mapped_paths
+		RETURN 
+		  count(v) AS total,
+		  count(CASE WHEN mapped_paths > 0 THEN 1 END) AS mapped,
+		  count(CASE WHEN mapped_paths = 0 THEN 1 END) AS unmapped
+	`
+
+	confidenceQuery := `
+		MATCH (v:Vulnerability)
+		WHERE $project_id = 0 OR toString($project_id) = "0" OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) }
+		
+		OPTIONAL MATCH (v)-[r1:MAPS_TO]->(t1:TTP)
+		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[r2:MAPS_TO]->(t2:TTP)
+		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t3:TTP)
+		
+		WITH v, t1, t2, t3,
+		     CASE WHEN t3 IS NOT NULL AND t1 IS NULL AND t2 IS NULL THEN 'high' ELSE coalesce(r1.confidence, r2.confidence, 'medium') END AS conf,
+		     CASE WHEN t3 IS NOT NULL AND t1 IS NULL AND t2 IS NULL THEN 'capec_static' ELSE coalesce(r1.source, r2.source, 'llm_enriched') END AS src
+		WHERE conf IS NOT NULL
+		RETURN
+		  count(CASE WHEN conf = 'high'   THEN 1 END) AS high_confidence,
+		  count(CASE WHEN conf = 'medium' THEN 1 END) AS medium_confidence,
+		  count(CASE WHEN src = 'capec_static'  THEN 1 END) AS capec_static,
+		  count(CASE WHEN src = 'llm_enriched'  THEN 1 END) AS llm_enriched
+	`
+
+	topTTPsQuery := `
+		MATCH (v:Vulnerability)
+		WHERE $project_id = 0 OR toString($project_id) = "0" OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) }
+		OPTIONAL MATCH (v)-[:MAPS_TO]->(t1:TTP)
+		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t2:TTP)
+		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t3:TTP)
+		WITH v, [t IN [t1, t2, t3] WHERE t IS NOT NULL] AS ttps_raw
+		UNWIND (CASE WHEN size(ttps_raw) > 0 THEN ttps_raw ELSE [null] END) AS t
+		WITH v, t WHERE t IS NOT NULL
+		RETURN
+		  coalesce(t.ttp_id, t.id, '') AS id,
+		  coalesce(t.name, '')          AS name,
+		  coalesce(t.tactic, '')        AS tactic,
+		  count(DISTINCT v)             AS cnt
+		ORDER BY cnt DESC
+		LIMIT 10
+	`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	stats := &domain.TTPStats{}
+
+	_, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		res1, err := tx.Run(ctx, totalQuery, params)
+		if err != nil { return nil, err }
+		if res1.Next(ctx) {
+			rec := res1.Record()
+			if v, ok := rec.Get("total"); ok && v != nil { stats.TotalCVEs = int(v.(int64)) }
+			if v, ok := rec.Get("mapped"); ok && v != nil { stats.MappedCVEs = int(v.(int64)) }
+			if v, ok := rec.Get("unmapped"); ok && v != nil { stats.UnmappedCVEs = int(v.(int64)) }
+		}
+		_, _ = res1.Consume(ctx)
+
+		res2, err := tx.Run(ctx, confidenceQuery, params)
+		if err != nil { return nil, err }
+		if res2.Next(ctx) {
+			rec := res2.Record()
+			if v, ok := rec.Get("high_confidence"); ok && v != nil { stats.HighConfidence = int(v.(int64)) }
+			if v, ok := rec.Get("medium_confidence"); ok && v != nil { stats.MediumConfidence = int(v.(int64)) }
+			if v, ok := rec.Get("capec_static"); ok && v != nil { stats.CapecStatic = int(v.(int64)) }
+			if v, ok := rec.Get("llm_enriched"); ok && v != nil { stats.LlmEnriched = int(v.(int64)) }
+		}
+		_, _ = res2.Consume(ctx)
+
+		res3, err := tx.Run(ctx, topTTPsQuery, params)
+		if err != nil { return nil, err }
+		for res3.Next(ctx) {
+			rec := res3.Record()
+			item := domain.TTPTopItem{}
+			if v, ok := rec.Get("id"); ok && v != nil { item.ID = fmt.Sprint(v) }
+			if v, ok := rec.Get("name"); ok && v != nil { item.Name = fmt.Sprint(v) }
+			if v, ok := rec.Get("tactic"); ok && v != nil { item.Tactic = fmt.Sprint(v) }
+			if v, ok := rec.Get("cnt"); ok && v != nil { item.Count = int(v.(int64)) }
+			if item.ID != "" { stats.TopTTPs = append(stats.TopTTPs, item) }
+		}
+		_, _ = res3.Consume(ctx)
+
+		return nil, nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if stats.TopTTPs == nil {
+		stats.TopTTPs = []domain.TTPTopItem{}
+	}
+	return stats, nil
+}
+

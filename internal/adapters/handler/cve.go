@@ -1628,6 +1628,7 @@ func (h *OrchestratorHandler) GetTTPMatrix(w http.ResponseWriter, r *http.Reques
 	_ = json.NewEncoder(w).Encode(matrix)
 }
 
+
 // GET /api/cpe/search?query=... o ?q=... o ?vendor=...&product=...&version=...
 func (h *OrchestratorHandler) SearchCPE(w http.ResponseWriter, r *http.Request) {
 	rawInput := r.URL.Query().Get("query")
@@ -1656,4 +1657,27 @@ func (h *OrchestratorHandler) SearchCPE(w http.ResponseWriter, r *http.Request) 
 	sendJSON(w, items, http.StatusOK)
 }
 
+
+
+// GetTTPStats devuelve métricas agregadas de TTPs para el dashboard (KPIs, top-10, distribución).
+func (h *OrchestratorHandler) GetTTPStats(w http.ResponseWriter, r *http.Request) {
+	var projectID int64
+	projectIDStr := r.URL.Query().Get("project_id")
+	if projectIDStr != "" {
+		parsedID, err := strconv.ParseInt(projectIDStr, 10, 64)
+		if err == nil {
+			projectID = parsedID
+		}
+	}
+
+	stats, err := h.orchestrator.GetTTPStats(r.Context(), projectID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	json.NewEncoder(w).Encode(stats)
+}
 

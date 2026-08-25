@@ -2186,6 +2186,7 @@ func (o *Orchestrator) GetTTPMatrix(ctx context.Context, projectID *int64) ([]do
 	return o.infraPort.GetTTPMatrix(ctx, projectID)
 }
 
+
 // Métodos auxiliares de consulta de estado previo para auditoría
 func (o *Orchestrator) GetEndpointByID(ctx context.Context, id int64) (*domain.Endpoint, error) {
 	return o.endpointPort.GetByID(ctx, id)
@@ -2213,5 +2214,10 @@ func (o *Orchestrator) GetContainerByID(ctx context.Context, id string) (*domain
 
 func (o *Orchestrator) GetProjectByID(ctx context.Context, id int64) (*domain.Project, error) {
 	return o.projectPort.GetByID(ctx, id)
+
+// GetTTPStats devuelve las métricas agregadas para el dashboard de inteligencia de amenazas.
+func (o *Orchestrator) GetTTPStats(ctx context.Context, projectID int64) (*domain.TTPStats, error) {
+	return o.infraPort.GetTTPStats(ctx, projectID)
+
 }
 

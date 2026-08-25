@@ -231,6 +231,7 @@ type InfrastructurePort interface {
 	GetGraphData(ctx context.Context) (*domain.GraphData, error)
 	GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int, projectID int64) ([]domain.APTThreatResult, error)
 	GetTTPMatrix(ctx context.Context, projectID *int64) ([]domain.TTPMatrixItem, error)
+	GetTTPStats(ctx context.Context, projectID int64) (*domain.TTPStats, error)
 	GetTotalMitreTTPs(ctx context.Context) (int, error)
 	GetExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error)
 	// IsAnalysisPending comprueba si hay vulnerabilidades de red pendientes de enriquecimiento en background.
