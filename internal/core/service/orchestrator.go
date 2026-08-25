@@ -984,29 +984,156 @@ func (o *Orchestrator) recomputeRiskForInstallation(ctx context.Context, install
 // defaultPatchQueueLimit acota la cola cuando el cliente no pide un tamaño.
 const defaultPatchQueueLimit = 50
 
+// matchesTokenOrSubstr verifica coincidencia entre target (ej: name/cpeProduct) y pkg/artifact.
+// Evita falsos positivos con palabras cortas (ej. "go" en "django" o "cat" en "concat").
+func matchesTokenOrSubstr(target, str string) bool {
+	if target == "" || str == "" {
+		return false
+	}
+	if target == str || strings.Contains(str, target) {
+		// Para cadenas cortas (<= 3 caracteres), exigimos coincidencia por token delimitado (-, _, ., :, /, @)
+		if len(target) <= 3 {
+			for _, part := range strings.FieldsFunc(str, func(r rune) bool {
+				return r == '-' || r == '_' || r == '.' || r == ':' || r == '/' || r == '@'
+			}) {
+				if part == target {
+					return true
+				}
+			}
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// matchesSoftwarePackage evalúa si un nombre de paquete coincide con el software, vendor o CPE indicados.
+func matchesSoftwarePackage(packageName, swName, swVendor, swCPE string) bool {
+	if packageName == "" {
+		return true
+	}
+	pkg := strings.ToLower(strings.TrimSpace(packageName))
+	name := strings.ToLower(strings.TrimSpace(swName))
+	vendor := strings.ToLower(strings.TrimSpace(swVendor))
+	cpe := strings.ToLower(strings.TrimSpace(swCPE))
+
+	// Si el paquete tiene formato Maven/Java (group:artifact) o NPM (@scope/pkg), extraemos el artefacto
+	artifact := pkg
+	if idx := strings.Index(pkg, ":"); idx >= 0 {
+		artifact = pkg[idx+1:]
+	} else if idx := strings.Index(pkg, "/"); idx >= 0 && strings.HasPrefix(pkg, "@") {
+		artifact = pkg[idx+1:]
+	}
+
+	// 1. Coincidencia directa por artefacto / nombre de producto
+	if name != "" {
+		if matchesTokenOrSubstr(name, artifact) || matchesTokenOrSubstr(artifact, name) ||
+			matchesTokenOrSubstr(name, pkg) || matchesTokenOrSubstr(pkg, name) {
+			return true
+		}
+		// Manejo especial de demonio HTTP (httpd vs http_server vs apache2)
+		if (name == "http_server" || name == "apache" || name == "httpd") &&
+			(artifact == "httpd" || strings.HasPrefix(artifact, "httpd") || artifact == "apache2") {
+			return true
+		}
+	}
+
+	// 2. Coincidencia por CPE (extrae proveedor y producto del CPE cpe:2.3:part:vendor:product:...)
+	if strings.HasPrefix(cpe, "cpe:2.3:") {
+		parts := strings.Split(cpe, ":")
+		if len(parts) >= 5 {
+			cpeProduct := parts[4]
+			if cpeProduct != "" && cpeProduct != "*" {
+				if matchesTokenOrSubstr(cpeProduct, artifact) || matchesTokenOrSubstr(artifact, cpeProduct) ||
+					matchesTokenOrSubstr(cpeProduct, pkg) || matchesTokenOrSubstr(pkg, cpeProduct) {
+					return true
+				}
+				if (cpeProduct == "http_server") && (artifact == "httpd" || strings.HasPrefix(artifact, "httpd") || artifact == "apache2") {
+					return true
+				}
+			}
+		}
+	}
+
+	// 3. Coincidencia por Vendor solo si no es un umbrella vendor genérico (como "apache", "oracle", "microsoft", "google", "redhat", "debian", "canonical")
+	// o si el vendor coincide en paquetes del SO simples (como "apache2" para vendor "apache")
+	isGenericUmbrella := vendor == "apache" || vendor == "oracle" || vendor == "microsoft" ||
+		vendor == "google" || vendor == "redhat" || vendor == "debian" || vendor == "canonical"
+	if len(vendor) > 2 && matchesTokenOrSubstr(vendor, pkg) {
+		if !isGenericUmbrella {
+			return true
+		}
+		// Para umbrella vendors como "apache", sólo aceptar paquetes simples de SO sin ":" o "/" (ej: apache2, apache-httpd)
+		if !strings.Contains(pkg, ":") && !strings.Contains(pkg, "/") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// FilterFixedVersionForSoftware filtra una cadena de fixed_versions separadas por coma,
+// reteniendo únicamente aquellas que corresponden al software, vendor o CPE del ítem.
+func FilterFixedVersionForSoftware(rawFixedVersion, currentVersion, swName, swVendor, swCPE string) string {
+	if strings.TrimSpace(rawFixedVersion) == "" {
+		return ""
+	}
+
+	entries := strings.Split(rawFixedVersion, ",")
+	validEntries := make([]string, 0, len(entries))
+
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+
+		packageName := ""
+		if idx := strings.LastIndex(entry, "@"); idx >= 0 {
+			packageName = strings.TrimSpace(entry[:idx])
+		}
+
+		if matchesSoftwarePackage(packageName, swName, swVendor, swCPE) {
+			validEntries = append(validEntries, entry)
+		}
+	}
+
+	return strings.Join(validEntries, ", ")
+}
+
 // GetPatchQueue devuelve los findings pendientes ordenados por prioridad de parcheo.
 // projectID nulo recorre toda la infraestructura.
 //
 // Clasifica cada entrada en el momento de servirla en lugar de leer un tier persistido:
 // así la cola queda consistente aunque el finding se haya calculado con un baremo
 // anterior.
-func (o *Orchestrator) GetPatchQueue(ctx context.Context, projectID *int64, limit int) ([]domain.PatchQueueItem, error) {
+func (o *Orchestrator) GetPatchQueue(ctx context.Context, projectID *int64, page int, limit int) (*domain.PatchQueueResponse, error) {
 	if o.riskPort == nil {
 		return nil, fmt.Errorf("el motor de riesgo no está configurado")
 	}
+	if page <= 0 {
+		page = 1
+	}
 	if limit <= 0 {
-		limit = defaultPatchQueueLimit
+		limit = 20
 	}
 
-	items, err := o.riskPort.GetPatchQueue(ctx, projectID, limit)
+	resp, err := o.riskPort.GetPatchQueue(ctx, projectID, page, limit)
 	if err != nil {
 		return nil, fmt.Errorf("error obteniendo la cola de parcheo: %w", err)
 	}
 
-	for i := range items {
-		items[i].PriorityTier = ClassifyRiskTier(items[i].PriorityScore)
+	for i := range resp.Queue {
+		resp.Queue[i].PriorityTier = ClassifyRiskTier(resp.Queue[i].PriorityScore)
+		resp.Queue[i].FixedVersion = FilterFixedVersionForSoftware(
+			resp.Queue[i].FixedVersion,
+			resp.Queue[i].SoftwareVersion,
+			resp.Queue[i].SoftwareName,
+			resp.Queue[i].SoftwareVendor,
+			resp.Queue[i].SoftwareCPE,
+		)
 	}
-	return items, nil
+	return resp, nil
 }
 
 // GetAppliedPatchHistory devuelve el histórico de parches aplicados sobre una instalación,

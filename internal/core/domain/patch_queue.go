@@ -15,6 +15,8 @@ type PatchQueueItem struct {
 	InstallationID  string `json:"installation_id"`
 	SoftwareName    string `json:"software_name"`
 	SoftwareVersion string `json:"software_version"`
+	SoftwareVendor  string `json:"software_vendor,omitempty"`
+	SoftwareCPE     string `json:"software_cpe,omitempty"`
 	FixedVersion    string `json:"fixed_version,omitempty"`
 
 	EndpointID  int64  `json:"endpoint_id"`
@@ -34,6 +36,14 @@ type PatchQueueItem struct {
 	// PatchAvailable indica si hay un parche registrado para el CVE. Un finding muy
 	// prioritario sin parche disponible no es accionable todavía.
 	PatchAvailable bool `json:"patch_available"`
+}
+
+type PatchQueueResponse struct {
+	Queue      []PatchQueueItem `json:"queue"`
+	Total      int              `json:"total"`
+	Page       int              `json:"page"`
+	Limit      int              `json:"limit"`
+	TotalPages int              `json:"total_pages"`
 }
 
 type ProjectPatchRefreshItem struct {
