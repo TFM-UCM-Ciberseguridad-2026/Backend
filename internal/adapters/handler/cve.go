@@ -8,11 +8,8 @@ Emite logs estructurados en JSON (sin campo operador) con diffs exactos y justif
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -33,69 +30,7 @@ func NewOrchestratorHandler(o *service.Orchestrator) *OrchestratorHandler {
 
 // ESTRUCTURAS Y EMISOR DE AUDITORÍA (STDOUT + FICHERO PERSISTENTE)
 
-var auditWriter io.Writer = os.Stdout
 
-func init() {
-	logPath := os.Getenv("AUDIT_LOG_PATH")
-	if logPath == "" {
-		logPath = "logs/audit.log"
-	}
-	dir := filepath.Dir(logPath)
-	if dir != "" && dir != "." {
-		_ = os.MkdirAll(dir, 0755)
-	}
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err == nil {
-		auditWriter = io.MultiWriter(os.Stdout, f)
-	} else {
-		auditWriter = os.Stdout
-	}
-}
-
-type auditChange struct {
-	Antes   any `json:"antes,omitempty"`
-	Despues any `json:"despues,omitempty"`
-}
-
-type auditAction struct {
-	Tipo         string `json:"tipo"`          // CREACION, MODIFICACION, ELIMINACION
-	TipoActivo   string `json:"tipo_activo"`   // Endpoint, Network, Container, etc.
-	IDActivo     string `json:"id_activo"`
-	NombreActivo string `json:"nombre_activo,omitempty"`
-	ProyectoID   string `json:"proyecto_id,omitempty"`
-}
-
-type auditLogEntry struct {
-	FechaHora         string                 `json:"fecha_hora"`
-	Nivel             string                 `json:"nivel"` // "AUDIT"
-	Accion            auditAction            `json:"accion"`
-	Justificacion     string                 `json:"justificacion,omitempty"`
-	CambiosRealizados map[string]auditChange `json:"cambios_realizados,omitempty"`
-	Estado            string                 `json:"estado"` // SUCCESS / ERROR
-	DetallesError     string                 `json:"detalles_error,omitempty"`
-}
-
-func emitAuditLog(tipoAccion, tipoActivo, idActivo, nombreActivo, proyectoID, justificacion string, cambios map[string]auditChange, estado, errStr string) {
-	entry := auditLogEntry{
-		FechaHora: time.Now().UTC().Format(time.RFC3339Nano),
-		Nivel:     "AUDIT",
-		Accion: auditAction{
-			Tipo:         tipoAccion,
-			TipoActivo:   tipoActivo,
-			IDActivo:     idActivo,
-			NombreActivo: nombreActivo,
-			ProyectoID:   proyectoID,
-		},
-		Justificacion:     justificacion,
-		CambiosRealizados: cambios,
-		Estado:            estado,
-		DetallesError:     errStr,
-	}
-
-	if b, err := json.Marshal(entry); err == nil {
-		fmt.Fprintln(auditWriter, string(b)) // Escribe simultáneamente en consola y fichero
-	}
-}
 
 func extractJustification(r *http.Request) string {
 	if q := r.URL.Query().Get("justification"); strings.TrimSpace(q) != "" {

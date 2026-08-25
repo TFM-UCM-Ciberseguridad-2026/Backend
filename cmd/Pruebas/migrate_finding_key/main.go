@@ -50,7 +50,7 @@ func main() {
 	if duplicateGroups > 0 {
 		fmt.Printf("    ✗ Hay %d grupos duplicados.\n", duplicateGroups)
 		fmt.Println("    Ejecuta esta query en Neo4j para verlos:")
-		fmt.Println(`
+		fmt.Print(`
 MATCH (si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 WITH si.id AS installation_id,
 	v.cve_id AS cve_id,
