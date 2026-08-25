@@ -87,6 +87,7 @@ type Orchestrator struct {
 	ttpSync             TTPBackgroundSyncManager
 	ttpQueueHigh        chan ttpTask
 	ttpQueueLow         chan ttpTask
+	CapecReady          chan struct{}
 }
 
 func NewOrchestrator(
@@ -125,6 +126,7 @@ func NewOrchestrator(
 		nvdSyncSem:       make(chan struct{}, 2), // máximo 2 llamadas NVD síncronas en total a la vez
 		ttpQueueHigh:     make(chan ttpTask, 1000),
 		ttpQueueLow:      make(chan ttpTask, 10000),
+		CapecReady:       make(chan struct{}),
 		ttpSync: TTPBackgroundSyncManager{
 			projectStates: make(map[int64]*ProjectTTPSyncState),
 		},
@@ -1928,6 +1930,7 @@ func (o *Orchestrator) processSingleCVE(ctx context.Context, task ttpTask) error
 	if len(validCWEs) > 0 {
 		mappedCWE = validCWEs[0]
 		var capecErr error
+		log.Printf("DEBUG HEX: mappedCWE=%q | len=%d | hex=%x", mappedCWE, len(mappedCWE), mappedCWE)
 		if o.capecPort != nil {
 			ttps, capecErr = o.capecPort.GetTTPsByCWE(ctx, mappedCWE)
 		} else {
