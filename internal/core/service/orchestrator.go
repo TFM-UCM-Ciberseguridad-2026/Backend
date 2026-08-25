@@ -1583,3 +1583,74 @@ func (o *Orchestrator) AggregateProjectRiskFromCurrentEndpointScores(ctx context
 		countRiskyEndpoints(summaries),
 	)
 }
+
+func (o *Orchestrator) RefreshProjectPatches(ctx context.Context, projectID int64, limit int, offset int) (*domain.ProjectPatchRefreshResult, error) {
+	if projectID == 0 {
+		return nil, fmt.Errorf("projectID es obligatorio")
+	}
+	if o.riskPort == nil {
+		return nil, fmt.Errorf("el motor de riesgo no está configurado")
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	if limit > 5 {
+		limit = 5
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	cves, err := o.riskPort.GetOpenFindingCVEsByProject(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("error obteniendo CVEs del proyecto: %w", err)
+	}
+
+	totalCVEs := len(cves)
+	end := offset + limit
+	if end > totalCVEs {
+		end = totalCVEs
+	}
+
+	batch := []string{}
+	if offset < totalCVEs {
+		batch = cves[offset:end]
+	}
+
+	result := &domain.ProjectPatchRefreshResult{
+		ProjectID:  projectID,
+		TotalCVEs:  totalCVEs,
+		Offset:     offset,
+		Limit:      limit,
+		Processed:  len(batch),
+		HasMore:    end < totalCVEs,
+		NextOffset: end,
+		Results:    make([]domain.ProjectPatchRefreshItem, 0, len(batch)),
+	}
+
+	for _, cveID := range batch {
+		item := domain.ProjectPatchRefreshItem{CVEID: cveID}
+
+		info, err := o.EnrichPatchesFromProvider(ctx, cveID)
+		if err != nil {
+			item.Error = err.Error()
+			result.Failed++
+			result.Results = append(result.Results, item)
+			continue
+		}
+
+		if info == nil {
+			result.NotFound++
+			result.Results = append(result.Results, item)
+			continue
+		}
+
+		item.Found = true
+		item.PatchCount = len(info.Patches)
+		item.FixedVersions = len(info.FixedVersions)
+		result.Refreshed++
+		result.Results = append(result.Results, item)
+	}
+
+	return result, nil
+}

@@ -2,6 +2,7 @@ package neo4j
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -869,4 +870,43 @@ func (r *riskRepo) GetProjectIDByEndpoint(ctx context.Context, endpointID int64)
 	}
 
 	return res.(int64), nil
+}
+
+// GetOpenFindingCVEsByProject devuelve la lista de CVEs de todos los findings abiertos asociados a un proyecto.
+func (r *riskRepo) GetOpenFindingCVEsByProject(ctx context.Context, projectID int64) ([]string, error) {
+	query := `
+		MATCH (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e:Endpoint)
+		MATCH path = (e)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)
+		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset))
+		MATCH (asset)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+		RETURN DISTINCT v.cve_id AS cve_id
+		ORDER BY cve_id ASC
+	`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"project_id": projectID})
+		if err != nil {
+			return nil, err
+		}
+
+		cves := make([]string, 0)
+		for result.Next(ctx) {
+			value, _ := result.Record().Get("cve_id")
+			if cve, ok := value.(string); ok && strings.TrimSpace(cve) != "" {
+				cves = append(cves, cve)
+			}
+		}
+		return cves, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []string{}, nil
+	}
+	return res.([]string), nil
 }

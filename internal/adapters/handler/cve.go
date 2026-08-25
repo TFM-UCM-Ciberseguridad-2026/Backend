@@ -12,6 +12,7 @@ Propósito arquitectónico y teórico:
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -168,7 +169,7 @@ func (h *OrchestratorHandler) RegisterSoftwareInstallation(w http.ResponseWriter
 // POST /api/containers/{id}/installations
 func (h *OrchestratorHandler) RegisterContainerSoftwareInstallation(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
-	
+
 	var req struct {
 		Software     domain.Software             `json:"software"`
 		Installation domain.SoftwareInstallation `json:"installation"`
@@ -551,10 +552,59 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 		appliedAt, req.AppliedBy, req.Notes,
 	)
 	if err != nil {
-		// Datos mal informados por el cliente, no fallo del servidor.
+		emitAuditLog(
+			"CREACION",
+			"AppliedPatch",
+			fmt.Sprintf("%s:%s:%d", installationID, req.CVEID, req.PatchID),
+			req.CVEID,
+			"",
+			req.Notes,
+			nil,
+			"ERROR",
+			err.Error(),
+		)
 		sendError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	cambios := map[string]auditChange{
+		"cve_id": {
+			Antes:   nil,
+			Despues: req.CVEID,
+		},
+		"installation_id": {
+			Antes:   nil,
+			Despues: installationID,
+		},
+		"patch_id": {
+			Antes:   nil,
+			Despues: req.PatchID,
+		},
+		"remediation_level": {
+			Antes:   nil,
+			Despues: req.RemediationLevel,
+		},
+		"applied_by": {
+			Antes:   nil,
+			Despues: req.AppliedBy,
+		},
+		"affected_findings": {
+			Antes:   nil,
+			Despues: affected,
+		},
+	}
+
+	emitAuditLog(
+		"CREACION",
+		"AppliedPatch",
+		fmt.Sprintf("%s:%s:%d", installationID, req.CVEID, req.PatchID),
+		req.CVEID,
+		"",
+		req.Notes,
+		cambios,
+		"SUCCESS",
+		"",
+	)
 
 	sendJSON(w, map[string]any{
 		"status":            "parche declarado como aplicado",
@@ -928,7 +978,7 @@ func (h *OrchestratorHandler) AddContainerToEndpoint(w http.ResponseWriter, r *h
 // PUT /api/containers/{id}
 func (h *OrchestratorHandler) UpdateContainer(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
-	
+
 	var container domain.Container
 	if err := json.NewDecoder(r.Body).Decode(&container); err != nil {
 		sendError(w, "JSON inválido: "+err.Error(), http.StatusBadRequest)
@@ -947,4 +997,104 @@ func (h *OrchestratorHandler) UpdateContainer(w http.ResponseWriter, r *http.Req
 func (h *OrchestratorHandler) DeleteContainer(w http.ResponseWriter, r *http.Request) {
 	// Se puede delegar en el borrado genérico o tener lógica específica si hace falta
 	h.DeleteNode(w, r)
+}
+
+// POST /api/projects/{id}/patches/refresh
+func (h *OrchestratorHandler) RefreshProjectPatches(w http.ResponseWriter, r *http.Request) {
+	rawProjectID := r.PathValue("id")
+	projectID, err := strconv.ParseInt(rawProjectID, 10, 64)
+	if err != nil || projectID <= 0 {
+		sendError(w, "Invalid project ID", http.StatusBadRequest)
+		return
+	}
+
+	limit := 20
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			sendError(w, "Invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+
+	offset := 0
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			sendError(w, "Invalid offset", http.StatusBadRequest)
+			return
+		}
+		offset = parsed
+	}
+
+	result, err := h.orchestrator.RefreshProjectPatches(r.Context(), projectID, limit, offset)
+	if err != nil {
+		emitAuditLog(
+			"MODIFICACION",
+			"ProjectPatchRefresh",
+			fmt.Sprint(projectID),
+			"RefreshProjectPatches",
+			fmt.Sprint(projectID),
+			"Refresh patches/fixed_versions para CVEs abiertos del proyecto",
+			nil,
+			"ERROR",
+			err.Error(),
+		)
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	cambios := map[string]auditChange{
+		"total_cves": {
+			Antes:   nil,
+			Despues: result.TotalCVEs,
+		},
+		"offset": {
+			Antes:   nil,
+			Despues: result.Offset,
+		},
+		"limit": {
+			Antes:   nil,
+			Despues: result.Limit,
+		},
+		"processed": {
+			Antes:   nil,
+			Despues: result.Processed,
+		},
+		"has_more": {
+			Antes:   nil,
+			Despues: result.HasMore,
+		},
+		"next_offset": {
+			Antes:   nil,
+			Despues: result.NextOffset,
+		},
+		"refreshed": {
+			Antes:   nil,
+			Despues: result.Refreshed,
+		},
+		"not_found": {
+			Antes:   nil,
+			Despues: result.NotFound,
+		},
+		"failed": {
+			Antes:   nil,
+			Despues: result.Failed,
+		},
+	}
+
+	emitAuditLog(
+		"MODIFICACION",
+		"ProjectPatchRefresh",
+		fmt.Sprint(projectID),
+		"RefreshProjectPatches",
+		fmt.Sprint(projectID),
+		"Refresh patches/fixed_versions para CVEs abiertos del proyecto",
+		cambios,
+		"SUCCESS",
+		"",
+	)
+
+	sendJSON(w, result, http.StatusOK)
 }

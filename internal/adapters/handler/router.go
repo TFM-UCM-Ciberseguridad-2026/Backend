@@ -69,7 +69,6 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* GET /api/infrastructure/exploitation-paths: Obtiene las rutas de explotación calculadas en la infraestructura. */
 	mux.HandleFunc("GET /api/infrastructure/exploitation-paths", h.GetExploitationPaths)
 
-
 	/* POST /api/installations/{id}/scan-vulns: Automatiza el escaneo y registro de vulnerabilidades por CPE/versión contra la API del NIST. */
 	mux.HandleFunc("POST /api/installations/{id}/scan-vulns", h.ScanSoftwareVulnerabilities)
 
@@ -116,15 +115,17 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	mux.HandleFunc("DELETE /api/software/{id}", h.DeleteSoftware)
 	mux.HandleFunc("PUT /api/installations/{id}", h.UpdateSoftwareInstallation)
 	mux.HandleFunc("DELETE /api/installations/{id}", h.DeleteSoftwareInstallation)
-	
+
 	// Contenedores CRUD
 	mux.HandleFunc("POST /api/endpoints/{id}/containers", h.AddContainerToEndpoint)
 	mux.HandleFunc("PUT /api/containers/{id}", h.UpdateContainer)
 	mux.HandleFunc("DELETE /api/containers/{id}", h.DeleteContainer)
 	mux.HandleFunc("POST /api/containers/{id}/installations", h.RegisterContainerSoftwareInstallation)
-	
+
 	mux.HandleFunc("DELETE /api/nodes/{id}", h.DeleteNode)
+
+	/* POST /api/projects/{id}/patches/refresh: Refresca patches y fixed_versions para todos los CVEs abiertos del proyecto. */
+	mux.HandleFunc("POST /api/projects/{id}/patches/refresh", h.RefreshProjectPatches)
 
 	return mux
 }
-

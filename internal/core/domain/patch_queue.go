@@ -12,10 +12,10 @@ type PatchQueueItem struct {
 	CVEID     string `json:"cve_id"`
 	Status    string `json:"status"`
 
-	InstallationID string `json:"installation_id"`
-	SoftwareName   string `json:"software_name"`
+	InstallationID  string `json:"installation_id"`
+	SoftwareName    string `json:"software_name"`
 	SoftwareVersion string `json:"software_version"`
-	FixedVersion   string `json:"fixed_version,omitempty"`
+	FixedVersion    string `json:"fixed_version,omitempty"`
 
 	EndpointID  int64  `json:"endpoint_id"`
 	Hostname    string `json:"hostname"`
@@ -34,4 +34,26 @@ type PatchQueueItem struct {
 	// PatchAvailable indica si hay un parche registrado para el CVE. Un finding muy
 	// prioritario sin parche disponible no es accionable todavía.
 	PatchAvailable bool `json:"patch_available"`
+}
+
+type ProjectPatchRefreshItem struct {
+	CVEID         string `json:"cve_id"`
+	Found         bool   `json:"found"`
+	PatchCount    int    `json:"patches"`
+	FixedVersions int    `json:"fixed_versions"`
+	Error         string `json:"error,omitempty"`
+}
+
+type ProjectPatchRefreshResult struct {
+	ProjectID  int64                     `json:"project_id"`
+	TotalCVEs  int                       `json:"total_cves"`
+	Offset     int                       `json:"offset"`
+	Limit      int                       `json:"limit"`
+	Processed  int                       `json:"processed"`
+	HasMore    bool                      `json:"has_more"`
+	NextOffset int                       `json:"next_offset"`
+	Refreshed  int                       `json:"refreshed"`
+	NotFound   int                       `json:"not_found"`
+	Failed     int                       `json:"failed"`
+	Results    []ProjectPatchRefreshItem `json:"results"`
 }
