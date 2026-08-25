@@ -429,8 +429,10 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, projectID *int64, page int
 	}
 
 	countQuery := `
-		MATCH (e:Endpoint)-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
-		      -[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		MATCH (e:Endpoint)
+		MATCH path = (e)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)
+		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset))
+		MATCH (asset)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
 		  AND ($project_id IS NULL OR EXISTS { (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e) })
 		RETURN count(DISTINCT f) AS total

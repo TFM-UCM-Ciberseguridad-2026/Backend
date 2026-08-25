@@ -2317,10 +2317,10 @@ func (o *Orchestrator) RefreshProjectPatches(ctx context.Context, projectID int6
 		return nil, fmt.Errorf("el motor de riesgo no está configurado")
 	}
 	if limit <= 0 {
-		limit = 5
+		limit = 20
 	}
-	if limit > 5 {
-		limit = 5
+	if limit > 50 {
+		limit = 50
 	}
 	if offset < 0 {
 		offset = 0
