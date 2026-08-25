@@ -470,7 +470,7 @@ func (r *networkRepo) LinkContainerToMatchingNetworks(ctx context.Context, conta
 				)
 			`, map[string]any{
 				"container_id": containerID,
-				"network_id":  netID,
+				"network_id":   netID,
 			}); err != nil {
 				return nil, err
 			}

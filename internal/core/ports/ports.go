@@ -31,8 +31,8 @@ type VulnerabilityPort interface {
 	GetByID(ctx context.Context, cveID string) (*domain.Vulnerability, error)
 	DeleteByID(ctx context.Context, cveID string) error
 	LinkVulnerabilityToCWEs(ctx context.Context, cveID string, cwes []string) error
-	GetInferredTTPsByCVE(ctx context.Context, cveID string) ([]domain.TTP, error)
-	LinkInferredTTPsToVulnerability(ctx context.Context, cveID string) (int, error)
+	LinkTTPsToVulnerability(ctx context.Context, cveID, cweID string, ttps []string, confidence, source string) error
+	GetUnmappedVulnerabilities(ctx context.Context, projectID int64) ([]domain.Vulnerability, error) // projectID=0 → sin filtro (sweep global)
 }
 
 type SoftwarePort interface {
@@ -42,6 +42,23 @@ type SoftwarePort interface {
 	DeleteByID(ctx context.Context, id int64) error
 }
 
+// CPEResolverPort define las operaciones de consulta y validación externa contra la API CPE de NIST NVD.
+type CPEResolverPort interface {
+	SearchCPECandidates(ctx context.Context, vendor, product, version string) ([]domain.CPESuggestion, error)
+	ValidateExactCPE(ctx context.Context, cpeString string) (bool, error)
+	FetchNVDProductsByCPEMatch(ctx context.Context, cpeBase string, limit int) ([]domain.NVDProductItem, error)
+}
+
+// CPEGuesserPort define la interfaz para realizar búsquedas difusas de prefijos base en CIRCL CPE Guesser.
+type CPEGuesserPort interface {
+	SearchBaseCPEs(ctx context.Context, tokens []string, topK int) ([]string, error)
+}
+
+
+
+
+
+
 type FindingPort interface {
 	Save(ctx context.Context, finding *domain.Finding) error
 	Update(ctx context.Context, finding *domain.Finding) error
@@ -49,13 +66,14 @@ type FindingPort interface {
 	DeleteByID(ctx context.Context, id int64) error
 
 	EnsureForInstallationAndCVE(ctx context.Context, installationID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
+	EnsureForContainerImageAndCVE(ctx context.Context, imageID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
 
 	// ApplyRemediationByInstallationAndCVE fija factor y estado en los findings del CVE
 	// en esa instalación, y devuelve sus IDs. Con factor 0 pone también risk_score y
 	// priority_score a cero: el finding sale de las agregaciones y conservaría si no la
 	// última puntuación calculada.
 	ApplyRemediationByInstallationAndCVE(ctx context.Context, installationID, cveID string, remediationFactor float64, status string) ([]int64, error)
-	GetVulnerabilitiesByFinding(ctx context.Context, findingID int64) ([]domain.Vulnerability, error)
+	GetVulnerabilitiesByFinding(ctx context.Context, findingID any) ([]domain.Vulnerability, error)
 }
 
 type RemediationPort interface {
@@ -173,6 +191,8 @@ type VulnerabilityAPIscanner interface {
 	FetchByCPE(ctx context.Context, cpe string) ([]domain.Vulnerability, error)
 	// FetchByDate obtiene las vulnerabilidades modificadas en un rango de fechas.
 	FetchByDate(ctx context.Context, startDate, endDate time.Time) ([]domain.Vulnerability, error)
+	// FetchByCVE obtiene el detalle completo de una vulnerabilidad específica.
+	FetchByCVE(ctx context.Context, cve string) (*domain.Vulnerability, error)
 }
 
 //Los CRUDS para el mitre... consutarlo con Julve
@@ -188,7 +208,12 @@ type TTPPort interface {
 
 // MitreATTACKProvider obtiene el catálogo MITRE ATT&CK Enterprise desde el feed STIX 2.1.
 type MitreATTACKProvider interface {
-	FetchATTACKBundle(ctx context.Context) ([]domain.TTP, error)
+	FetchATTACKBundle(ctx context.Context) ([]domain.TTP, []domain.ThreatActor, []domain.ThreatActorTTPRelation, error)
+}
+
+type TTPMapper interface {
+	MapCWEToTTP(ctx context.Context, cwe string) ([]string, error)
+	MapEnrichedToTTPRaw(ctx context.Context, cwe, description, cvssVector string) ([]string, string, error)
 }
 
 type ThreatActorPort interface {
@@ -198,13 +223,18 @@ type ThreatActorPort interface {
 	DeleteByID(ctx context.Context, id string) error
 	RelateToTTP(ctx context.Context, actorID string, ttpID string) error
 	GetTopThreatActors(ctx context.Context, limit int) ([]domain.ThreatActorThreat, error)
+	SaveBatch(ctx context.Context, actors []domain.ThreatActor) error
+	SaveRelationshipsBatch(ctx context.Context, relations []domain.ThreatActorTTPRelation) error
 }
 
 type InfrastructurePort interface {
 	GetGraphData(ctx context.Context) (*domain.GraphData, error)
 	GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int, projectID int64) ([]domain.APTThreatResult, error)
+	GetTTPMatrix(ctx context.Context, projectID *int64) ([]domain.TTPMatrixItem, error)
 	GetTotalMitreTTPs(ctx context.Context) (int, error)
 	GetExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error)
+	// IsAnalysisPending comprueba si hay vulnerabilidades de red pendientes de enriquecimiento en background.
+	IsAnalysisPending(ctx context.Context, projectID int64) (bool, error)
 	ImportGraphData(ctx context.Context, data *domain.GraphData) error
 }
 
@@ -246,6 +276,7 @@ type CAPECPort interface {
 	LinkCAPECToCWE(ctx context.Context, capecID string, cweID string) error
 	LinkCAPECToTTP(ctx context.Context, capecID string, ttpID string) error
 	SaveBatch(ctx context.Context, capecs []domain.CAPEC) error
+	GetTTPsByCWE(ctx context.Context, cweID string) ([]string, error)
 }
 
 // PatchProvider obtiene información de remediación (parches publicados y versiones
@@ -319,4 +350,21 @@ type RiskPort interface {
 
 	// GetAllProjectIDs devuelve los IDs de todos los proyectos para el recálculo diario.
 	GetAllProjectIDs(ctx context.Context) ([]int64, error)
+}
+
+// TTPMappedEvent se emite por el worker de TTPs cada vez que una CVE queda mapeada.
+// ProjectID = 0 indica origen global (sweep automático, cron, o escaneo sin contexto de proyecto).
+type TTPMappedEvent struct {
+	CVEID      string  `json:"cve_id"`
+	TTPs       []string `json:"ttps"`
+	Confidence string  `json:"confidence"`
+	Source     string  `json:"source"`
+	ProjectID  int64   `json:"project_id"` // 0 = global
+	Log        string  `json:"log"`
+}
+
+// NotificationPort desacopla el worker de TTPs de cualquier detalle de transporte (WebSocket, SSE, etc.).
+// La implementación concreta (WSHub) vive en la capa de adapters/handler.
+type NotificationPort interface {
+	NotifyTTPMapped(ctx context.Context, event TTPMappedEvent) error
 }

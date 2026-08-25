@@ -84,3 +84,38 @@ backend/
 4. El **Servicio** también le pide al **Provider de Exploit-DB (adapters/provider/exploitdb)** (que implementa el puerto `ExploitProvider`) que busque si hay código de explotación pública asociado.
 5. El **Servicio** procesa esta información, la guarda en la **Base de datos (adapters/repository/postgres)** (que implementa el puerto de persistencia) y devuelve el informe consolidado a los **handlers**.
 6. Los **handlers** formatean la información en un JSON limpio y se la devuelven al **Frontend** para que la renderice de forma visual e intuitiva para el usuario.
+
+---
+
+## 🤖 Mapeo de TTPs usando Ollama (LLM Local)
+
+El sistema integra un modelo de lenguaje local (LLM) a través de **Ollama** para inferir Técnicas, Tácticas y Procedimientos (TTPs) de MITRE ATT&CK a partir de vulnerabilidades ingeridas.
+
+### Cómo levantar Ollama
+
+Ollama está configurado como un servicio dentro de `docker-compose.yml` con descarga automática del modelo. Al ejecutar `docker compose up -d`, el sistema:
+
+1. Levanta el contenedor de Ollama en el puerto `11434`.
+2. Un servicio auxiliar (`ollama-init`) descarga automáticamente el modelo `gemma4:e4b`.
+3. El backend espera a que ambos estén listos antes de arrancar.
+
+**No es necesario ejecutar ningún comando manual.** Un solo `docker compose up -d` lo hace todo.
+
+### Variables de entorno
+
+El backend necesita saber dónde se encuentra Ollama y qué modelo utilizar. Estas son las variables que se pueden configurar en `.env`:
+* `OLLAMA_HOST`: URL del servicio Ollama (por defecto `http://localhost:11434` o `http://ollama:11434` dentro de Docker).
+* `OLLAMA_MODEL`: Modelo a utilizar (por defecto `gemma4:e4b`).
+
+### Pipeline con dos niveles de confianza
+
+El proceso de inferencia de TTPs cuenta con dos rutas dependiendo de la calidad de la información obtenida desde la vulnerabilidad (CVE):
+
+1. **Ruta 1 (Alta Confianza - `cwe_mapping`)**: Si el CVE tiene un CWE válido (se descartan `"NVD-CWE-Other"` y `"NVD-CWE-noinfo"`), se realiza una consulta al LLM pidiéndole que asocie el CWE en cuestión a un conjunto de TTPs. En Neo4j, esto persiste como:
+   `(CVE)-[:HAS_WEAKNESS]->(CWE)-[:MAPS_TO {confidence: "high", source: "cwe_mapping"}]->(TTP)`
+   *(Nota: Se emplea una caché en memoria para no re-evaluar CWEs idénticos)*
+
+2. **Ruta 2 (Baja Confianza - `cve_description_fallback`)**: Si el CVE carece de CWE útil, el sistema recurre como *fallback* a enviar la descripción del CVE al LLM para que infiera directamente el TTP. Esto se persiste como:
+   `(CVE)-[:MAPS_TO {confidence: "low", source: "cve_description_fallback"}]->(TTP)`
+
+> **Nota Técnica:** Se ha **eliminado por completo** el mecanismo antiguo de mapeo que empleaba una inferencia transversal de base de datos a través del catálogo MITRE CAPEC (`(CVE)-[:HAS_CWE]->(CWE)<-[:MAPS_TO_CWE]-(CAPEC)-[:MAPS_TO_TTP]->(TTP)`). El uso del LLM local consolida un único pipeline dinámico y más preciso, evitando mantener caminos duplicados o grafos pesados obsoletos para este propósito.

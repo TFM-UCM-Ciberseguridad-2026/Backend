@@ -34,6 +34,12 @@ type NVDConfig struct {
 	TimeoutSeconds int
 }
 
+// OllamaConfig contiene los ajustes para conectarse al LLM local.
+type OllamaConfig struct {
+	Host  string
+	Model string
+}
+
 // Config centraliza todas las variables de configuración cargadas del entorno.
 type Config struct {
 	Port          string
@@ -43,6 +49,7 @@ type Config struct {
 	Neo4jPassword string
 	Database      DatabaseConfig
 	NVD           NVDConfig
+	Ollama        OllamaConfig
 }
 
 // ParseEnvFile lee un archivo .env y extrae sus pares clave-valor a un mapa.
@@ -141,6 +148,10 @@ func LoadConfig() (*Config, error) {
 			APIKey:         getEnv("NVD_API_KEY", ""),
 			BaseURL:        getEnv("NVD_BASE_URL", "https://services.nvd.nist.gov/rest/json/cves/2.0"),
 			TimeoutSeconds: getEnvAsInt("NVD_API_TIMEOUT", 90),
+		},
+		Ollama: OllamaConfig{
+			Host:  getEnv("OLLAMA_HOST", "http://localhost:11434"),
+			Model: getEnv("OLLAMA_MODEL", "gemma3:4b"),
 		},
 	}
 

@@ -18,7 +18,7 @@ type softwareRepo struct {
 func (r *softwareRepo) Save(ctx context.Context, s *domain.Software) error {
 	query := `
 		MERGE (n:Software {id: $id})
-		ON CREATE SET n.name = $name, n.version = $version, n.type = $type, n.cpe = $cpe, n.purl = $purl, n.vendor = $vendor
+		ON CREATE SET n.name = $name, n.version = $version, n.type = $type, n.cpe = $cpe, n.purl = $purl, n.vendor = $vendor, n.url = $url
 	`
 	params := map[string]any{
 		"id":      s.SoftwareID,
@@ -28,6 +28,7 @@ func (r *softwareRepo) Save(ctx context.Context, s *domain.Software) error {
 		"cpe":     s.CPE,
 		"purl":    s.PURL,
 		"vendor":  s.Vendor,
+		"url":     s.URL,
 	}
 	return executeWriteSaveHelper(ctx, r.driver, query, params)
 }
@@ -35,7 +36,7 @@ func (r *softwareRepo) Save(ctx context.Context, s *domain.Software) error {
 func (r *softwareRepo) Update(ctx context.Context, s *domain.Software) error {
 	query := `
 		MATCH (n:Software {id: $id})
-		SET n.name = $name, n.version = $version, n.type = $type, n.cpe = $cpe, n.purl = $purl, n.vendor = $vendor
+		SET n.name = $name, n.version = $version, n.type = $type, n.cpe = $cpe, n.purl = $purl, n.vendor = $vendor, n.url = $url
 	`
 	params := map[string]any{
 		"id":      s.SoftwareID,
@@ -45,6 +46,7 @@ func (r *softwareRepo) Update(ctx context.Context, s *domain.Software) error {
 		"cpe":     s.CPE,
 		"purl":    s.PURL,
 		"vendor":  s.Vendor,
+		"url":     s.URL,
 	}
 	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
@@ -63,8 +65,10 @@ func (r *softwareRepo) GetByID(ctx context.Context, id int64) (*domain.Software,
 		CPE:        getString(props, "cpe"),
 		PURL:       getString(props, "purl"),
 		Vendor:     getString(props, "vendor"),
+		URL:        getString(props, "url"),
 	}, nil
 }
+
 
 func (r *softwareRepo) DeleteByID(ctx context.Context, id int64) error {
 	query := `

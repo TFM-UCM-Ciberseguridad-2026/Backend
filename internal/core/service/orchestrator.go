@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
+	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -23,6 +27,32 @@ Propósito arquitectónico y teórico:
 3. Coordinación de Dependencias: Recibe los puertos (CVEProvider, ExploitProvider, Database) a través del constructor (Inyección de Dependencias) y orquesta las llamadas necesarias en orden lógico para cumplir con el proceso de negocio.
 4. Neutralidad Tecnológica: No expone tipos HTTP ni dependencias de frameworks web, garantizando que las reglas de negocio puedan ser llamadas por un servidor HTTP, un CLI de consola o un proceso de ejecución programada (cron).
 */
+
+type ProjectTTPSyncState struct {
+	Processing bool
+	CurrentCVE string
+	Logs       []string
+	QueuedCVEs map[string]bool
+}
+
+type TTPBackgroundSyncManager struct {
+	mu            sync.RWMutex
+	projectStates map[int64]*ProjectTTPSyncState
+}
+
+type TTPBackgroundSyncResponse struct {
+	Processing  bool     `json:"processing"`
+	CurrentCVE  string   `json:"current_cve"`
+	QueueLength int      `json:"queue_length"`
+	Logs        []string `json:"logs"`
+}
+
+// ttpTask agrupa el CVE ID y el project_id del contexto que originó el encolado.
+// ProjectID = 0 significa origen global (sweep automático, cron, escaneo sin contexto de proyecto).
+type ttpTask struct {
+	cveID     string
+	projectID int64
+}
 
 type Orchestrator struct {
 	projectPort         ports.ProjectPort
@@ -49,7 +79,18 @@ type Orchestrator struct {
 	capecProvider       ports.CAPECProvider
 	ttpPort             ports.TTPPort
 	mitreAttackProvider ports.MitreATTACKProvider
+	activeBgEnrichments int64         // contador atómico de goroutines de enriquecimiento activas
+	nvdSyncSem          chan struct{} // semáforo global: limita a 2 llamadas NVD síncronas simultáneas en total
+	ttpMapper           ports.TTPMapper
+	threatActorPort     ports.ThreatActorPort
+	notifier            ports.NotificationPort // nil si no se inyecta
+	cpeService          *CPEService
+	ttpSync             TTPBackgroundSyncManager
+	ttpQueueHigh        chan ttpTask
+	ttpQueueLow         chan ttpTask
+	CapecReady          chan struct{}
 }
+
 
 func NewOrchestrator(
 	projectPort ports.ProjectPort,
@@ -84,8 +125,38 @@ func NewOrchestrator(
 		patchPort:        patchPort,
 		dbHelper:         dbHelper,
 		vulnScannerPort:  vulnScannerPort,
+		nvdSyncSem:       make(chan struct{}, 2), // máximo 2 llamadas NVD síncronas en total a la vez
+		ttpQueueHigh:     make(chan ttpTask, 1000),
+		ttpQueueLow:      make(chan ttpTask, 10000),
+		CapecReady:       make(chan struct{}),
+		ttpSync: TTPBackgroundSyncManager{
+			projectStates: make(map[int64]*ProjectTTPSyncState),
+		},
 	}
 }
+
+// WithCPEResolution inyecta los componentes de resolución CPE e inicializa el CPEService
+func (o *Orchestrator) WithCPEResolution(resolver ports.CPEResolverPort) *Orchestrator {
+	o.cpeService = NewCPEService(resolver)
+	return o
+}
+
+
+// WithCPEService inyecta directamente un CPEService previamente instanciado
+func (o *Orchestrator) WithCPEService(cpeService *CPEService) *Orchestrator {
+	o.cpeService = cpeService
+	return o
+}
+
+// WithCPEGuesser inyecta el proveedor de búsqueda difusa cpe-guesser en el CPEService
+func (o *Orchestrator) WithCPEGuesser(guesser ports.CPEGuesserPort) *Orchestrator {
+	if o.cpeService != nil {
+		o.cpeService.WithCPEGuesser(guesser)
+	}
+	return o
+}
+
+
 
 // WithRisk inyecta los componentes del motor de riesgo y devuelve el mismo orquestador.
 // Permite que el código existente siga usando NewOrchestrator sin cambios.
@@ -114,6 +185,19 @@ func (o *Orchestrator) WithPatchProvider(patchProvider ports.PatchProvider) *Orc
 func (o *Orchestrator) WithCAPEC(capecPort ports.CAPECPort, capecProvider ports.CAPECProvider) *Orchestrator {
 	o.capecPort = capecPort
 	o.capecProvider = capecProvider
+	return o
+}
+
+// WithTTPMapper inyecta el proveedor de mapeo de TTPs vía LLM.
+func (o *Orchestrator) WithTTPMapper(ttpMapper ports.TTPMapper) *Orchestrator {
+	o.ttpMapper = ttpMapper
+	return o
+}
+
+// WithNotifier inyecta el puerto de notificación en tiempo real (ej. WSHub).
+// Si no se inyecta, el worker funciona igual pero sin emitir eventos WebSocket.
+func (o *Orchestrator) WithNotifier(n ports.NotificationPort) *Orchestrator {
+	o.notifier = n
 	return o
 }
 
@@ -262,12 +346,49 @@ func (o *Orchestrator) CreateNetwork(ctx context.Context, network *domain.Networ
 	return network.NetworkID, linked, nil
 }
 
+// ExecuteCPEPipeline ejecuta el pipeline completo de 5 fases para la sugerencia de CPEs
+func (o *Orchestrator) ExecuteCPEPipeline(ctx context.Context, rawInput string) ([]domain.CPEFinalItem, error) {
+	if o.cpeService != nil {
+		return o.cpeService.ExecuteCPEPipeline(ctx, rawInput)
+	}
+	return []domain.CPEFinalItem{}, nil
+}
+
+// SearchCPE busca candidatos a CPE combinando el diccionario de alias en Neo4j y la API NVD
+func (o *Orchestrator) SearchCPE(ctx context.Context, vendor, product, version string) ([]domain.CPESuggestion, error) {
+
+	if o.cpeService != nil {
+		return o.cpeService.SearchCPE(ctx, vendor, product, version)
+	}
+	return []domain.CPESuggestion{}, nil
+}
+
+// ResolveSoftwareCPE resuelve el CPE adecuado para un software siguiendo la estrategia multinivel
+func (o *Orchestrator) ResolveSoftwareCPE(ctx context.Context, software *domain.Software, saveAlias bool) (*domain.CPEMatchResult, error) {
+	if o.cpeService != nil {
+		return o.cpeService.ResolveSoftwareCPE(ctx, software, saveAlias)
+	}
+	return &domain.CPEMatchResult{
+		CPE:       software.CPE,
+		CPEStatus: software.CPEStatus,
+	}, nil
+}
+
 // RegisterSoftwareInstallation guarda la definición del software, la instancia instalada,
 // asocia la instancia al endpoint y el software genérico a la instancia instalada.
 func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpointID int64, software *domain.Software, installation *domain.SoftwareInstallation) error {
-	if strings.TrimSpace(software.Vendor) == "" {
-		return fmt.Errorf("el fabricante (vendor) es obligatorio para registrar el software y consultar vulnerabilidades en NIST")
+	if strings.TrimSpace(software.Vendor) == "" && strings.TrimSpace(software.CPE) != "" {
+		parts := strings.Split(software.CPE, ":")
+		if len(parts) >= 4 && parts[3] != "" && parts[3] != "*" {
+			software.Vendor = parts[3]
+		}
 	}
+	if strings.TrimSpace(software.Vendor) == "" {
+		software.Vendor = "custom"
+	}
+
+	// 1. Resolver CPE multinivel y aplicar alias guardados
+	_, _ = o.ResolveSoftwareCPE(ctx, software, true)
 
 	if software.SoftwareID == 0 {
 		swID, err := o.nextNodeID(ctx, "Software")
@@ -277,6 +398,12 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 		software.SoftwareID = swID
 	}
 
+	// 2. Guardar nodo :Software genérico en Neo4j
+	if err := o.softwarePort.Save(ctx, software); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+		return err
+	}
+
+
 	if installation.InstallationID == "" {
 		installation.InstallationID = o.nextInstallationID()
 	}
@@ -284,13 +411,6 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 	installation.CriticalityLevel = NormalizeSoftwareCriticalityLevel(installation.CriticalityLevel)
 	installation.CriticalityMultiplier = CalculateSoftwareCriticalityMultiplier(installation.CriticalityLevel)
 
-	if strings.TrimSpace(software.CPE) == "" || software.CPE == "N/A" {
-		software.CPE = domain.GenerateCPE23(software.Type, software.Vendor, software.Name, software.Version)
-	}
-
-	if err := o.softwarePort.Save(ctx, software); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
-		return err
-	}
 	if err := o.softwareInstPort.Save(ctx, installation); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
@@ -303,9 +423,19 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 // RegisterContainerSoftwareInstallation guarda la definición del software, la instancia instalada,
 // asocia la instancia al contenedor y el software genérico a la instancia instalada.
 func (o *Orchestrator) RegisterContainerSoftwareInstallation(ctx context.Context, containerID string, software *domain.Software, installation *domain.SoftwareInstallation) error {
-	if strings.TrimSpace(software.Vendor) == "" {
-		return fmt.Errorf("el fabricante (vendor) es obligatorio para registrar el software y consultar vulnerabilidades en NIST")
+	if strings.TrimSpace(software.Vendor) == "" && strings.TrimSpace(software.CPE) != "" {
+		parts := strings.Split(software.CPE, ":")
+		if len(parts) >= 4 && parts[3] != "" && parts[3] != "*" {
+			software.Vendor = parts[3]
+		}
 	}
+	if strings.TrimSpace(software.Vendor) == "" {
+		software.Vendor = "custom"
+	}
+
+	// 1. Resolver CPE multinivel y aplicar alias guardados
+	_, _ = o.ResolveSoftwareCPE(ctx, software, true)
+
 
 	if software.SoftwareID == 0 {
 		swID, err := o.nextNodeID(ctx, "Software")
@@ -315,20 +445,20 @@ func (o *Orchestrator) RegisterContainerSoftwareInstallation(ctx context.Context
 		software.SoftwareID = swID
 	}
 
+	// 2. Guardar nodo :Software genérico en Neo4j
+	if err := o.softwarePort.Save(ctx, software); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+		return err
+	}
+
+
 	if installation.InstallationID == "" {
+
 		installation.InstallationID = o.nextInstallationID()
 	}
 
 	installation.CriticalityLevel = NormalizeSoftwareCriticalityLevel(installation.CriticalityLevel)
 	installation.CriticalityMultiplier = CalculateSoftwareCriticalityMultiplier(installation.CriticalityLevel)
 
-	if strings.TrimSpace(software.CPE) == "" || software.CPE == "N/A" {
-		software.CPE = domain.GenerateCPE23(software.Type, software.Vendor, software.Name, software.Version)
-	}
-
-	if err := o.softwarePort.Save(ctx, software); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
-		return err
-	}
 	if err := o.softwareInstPort.Save(ctx, installation); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
@@ -337,6 +467,7 @@ func (o *Orchestrator) RegisterContainerSoftwareInstallation(ctx context.Context
 	}
 	return o.relationshipPort.LinkInstallationToSoftware(ctx, installation.InstallationID, software.SoftwareID)
 }
+
 
 // GenerateFinding registra un hallazgo de vulnerabilidad (Finding) a una instalación específica.
 func (o *Orchestrator) GenerateFinding(ctx context.Context, installationID string, finding *domain.Finding) error {
@@ -361,7 +492,7 @@ func (o *Orchestrator) AssociateVulnerabilitiesAndRemediations(ctx context.Conte
 			rem.RemediationID = id
 		}
 	}
-	if err := o.vulnPort.Save(ctx, vuln); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+	if err := o.saveVulnerabilityWithTTPs(ctx, vuln); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
 	if err := o.remediationPort.Save(ctx, rem); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
@@ -370,6 +501,7 @@ func (o *Orchestrator) AssociateVulnerabilitiesAndRemediations(ctx context.Conte
 	if err := o.relationshipPort.LinkFindingToVulnerability(ctx, findingID, vuln.CVEID); err != nil {
 		return err
 	}
+	go o.StartBackgroundTTPMapping(0) // 0 = sin contexto de proyecto (barrido de novedades tras alta manual)
 	return o.relationshipPort.LinkFindingToRemediation(ctx, findingID, rem.RemediationID)
 }
 
@@ -406,8 +538,15 @@ func (o *Orchestrator) GetTotalMitreTTPs(ctx context.Context) (int, error) {
 // GetVulnerabilitiesForFinding devuelve los CVEs asociados a un finding concreto. Se usa
 // desde el botón "Ver CVEs" del inspector de nodos, ya que los nodos Vulnerability no
 // viajan en el grafo general.
-func (o *Orchestrator) GetVulnerabilitiesForFinding(ctx context.Context, findingID int64) ([]domain.Vulnerability, error) {
+func (o *Orchestrator) GetVulnerabilitiesForFinding(ctx context.Context, findingID any) ([]domain.Vulnerability, error) {
 	return o.findingPort.GetVulnerabilitiesByFinding(ctx, findingID)
+}
+
+func (o *Orchestrator) saveVulnerabilityWithTTPs(ctx context.Context, vuln *domain.Vulnerability) error {
+	if err := o.vulnPort.Save(ctx, vuln); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+		return err
+	}
+	return nil
 }
 
 /*
@@ -430,18 +569,29 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		return nil, fmt.Errorf("no se pudo recuperar el software: %w", err)
 	}
 
-	// 2. Resolver o generar CPE
+	// 2. Si es software interno o no verificado en NVD, omitir consulta a la API de vulnerabilidades
+	if sw.CPEStatus == domain.CPEStatusNotInNVD || sw.CPEStatus == domain.CPEStatusPendingConfirmation {
+
+		return &domain.VulnerabilityScanResult{
+			InstallationID:       installationID,
+			SoftwareID:           softwareID,
+			CPE:                  sw.CPE,
+			LimitApplied:         0,
+			VulnerabilitiesFound: 0,
+		}, nil
+	}
+
+	// 3. Resolver o generar CPE
 	cpe := sw.CPE
 	if cpe == "" || cpe == "N/A" {
-		// Generar automáticamente el CPE a partir del tipo (part), vendor, nombre del software y su versión
 		cpe = domain.GenerateCPE23(sw.Type, sw.Vendor, sw.Name, sw.Version)
 		sw.CPE = cpe
 
-		// Actualizar el software con el nuevo CPE generado
 		if err := o.softwarePort.Save(ctx, sw); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 			return nil, fmt.Errorf("error guardando software con CPE generado: %w", err)
 		}
 	}
+
 
 	// 3. Determinar el límite de vulnerabilidades a procesar
 	limit := autoScanVulnerabilityLimit
@@ -473,7 +623,6 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 	// 5. Registrar vulnerabilidades y enlazarlas como hallazgos (Findings)
 	for _, v := range vulns {
 		vCopy := v
-
 		// Guardar o reutilizar la vulnerabilidad global
 		if err := o.vulnPort.Save(ctx, &vCopy); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 			return nil, fmt.Errorf("error al guardar la vulnerabilidad %s: %w", vCopy.CVEID, err)
@@ -512,6 +661,9 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 			result.FindingsExisting++
 		}
 	}
+	
+	// Lanzar barrido inteligente para mapear solo las vulnerabilidades nuevas de este escaneo
+	go o.StartBackgroundTTPMapping(0)
 
 	return result, nil
 }
@@ -761,12 +913,14 @@ func (o *Orchestrator) SyncNistDaily(ctx context.Context) error {
 
 	for _, v := range vulns {
 		vCopy := v
-		if err := o.vulnPort.Save(ctx, &vCopy); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+		if err := o.saveVulnerabilityWithTTPs(ctx, &vCopy); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 			continue // Loguear o continuar si una falla
 		}
 
 		_ = o.RegisterPatchesForVulnerability(ctx, vCopy.CVEID, vCopy.Patches)
+		o.EnqueueCVE(vCopy.CVEID, 0) // 0 = sin contexto de proyecto (cron diario NIST)
 	}
+
 	return nil
 }
 
@@ -1312,6 +1466,11 @@ func (o *Orchestrator) GenerateExploitationPaths(ctx context.Context, projectID 
 	return o.infraPort.GetExploitationPaths(ctx, projectID)
 }
 
+// IsAnalysisPending comprueba si hay enriquecimiento NVD activo en background.
+func (o *Orchestrator) IsAnalysisPending(ctx context.Context, projectID int64) (bool, error) {
+	return atomic.LoadInt64(&o.activeBgEnrichments) > 0, nil
+}
+
 // SaveContainerImage registra una imagen de contenedor en Neo4j.
 func (o *Orchestrator) SaveContainerImage(ctx context.Context, image *domain.ContainerImage) error {
 	return o.containerPort.SaveContainerImage(ctx, image)
@@ -1336,20 +1495,166 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		return fmt.Errorf("error escaneando imagen %s: %w", imageName, err)
 	}
 
-	// 2. Guardar las vulnerabilidades y enlazarlas a la imagen
+	// 2. Guardar las vulnerabilidades y enlazarlas a la imagen de forma síncrona
+	var vulnsToEnrich []domain.Vulnerability
 	for _, v := range vulns {
-		// Guardar Vulnerabilidad
-		err = o.vulnPort.Save(ctx, &v)
-		if err != nil {
-			// Podría fallar si ya existe, idealmente debería haber un Update o ignorar error de duplicado.
-			// Para esta PoC ignoramos si ya existe.
+		// Obtener vulnerabilidad existente para no perder enriquecimiento previo (ej. NVD)
+		if existingVuln, err := o.vulnPort.GetByID(ctx, v.CVEID); err == nil && existingVuln != nil {
+			v.NVDEnriched = existingVuln.NVDEnriched
+			if len(v.CWE) == 0 {
+				v.CWE = existingVuln.CWE
+			}
+			if !v.Exploit {
+				v.Exploit = existingVuln.Exploit
+			}
+			if !v.KEV {
+				v.KEV = existingVuln.KEV
+			}
+			if v.CVSSVector == "" {
+				v.CVSSVector = existingVuln.CVSSVector
+			}
+			if v.NVDVector == "" {
+				v.NVDVector = existingVuln.NVDVector
+			}
 		}
 
-		// Enlazar a la imagen
-		err = o.containerPort.LinkVulnerabilityToImage(ctx, imageID, v.CVEID)
+		// Guardar Vulnerabilidad
+		err = o.saveVulnerabilityWithTTPs(ctx, &v)
 		if err != nil {
-			return fmt.Errorf("error enlazando CVE %s a imagen %s: %w", v.CVEID, imageID, err)
+			// Ignoramos error de duplicado
 		}
+		// Crear un Finding (Hallazgo) para esta imagen y vulnerabilidad
+		now := time.Now().UTC()
+		findingID, err := o.nextNodeID(ctx, "Finding")
+		if err != nil {
+			findingID = int64(rand.Int31n(1000000) + 1)
+		}
+		finding := &domain.Finding{
+			FindingID:         findingID,
+			Status:            "OPEN",
+			FirstSeen:         now,
+			LastSeen:          &now,
+			ImpactScore:       v.BaseScore,
+			Likelihood:        0.5,
+			RemediationFactor: 1.0,
+			RiskScore:         v.BaseScore * 0.5,
+		}
+
+		_, _, err = o.findingPort.EnsureForContainerImageAndCVE(ctx, imageID, v.CVEID, finding)
+		if err != nil {
+			return fmt.Errorf("error creando finding para imagen %s y CVE %s: %w", imageID, v.CVEID, err)
+		}
+
+		// Filtrar para enriquecimiento asíncrono: toda vulnerabilidad no enriquecida
+		if !v.NVDEnriched {
+			vulnsToEnrich = append(vulnsToEnrich, v)
+		}
+		// Filtrar para enriquecimiento asíncrono: toda vulnerabilidad no enriquecida
+		if !v.NVDEnriched {
+			vulnsToEnrich = append(vulnsToEnrich, v)
+		}
+		o.EnqueueCVE(v.CVEID, 0) // 0 = sin contexto de proyecto (cron Docker Scout)
+	}
+
+	// Ordenar por BaseScore descendente (CRITICAL -> HIGH -> MEDIUM -> LOW) para enriquecer primero las más severas
+	sort.Slice(vulnsToEnrich, func(i, j int) bool {
+		return vulnsToEnrich[i].BaseScore > vulnsToEnrich[j].BaseScore
+	})
+
+	// 3. Enriquecer síncronamente hasta 2 CVEs más críticos, limitado globalmente con semáforo
+	// para que múltiples escaneos simultáneos no saturen NVD (límite global: 2 slots en total).
+	if o.vulnScannerPort != nil && len(vulnsToEnrich) > 0 {
+		topSyncCount := 2
+		if len(vulnsToEnrich) < topSyncCount {
+			topSyncCount = len(vulnsToEnrich)
+		}
+
+		enriched := 0
+		fmt.Printf("[Scout Sync] Intentando enriquecer TOP %d CVEs síncronamente (sem global)...\n", topSyncCount)
+		for i := 0; i < len(vulnsToEnrich) && enriched < topSyncCount; i++ {
+			// Intentar adquirir slot del semáforo sin bloquear (non-blocking)
+			select {
+			case o.nvdSyncSem <- struct{}{}:
+				// Slot adquirido: ejecutar enriquecimiento y liberar
+				v := vulnsToEnrich[i]
+				enrichedData, err := o.vulnScannerPort.FetchByCVE(ctx, v.CVEID)
+				<-o.nvdSyncSem // liberar slot inmediatamente tras la llamada
+				if err == nil && enrichedData != nil {
+					v.CWE = enrichedData.CWE
+					v.Exploit = enrichedData.Exploit
+					v.KEV = enrichedData.KEV
+					if v.CVSSVector == "" {
+						v.CVSSVector = enrichedData.CVSSVector
+					}
+					if v.NVDVector == "" {
+						v.NVDVector = enrichedData.NVDVector
+					}
+					if v.BaseScore == 0 {
+						v.BaseScore = enrichedData.BaseScore
+					}
+					if enrichedData.Description != "" {
+						v.Description = enrichedData.Description
+					}
+					v.NVDEnriched = true
+					_ = o.vulnPort.Save(ctx, &v)
+					descSnippet := v.Description
+					if len(descSnippet) > 40 {
+						descSnippet = descSnippet[:40]
+					}
+					fmt.Printf("[Scout Sync] CVE %s enriquecido: %s...\n", v.CVEID, descSnippet)
+				}
+				vulnsToEnrich[i] = v
+				enriched++
+				if enriched < topSyncCount {
+					time.Sleep(1 * time.Second)
+				}
+			default:
+				// Semáforo lleno: otro escaneo ya tiene 2 slots. Mover este CVE a background.
+				fmt.Printf("[Scout Sync] Semáforo NVD lleno, CVE %s irá a background\n", vulnsToEnrich[i].CVEID)
+			}
+		}
+
+		vulnsToEnrich = vulnsToEnrich[topSyncCount:]
+	}
+
+	// 4. Procesamiento en Background (Goroutine) para el resto de vulnerabilidades
+	if o.vulnScannerPort != nil && len(vulnsToEnrich) > 0 {
+		atomic.AddInt64(&o.activeBgEnrichments, 1)
+		go func(vulns []domain.Vulnerability, port ports.VulnerabilityAPIscanner, repo ports.VulnerabilityPort) {
+			defer atomic.AddInt64(&o.activeBgEnrichments, -1)
+			bgCtx := context.Background() // Contexto separado porque el de la request puede expirar
+			fmt.Printf("[Scout Sync Async] Iniciando enriquecimiento NVD de %d CVEs restantes en background...\n", len(vulns))
+			for _, v := range vulns {
+				enriched, err := port.FetchByCVE(bgCtx, v.CVEID)
+				if err == nil {
+					if enriched != nil {
+						v.CWE = enriched.CWE
+						v.Exploit = enriched.Exploit
+						v.KEV = enriched.KEV
+						if v.CVSSVector == "" {
+							v.CVSSVector = enriched.CVSSVector
+						}
+						if v.NVDVector == "" {
+							v.NVDVector = enriched.NVDVector
+						}
+						if v.BaseScore == 0 {
+							v.BaseScore = enriched.BaseScore
+						}
+						if enriched.Description != "" {
+							v.Description = enriched.Description
+						}
+					}
+					v.NVDEnriched = true
+					// Actualizar la vulnerabilidad en la base de datos
+					_ = repo.Save(bgCtx, &v)
+				} else {
+					fmt.Printf("[Scout Sync Async] Error enriqueciendo %s: %v\n", v.CVEID, err)
+				}
+				// Evitar saturar el NVD (Límite sin API Key es 5 peticiones cada 30s -> ~1 cada 6s)
+				time.Sleep(7 * time.Second)
+			}
+			fmt.Println("[Scout Sync Async] Enriquecimiento NVD finalizado.")
+		}(vulnsToEnrich, o.vulnScannerPort, o.vulnPort)
 	}
 
 	return nil
@@ -1369,14 +1674,15 @@ func (o *Orchestrator) SyncScoutDaily(ctx context.Context) error {
 
 	var errs []error
 	for _, img := range images {
-		// Para Scout el nombre es el Tag si es que está disponible, o simplemente name
-		// Por ejemplo: nginx:latest
-		imageName := img.Name
-		if img.Tag != "" && img.Tag != "latest" {
-			imageName = fmt.Sprintf("%s:%s", img.Name, img.Tag)
+		// Usar el ImageID directamente como nombre canónico de la imagen.
+		// El ImageID ya contiene el nombre completo (ej: "nginx:1.19", "httpd:2.4.49").
+		// No recomponemos Name+Tag para evitar duplicados como "httpd:2.4.49:latest".
+		imageName := img.ImageID
+		if imageName == "" {
+			imageName = img.Name
 		}
 
-		fmt.Printf("[Scout Sync] Escaneando imagen: %s (ID: %s)\n", imageName, img.ImageID)
+		fmt.Printf("[Scout Sync] Escaneando imagen: %s\n", imageName)
 		err := o.ScanAndSaveContainerImage(ctx, imageName, img.ImageID)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("fallo al escanear %s: %v", imageName, err))
@@ -1582,7 +1888,11 @@ func (o *Orchestrator) DeleteNodeByID(ctx context.Context, id string) error {
 	query := `
 		MATCH (n)
 		WHERE toString(n.id) = toString($id) OR toString(n.cve_id) = toString($id) OR toString(n.ttp_id) = toString($id) OR toString(n.installation_id) = toString($id) OR elementId(n) = $id
+		OPTIONAL MATCH (n)-[:USES_IMAGE]->(old_i:ContainerImage)
 		DETACH DELETE n
+		WITH old_i
+		WHERE old_i IS NOT NULL AND NOT ()-[:USES_IMAGE]->(old_i)
+		DETACH DELETE old_i
 	`
 	return o.dbHelper.ExecuteWrite(ctx, query, map[string]any{"id": id})
 }
@@ -1613,19 +1923,20 @@ func (o *Orchestrator) SyncCAPECCatalog(ctx context.Context) (int, error) {
 	return len(capecs), nil
 }
 
-func (o *Orchestrator) WithMitreATTACK(ttpPort ports.TTPPort, provider ports.MitreATTACKProvider) *Orchestrator {
+func (o *Orchestrator) WithMitreATTACK(ttpPort ports.TTPPort, provider ports.MitreATTACKProvider, actorPort ports.ThreatActorPort) *Orchestrator {
 	o.ttpPort = ttpPort
 	o.mitreAttackProvider = provider
+	o.threatActorPort = actorPort
 	return o
 }
 
-// SyncATTACKCatalog descarga el catálogo STIX 2.1 de MITRE ATT&CK Enterprise e ingiere la metadata de TTPs (nombre, tácticas, descripción) en Neo4j.
+// SyncATTACKCatalog descarga el catálogo STIX 2.1 de MITRE ATT&CK Enterprise e ingiere la metadata de TTPs, Threat Actors y relaciones en Neo4j.
 func (o *Orchestrator) SyncATTACKCatalog(ctx context.Context) (int, error) {
-	if o.mitreAttackProvider == nil || o.ttpPort == nil {
-		return 0, fmt.Errorf("los componentes de MITRE ATT&CK (ttpPort y mitreAttackProvider) no han sido inyectados en el orquestador")
+	if o.mitreAttackProvider == nil || o.ttpPort == nil || o.threatActorPort == nil {
+		return 0, fmt.Errorf("los componentes de MITRE ATT&CK (ttpPort, threatActorPort y mitreAttackProvider) no han sido inyectados en el orquestador")
 	}
 
-	ttps, err := o.mitreAttackProvider.FetchATTACKBundle(ctx)
+	ttps, actors, relations, err := o.mitreAttackProvider.FetchATTACKBundle(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("error obteniendo el catálogo STIX MITRE ATT&CK: %w", err)
 	}
@@ -1634,7 +1945,294 @@ func (o *Orchestrator) SyncATTACKCatalog(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("error guardando el catálogo MITRE ATT&CK TTPs en Neo4j: %w", err)
 	}
 
+	if err := o.threatActorPort.SaveBatch(ctx, actors); err != nil {
+		return 0, fmt.Errorf("error guardando el catálogo MITRE ATT&CK Threat Actors en Neo4j: %w", err)
+	}
+
+	if err := o.threatActorPort.SaveRelationshipsBatch(ctx, relations); err != nil {
+		return 0, fmt.Errorf("error guardando las relaciones MITRE ATT&CK USES en Neo4j: %w", err)
+	}
+
 	return len(ttps), nil
+}
+
+func (o *Orchestrator) StartBackgroundTTPMapping(projectID int64) int {
+	// Disparo manual: ejecuta un barrido acotado al proyecto indicado y devuelve cuántos CVEs encoló
+	return o.runSweep(context.Background(), projectID)
+}
+
+func (o *Orchestrator) StartTTPWorker(ctx context.Context) {
+	// 1. Worker Consumidor Principal
+	go func() {
+		var highCount int
+		for {
+			var task ttpTask
+			var ok bool
+
+			// Prevención de Inanición (Starvation): 
+			// Si hemos procesado 10 tareas de alta prioridad seguidas, intentamos 
+			// forzar el consumo de 1 tarea de baja prioridad si está disponible.
+			if highCount >= 10 {
+				select {
+				case task, ok = <-o.ttpQueueLow:
+					if !ok {
+						return
+					}
+					highCount = 0
+					goto process
+				default:
+					highCount = 0
+				}
+			}
+
+			// Prioridad: Intentar leer primero de High
+			select {
+			case <-ctx.Done():
+				return
+			case task, ok = <-o.ttpQueueHigh:
+				if !ok {
+					return
+				}
+				highCount++
+			default:
+				// Si High está vacía, bloquear esperando en cualquiera de las dos
+				select {
+				case <-ctx.Done():
+					return
+				case task, ok = <-o.ttpQueueHigh:
+					if !ok {
+						return
+					}
+					highCount++
+				case task, ok = <-o.ttpQueueLow:
+					if !ok {
+						return
+					}
+					highCount = 0
+				}
+			}
+
+		process:
+			o.startProcessingCVE(task.cveID, task.projectID)
+			if err := o.processSingleCVE(ctx, task); err != nil {
+				o.addTTPLog(fmt.Sprintf("Error procesando %s: %v", task.cveID, err), task.projectID)
+			}
+			o.endProcessingCVE(task.cveID, task.projectID)
+		}
+	}()
+
+	// 2. Barrido Periódico de Seguridad (cada 10 minutos) — global, sin filtro de proyecto
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+
+		// Barrido inicial al arrancar
+		o.runSweep(ctx, 0)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = o.runSweep(ctx, 0)
+			}
+		}
+	}()
+}
+
+func (o *Orchestrator) runSweep(ctx context.Context, projectID int64) int {
+	vulns, err := o.vulnPort.GetUnmappedVulnerabilities(ctx, projectID)
+	if err != nil {
+		log.Printf("[TTP-BG-SWEEP] Error obteniendo vulnerabilidades no mapeadas: %v", err)
+		return 0
+	}
+	if len(vulns) > 0 {
+		log.Printf("[TTP-BG-SWEEP] Encolando %d vulnerabilidades sin TTP (projectID=%d)...", len(vulns), projectID)
+		for _, v := range vulns {
+			o.EnqueueCVE(v.CVEID, projectID)
+		}
+	}
+	return len(vulns)
+}
+
+func (o *Orchestrator) getProjectState(projectID int64) *ProjectTTPSyncState {
+	o.ttpSync.mu.Lock()
+	defer o.ttpSync.mu.Unlock()
+	state, exists := o.ttpSync.projectStates[projectID]
+	if !exists {
+		state = &ProjectTTPSyncState{
+			Logs:       []string{},
+			QueuedCVEs: make(map[string]bool),
+		}
+		o.ttpSync.projectStates[projectID] = state
+	}
+	return state
+}
+
+func (o *Orchestrator) EnqueueCVE(cveID string, projectID int64) {
+	state := o.getProjectState(projectID)
+
+	o.ttpSync.mu.Lock()
+	if state.QueuedCVEs[cveID] {
+		o.ttpSync.mu.Unlock()
+		return // Ya está encolado o procesándose
+	}
+	state.QueuedCVEs[cveID] = true
+	state.Processing = true
+	o.ttpSync.mu.Unlock()
+
+	queue := o.ttpQueueHigh
+	if projectID == 0 {
+		queue = o.ttpQueueLow
+	}
+
+	select {
+	case queue <- ttpTask{cveID: cveID, projectID: projectID}:
+		// Encolado con éxito
+	default:
+		// Sacar del mapa si se descarta de la cola (para que pueda volver a re-encolarse en el barrido)
+		o.ttpSync.mu.Lock()
+		delete(state.QueuedCVEs, cveID)
+		o.ttpSync.mu.Unlock()
+		o.addTTPLog(fmt.Sprintf("Advertencia: Cola de mapeo TTP llena, descartado temporalmente: %s", cveID), projectID)
+	}
+}
+
+func (o *Orchestrator) startProcessingCVE(cveID string, projectID int64) {
+	state := o.getProjectState(projectID)
+	o.ttpSync.mu.Lock()
+	defer o.ttpSync.mu.Unlock()
+	state.CurrentCVE = cveID
+	state.Processing = true
+}
+
+func (o *Orchestrator) endProcessingCVE(cveID string, projectID int64) {
+	state := o.getProjectState(projectID)
+	o.ttpSync.mu.Lock()
+	defer o.ttpSync.mu.Unlock()
+	state.CurrentCVE = ""
+	delete(state.QueuedCVEs, cveID)
+	
+	if len(state.QueuedCVEs) == 0 {
+		state.Processing = false
+	}
+}
+
+func (o *Orchestrator) processSingleCVE(ctx context.Context, task ttpTask) error {
+	v, err := o.vulnPort.GetByID(ctx, task.cveID)
+	if err != nil {
+		return fmt.Errorf("error obteniendo vuln: %w", err)
+	}
+
+	var ttps []string
+	var confidence, source string
+	var mappedCWE string
+
+	validCWEs := []string{}
+	for _, cwe := range v.CWE {
+		cleaned := strings.TrimSpace(cwe)
+		if cleaned != "" && cleaned != "[]" && cleaned != "NVD-CWE-Other" && cleaned != "NVD-CWE-noinfo" {
+			validCWEs = append(validCWEs, cleaned)
+		}
+	}
+
+	start := time.Now()
+	if len(validCWEs) > 0 {
+		mappedCWE = validCWEs[0]
+		var capecErr error
+		log.Printf("DEBUG HEX: mappedCWE=%q | len=%d | hex=%x", mappedCWE, len(mappedCWE), mappedCWE)
+		if o.capecPort != nil {
+			ttps, capecErr = o.capecPort.GetTTPsByCWE(ctx, mappedCWE)
+		} else {
+			capecErr = fmt.Errorf("capecPort no inicializado")
+		}
+		if capecErr == nil && len(ttps) > 0 {
+			confidence = "high"
+			source = "capec_static"
+		} else {
+			if capecErr != nil {
+				log.Printf("[CAPEC] Error consultando CAPEC para %s: %v — usando fallback LLM", mappedCWE, capecErr)
+			} else {
+				log.Printf("[CAPEC] Sin cobertura para %s, usando fallback LLM", mappedCWE)
+			}
+			ttps, _, err = o.ttpMapper.MapEnrichedToTTPRaw(ctx, mappedCWE, v.Description, v.CVSSVector)
+			confidence = "medium"
+			source = "llm_enriched"
+		}
+	} else {
+		ttps, _, err = o.ttpMapper.MapEnrichedToTTPRaw(ctx, "", v.Description, v.CVSSVector)
+		confidence = "medium"
+		source = "llm_enriched"
+	}
+	duration := time.Since(start)
+
+	if err != nil {
+		return err
+	}
+
+	o.addTTPLog(fmt.Sprintf("CVE %s mapeado a TTPs %v en %v (Confianza: %s)", v.CVEID, ttps, duration.Round(time.Millisecond), confidence), task.projectID)
+	if len(ttps) > 0 {
+		err = o.vulnPort.LinkTTPsToVulnerability(ctx, v.CVEID, mappedCWE, ttps, confidence, source)
+		if err != nil {
+			return err
+		}
+		// Emitir evento WebSocket si el notificador está inyectado
+		if o.notifier != nil {
+			_ = o.notifier.NotifyTTPMapped(ctx, ports.TTPMappedEvent{
+				CVEID:      v.CVEID,
+				TTPs:       ttps,
+				Confidence: confidence,
+				Source:     source,
+				ProjectID:  task.projectID,
+				Log:        fmt.Sprintf("CVE %s → TTPs %v (Confianza: %s)", v.CVEID, ttps, confidence),
+			})
+		}
+	}
+	return nil
+}
+
+func (o *Orchestrator) addTTPLog(msg string, projectID int64) {
+	state := o.getProjectState(projectID)
+	o.ttpSync.mu.Lock()
+	defer o.ttpSync.mu.Unlock()
+	logLine := fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), msg)
+	state.Logs = append(state.Logs, logLine)
+	
+	prefix := "[TTP-BG-GLOBAL]"
+	if projectID > 0 {
+		prefix = fmt.Sprintf("[TTP-PROJ-%d]", projectID)
+	}
+	fmt.Printf("%s %s\n", prefix, msg)
+}
+
+func (o *Orchestrator) GetTTPSyncStatus(projectID int64) TTPBackgroundSyncResponse {
+	o.ttpSync.mu.RLock()
+	defer o.ttpSync.mu.RUnlock()
+
+	state, exists := o.ttpSync.projectStates[projectID]
+	if !exists {
+		return TTPBackgroundSyncResponse{
+			Processing:  false,
+			CurrentCVE:  "",
+			QueueLength: 0,
+			Logs:        []string{},
+		}
+	}
+
+	logsCopy := make([]string, len(state.Logs))
+	copy(logsCopy, state.Logs)
+
+	queueLen := len(o.ttpQueueHigh)
+	if projectID == 0 {
+		queueLen = len(o.ttpQueueLow)
+	}
+
+	return TTPBackgroundSyncResponse{
+		Processing:  state.Processing,
+		CurrentCVE:  state.CurrentCVE,
+		QueueLength: queueLen,
+		Logs:        logsCopy,
+	}
 }
 
 // AggregateProjectRiskFromCurrentEndpointScores recalcula el riesgo agregado de un proyecto completo, basado en los scores actuales de sus endpoints asociados.
@@ -1780,4 +2378,37 @@ func (o *Orchestrator) RefreshProjectPatches(ctx context.Context, projectID int6
 	}
 
 	return result, nil
+}
+
+func (o *Orchestrator) GetTTPMatrix(ctx context.Context, projectID *int64) ([]domain.TTPMatrixItem, error) {
+	return o.infraPort.GetTTPMatrix(ctx, projectID)
+}
+
+// Métodos auxiliares de consulta de estado previo para auditoría
+func (o *Orchestrator) GetEndpointByID(ctx context.Context, id int64) (*domain.Endpoint, error) {
+	return o.endpointPort.GetByID(ctx, id)
+}
+
+func (o *Orchestrator) GetNetworkByID(ctx context.Context, id int64) (*domain.Network, error) {
+	return o.networkPort.GetByID(ctx, id)
+}
+
+func (o *Orchestrator) GetHardwareByID(ctx context.Context, id int64) (*domain.Hardware, error) {
+	return o.hardwarePort.GetByID(ctx, id)
+}
+
+func (o *Orchestrator) GetSoftwareByID(ctx context.Context, id int64) (*domain.Software, error) {
+	return o.softwarePort.GetByID(ctx, id)
+}
+
+func (o *Orchestrator) GetSoftwareInstallationByID(ctx context.Context, id string) (*domain.SoftwareInstallation, error) {
+	return o.softwareInstPort.GetByID(ctx, id)
+}
+
+func (o *Orchestrator) GetContainerByID(ctx context.Context, id string) (*domain.Container, error) {
+	return o.containerPort.GetContainer(ctx, id)
+}
+
+func (o *Orchestrator) GetProjectByID(ctx context.Context, id int64) (*domain.Project, error) {
+	return o.projectPort.GetByID(ctx, id)
 }

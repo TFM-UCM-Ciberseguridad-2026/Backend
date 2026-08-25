@@ -2,6 +2,7 @@ package neo4j
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -325,11 +326,13 @@ func (r *findingRepo) ApplyRemediationByInstallationAndCVE(ctx context.Context, 
 	return res.([]int64), nil
 }
 
-func (r *findingRepo) GetVulnerabilitiesByFinding(ctx context.Context, findingID int64) ([]domain.Vulnerability, error) {
+func (r *findingRepo) GetVulnerabilitiesByFinding(ctx context.Context, findingID any) ([]domain.Vulnerability, error) {
 	query := `
-		MATCH (f:Finding {id: $finding_id})-[:OF_VULNERABILITY]->(v:Vulnerability)
-		OPTIONAL MATCH (c:CAPEC)-[:MAPS_TO_CWE]->(w:CWE) WHERE (v)-[:HAS_CWE]->(w) OR w.cwe_id IN v.cwe
-		OPTIONAL MATCH (c)-[:MAPS_TO_TTP]->(t:TTP)
+		MATCH (f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE f.id = $finding_id OR elementId(f) = toString($finding_id) OR toString(f.id) = toString($finding_id)
+		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t1:TTP)
+		OPTIONAL MATCH (v)-[:MAPS_TO]->(t2:TTP)
+		WITH v, coalesce(t1, t2) AS t
 		WITH v, collect(DISTINCT {
 			ttp_id: t.ttp_id,
 			name: coalesce(t.name, ''),
@@ -398,4 +401,117 @@ func (r *findingRepo) GetVulnerabilitiesByFinding(ctx context.Context, findingID
 		return []domain.Vulnerability{}, nil
 	}
 	return res.([]domain.Vulnerability), nil
+}
+
+// EnsureForContainerImageAndCVE ensures that a finding exists for the given ContainerImage and CVE.
+func (r *findingRepo) EnsureForContainerImageAndCVE(ctx context.Context, imageID string, cveID string, f *domain.Finding) (*domain.Finding, bool, error) {
+	now := time.Now().UTC()
+	findingKey := imageID + "|" + cveID
+
+	query := `
+		MERGE (ci:ContainerImage {id: $image_id})
+		MERGE (v:Vulnerability {cve_id: $cve_id})
+		MERGE (n:Finding {finding_key: $finding_key})
+		ON CREATE SET
+			n.id = $id,
+			n.status = $status,
+			n.first_seen = $first_seen,
+			n.last_seen = $last_seen,
+			n.resolved_at = $resolved_at,
+			n.impact_score = $impact_score,
+			n.likelihood = $likelihood,
+			n.exposure_factor = $exposure_factor,
+			n.remediation_factor = $remediation_factor,
+			n.risk_score = $risk_score,
+			n.asset_criticality = $asset_criticality,
+			n.urgency_boost = $urgency_boost,
+			n.priority_score = $priority_score,
+			n.risk_computed_at = $risk_computed_at,
+			n._ensure_created = true
+		ON MATCH SET
+			n.last_seen = $now,
+			n._ensure_created = false
+		MERGE (ci)-[:HAS_FINDING]->(n)
+		MERGE (n)-[:OF_VULNERABILITY]->(v)
+		WITH n, n._ensure_created AS created
+		REMOVE n._ensure_created
+		RETURN properties(n) AS props, created
+	`
+
+	var lastSeen, resolvedAt, riskComputedAt any
+	if f.LastSeen != nil {
+		lastSeen = *f.LastSeen
+	}
+	if f.ResolvedAt != nil {
+		resolvedAt = *f.ResolvedAt
+	}
+	if f.RiskComputedAt != nil {
+		riskComputedAt = *f.RiskComputedAt
+	}
+
+	params := map[string]any{
+		"image_id":           imageID,
+		"cve_id":             cveID,
+		"finding_key":        findingKey,
+		"id":                 f.FindingID,
+		"status":             f.Status,
+		"first_seen":         f.FirstSeen,
+		"last_seen":          lastSeen,
+		"resolved_at":        resolvedAt,
+		"impact_score":       f.ImpactScore,
+		"likelihood":         f.Likelihood,
+		"exposure_factor":    f.ExposureFactor,
+		"remediation_factor": f.RemediationFactor,
+		"risk_score":         f.RiskScore,
+		"asset_criticality":  f.AssetCriticality,
+		"urgency_boost":      f.UrgencyBoost,
+		"priority_score":     f.PriorityScore,
+		"risk_computed_at":   riskComputedAt,
+		"now":                now,
+	}
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	result, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		res, err := tx.Run(ctx, query, params)
+		if err != nil {
+			return nil, err
+		}
+		if res.Next(ctx) {
+			record := res.Record()
+			props, _ := record.Get("props")
+			created, _ := record.Get("created")
+			return map[string]any{
+				"props":   props,
+				"created": created,
+			}, nil
+		}
+		return nil, fmt.Errorf("no se pudo asegurar/crear el finding")
+	})
+
+	if err != nil {
+		return nil, false, err
+	}
+
+	resMap := result.(map[string]any)
+	props := resMap["props"].(map[string]any)
+	created := resMap["created"].(bool)
+
+	return &domain.Finding{
+		FindingID:         getInt64(props, "id"),
+		Status:            getString(props, "status"),
+		FirstSeen:         getTime(props, "first_seen"),
+		LastSeen:          getTimePtr(props, "last_seen"),
+		ResolvedAt:        getTimePtr(props, "resolved_at"),
+		ImpactScore:       getFloat64(props, "impact_score"),
+		Likelihood:        getFloat64(props, "likelihood"),
+		ExposureFactor:    getFloat64(props, "exposure_factor"),
+		RemediationFactor: getFloat64(props, "remediation_factor"),
+		RiskScore:         getFloat64(props, "risk_score"),
+		AssetCriticality:  getFloat64(props, "asset_criticality"),
+		UrgencyBoost:      getFloat64(props, "urgency_boost"),
+		PriorityScore:     getFloat64(props, "priority_score"),
+		RiskComputedAt:    getTimePtr(props, "risk_computed_at"),
+	}, created, nil
 }

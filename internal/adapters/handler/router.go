@@ -15,7 +15,7 @@ Propósito arquitectónico y teórico:
 //va a haber una api que se sea /fetch/vuln/endpoint?endpoint=nombreendpoint
 
 // NewRouter crea y configura el multiplexor HTTP con las rutas de la aplicación.
-func NewRouter(h *OrchestratorHandler) *http.ServeMux {
+func NewRouter(h *OrchestratorHandler, hub *WSHub) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// Definición de las rutas RESTful.
@@ -66,8 +66,25 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	/* GET /api/infrastructure/mitre-ttp-count: Obtiene el numero total de TTPs en el catalogo MITRE. */
 	mux.HandleFunc("GET /api/infrastructure/mitre-ttp-count", h.GetMitreTTPCount)
 
+	/* GET /api/infrastructure/ttps: Obtiene la matriz de TTPs procesada, opcionalmente filtrada por project_id */
+	mux.HandleFunc("GET /api/infrastructure/ttps", h.GetTTPMatrix)
+
+	/* GET /api/infrastructure/ttp-sync-status: Obtiene el estado actual del mapeo de TTPs en segundo plano. */
+	mux.HandleFunc("GET /api/infrastructure/ttp-sync-status", h.GetTTPSyncStatus)
+
 	/* GET /api/infrastructure/exploitation-paths: Obtiene las rutas de explotación calculadas en la infraestructura. */
 	mux.HandleFunc("GET /api/infrastructure/exploitation-paths", h.GetExploitationPaths)
+
+	/* GET /api/infrastructure/analysis-pending: Polling endpoint para detectar si el enriquecimiento NVD de background ha finalizado. */
+	mux.HandleFunc("GET /api/infrastructure/analysis-pending", h.GetAnalysisPending)
+
+	/* POST /api/infrastructure/map-ttps: Inicia manualmente el mapeo (directo e indirecto) de TTPs en background. */
+	mux.HandleFunc("POST /api/infrastructure/map-ttps", h.MapTTPsManually)
+
+	/* GET /api/ws/ttps: WebSocket de notificaciones en tiempo real del worker de TTPs.
+	   Query param opcional: ?project_id=N para suscripción acotada al proyecto N.
+	   Sin query param (o project_id=0): suscripción global (recibe todos los eventos). */
+	mux.HandleFunc("GET /api/ws/ttps", hub.ServeWS)
 
 	/* POST /api/installations/{id}/scan-vulns: Automatiza el escaneo y registro de vulnerabilidades por CPE/versión contra la API del NIST. */
 	mux.HandleFunc("POST /api/installations/{id}/scan-vulns", h.ScanSoftwareVulnerabilities)
@@ -121,11 +138,15 @@ func NewRouter(h *OrchestratorHandler) *http.ServeMux {
 	mux.HandleFunc("PUT /api/containers/{id}", h.UpdateContainer)
 	mux.HandleFunc("DELETE /api/containers/{id}", h.DeleteContainer)
 	mux.HandleFunc("POST /api/containers/{id}/installations", h.RegisterContainerSoftwareInstallation)
+	mux.HandleFunc("POST /api/containers/images/{id}/scan-vulns", h.ScanContainerImageVulnerabilities)
 
 	mux.HandleFunc("DELETE /api/nodes/{id}", h.DeleteNode)
 
 	/* POST /api/projects/{id}/patches/refresh: Refresca patches y fixed_versions para todos los CVEs abiertos del proyecto. */
 	mux.HandleFunc("POST /api/projects/{id}/patches/refresh", h.RefreshProjectPatches)
+
+	// Búsqueda y Autocompletado de CPEs para la UI
+	mux.HandleFunc("GET /api/cpe/search", h.SearchCPE)
 
 	return mux
 }

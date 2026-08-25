@@ -20,3 +20,9 @@ type ThreatActorThreat struct {
 	ThreatActor ThreatActor `json:"threat_actor"`
 	TTPCount    int         `json:"ttp_count"`
 }
+
+// ThreatActorTTPRelation representa la relación de uso de una TTP por parte de un Threat Actor.
+type ThreatActorTTPRelation struct {
+	ActorID string
+	TTPID   string
+}

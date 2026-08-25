@@ -9,6 +9,7 @@ import (
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/handler"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/handler/middleware"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/provider"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/provider/ollama"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository/neo4j"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/config"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/service"
@@ -51,6 +52,8 @@ func main() {
 	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, _, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo, containerRepo := neo4j.NewRepository(driver)
 	infraRepo := neo4j.NewInfrastructureRepository(driver)
 	riskRepo := neo4j.NewRiskRepository(driver)
+	ttpRepo := neo4j.NewTTPRepository(driver)
+	actorRepo := neo4j.NewThreatActorRepository(driver)
 
 	// 4. Inicialización del Servicio/Orquestador (Core)
 	nistAPIAdapter := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey, cfg.NVD.TimeoutSeconds)
@@ -58,6 +61,13 @@ func main() {
 	kevAdapter := provider.NewKEVAdapter()
 	scoutAdapter := provider.NewScoutAdapter()
 	osvAdapter := provider.NewOSVAdapter()
+	ollamaClient := ollama.NewOllamaClient(cfg.Ollama.Host, cfg.Ollama.Model)
+	mitreAttackProvider := provider.NewMitreAttackSTIXProvider("", 120)
+
+	capecRepo := neo4j.NewCAPECRepository(driver)
+	capecProvider := provider.NewCapecSTIXProvider("", 120)
+	cpeGuesserAdapter := provider.NewCPEGuesserAdapter("", nil)
+
 	orchestrator := service.NewOrchestrator(
 		projectRepo,
 		endpointRepo,
@@ -74,11 +84,128 @@ func main() {
 		patchRepo,
 		dbHelper,
 		nistAPIAdapter,
-	).WithRisk(riskRepo, epssAdapter, kevAdapter).WithScout(scoutAdapter).WithPatchProvider(osvAdapter)
+	).WithRisk(riskRepo, epssAdapter, kevAdapter).
+		WithScout(scoutAdapter).
+		WithPatchProvider(osvAdapter).
+		WithTTPMapper(ollamaClient).
+		WithCPEResolution(nistAPIAdapter).
+		WithCPEGuesser(cpeGuesserAdapter)
+
+
+
+	// Hub WebSocket para notificaciones en tiempo real del worker de TTPs
+	wsHub := handler.NewWSHub()
+	orchestrator.WithNotifier(wsHub)
+
+	// Inyectar el repositorio y proveedor para el catálogo de CAPEC
+	orchestrator.WithCAPEC(capecRepo, capecProvider)
+
+	// Iniciar el worker de TTPs en segundo plano esperando la sincronización
+	go func() {
+		select {
+		case <-orchestrator.CapecReady:
+		case <-time.After(30 * time.Second): // timeout de seguridad
+			log.Printf("[TTP-BG-SWEEP] Timeout esperando CAPEC ready, arrancando de todos modos")
+		}
+		orchestrator.StartTTPWorker(context.Background())
+	}()
+
+	// Inyectar el repositorio y proveedor para el catálogo de MITRE ATT&CK
+	orchestrator.WithMitreATTACK(ttpRepo, mitreAttackProvider, actorRepo)
+
+	// Iniciar sincronización de catálogos en segundo plano (coordinada secuencialmente para evitar condiciones de carrera)
+	go func() {
+		defer func() {
+			close(orchestrator.CapecReady)
+			log.Printf("[CAPEC Sync] Canal capecReady cerrado, worker liberado.")
+		}()
+		initCtx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		defer cancel()
+
+		// 1. Sincronización del catálogo de MITRE ATT&CK (TTPs)
+		count, err := orchestrator.GetTotalMitreTTPs(initCtx)
+		if err != nil {
+			log.Printf("[MITRE Sync] Error comprobando catálogo de TTPs: %v", err)
+			return
+		}
+
+		var taCount int64
+		res, err := dbHelper.ExecuteRead(initCtx, "MATCH (n:ThreatActor) RETURN count(n) AS total", nil)
+		if err == nil && res != nil {
+			if m, ok := res.(map[string]any); ok {
+				if total, ok := m["total"].(int64); ok {
+					taCount = total
+				}
+			}
+		}
+
+		if count == 0 || taCount == 0 {
+			log.Printf("[MITRE Sync] Catálogo incompleto (TTPs: %d, Threat Actors: %d). Iniciando descarga e importación automática...", count, taCount)
+			
+			var num int
+			for attempt := 1; attempt <= 3; attempt++ {
+				num, err = orchestrator.SyncATTACKCatalog(initCtx)
+				if err == nil {
+					log.Printf("[MITRE Sync] Importación de MITRE ATT&CK completada con éxito. %d TTPs importadas.", num)
+					break
+				}
+				log.Printf("[MITRE Sync] Error importando catálogo MITRE (intento %d/3): %v", attempt, err)
+				time.Sleep(15 * time.Second)
+			}
+			if err != nil {
+				log.Printf("[MITRE Sync] Falló la importación tras 3 intentos. Sincronización abortada.")
+				return // Si falla ATT&CK, no podemos enlazar CAPEC a TTPs correctamente
+			}
+		} else {
+			log.Printf("[MITRE Sync] Catálogo de MITRE ya inicializado con %d TTPs y %d Threat Actors.", count, taCount)
+		}
+
+		// 2. Sincronización del catálogo de MITRE CAPEC (arranca solo tras completarse o confirmarse la de ATT&CK)
+		var capecCount int64
+		resCapec, err := dbHelper.ExecuteRead(initCtx, "MATCH (c:CAPEC) RETURN count(c) AS total", nil)
+		if err == nil && resCapec != nil {
+			if m, ok := resCapec.(map[string]any); ok {
+				if total, ok := m["total"].(int64); ok {
+					capecCount = total
+				}
+			}
+		}
+
+		// Comprobación de relaciones de mapeo de TTPs como red de seguridad de inicialización previa incompleta
+		var mapsToTtpCount int64
+		resMaps, errMaps := dbHelper.ExecuteRead(initCtx, "MATCH ()-[r:MAPS_TO_TTP]->() RETURN count(r) AS total", nil)
+		if errMaps == nil && resMaps != nil {
+			if m, ok := resMaps.(map[string]any); ok {
+				if total, ok := m["total"].(int64); ok {
+					mapsToTtpCount = total
+				}
+			}
+		}
+
+		if capecCount == 0 || mapsToTtpCount == 0 {
+			log.Printf("[CAPEC Sync] Catálogo vacío o sin relaciones TTP (patrones: %d, relaciones TTP: %d). Iniciando descarga e importación...", capecCount, mapsToTtpCount)
+			
+			var num int
+			for attempt := 1; attempt <= 3; attempt++ {
+				num, err = orchestrator.SyncCAPECCatalog(initCtx)
+				if err == nil {
+					log.Printf("[CAPEC Sync] Importación de MITRE CAPEC completada con éxito. %d patrones importados.", num)
+					break
+				}
+				log.Printf("[CAPEC Sync] Error importando catálogo CAPEC (intento %d/3): %v", attempt, err)
+				time.Sleep(15 * time.Second)
+			}
+			if err != nil {
+				log.Printf("[CAPEC Sync] Fallo en la sincronización, continuando con catálogo posiblemente vacío: %v", err)
+			}
+		} else {
+			log.Printf("[CAPEC Sync] Catálogo de CAPEC ya inicializado con %d patrones y %d enlaces TTP.", capecCount, mapsToTtpCount)
+		}
+	}()
 
 	// 5. Inicialización de los Controladores HTTP (Adaptadores Inbound)
 	h := handler.NewOrchestratorHandler(orchestrator)
-	router := handler.NewRouter(h)
+	router := handler.NewRouter(h, wsHub)
 
 	// Middleware CORS para evitar bloqueos del navegador en desarrollo
 	corsHandler := middleware.CORS(router)

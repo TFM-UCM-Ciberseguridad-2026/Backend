@@ -559,6 +559,24 @@ func parseCVSS31Vector(vectorStr string) (map[string]string, error) {
 	return metrics, nil
 }
 
+// CalculateCVSS31BaseScoreFromVector parses a CVSS 3.1 vector and calculates its base score.
+func CalculateCVSS31BaseScoreFromVector(vectorStr string) (float64, error) {
+	metrics, err := parseCVSS31Vector(vectorStr)
+	if err != nil {
+		return 0, err
+	}
+	return CalculateCVSS31BaseScore(
+		metrics["AV"],
+		metrics["AC"],
+		metrics["PR"],
+		metrics["UI"],
+		metrics["S"],
+		metrics["C"],
+		metrics["I"],
+		metrics["A"],
+	)
+}
+
 /*
 roundup implementa el redondeo hacia arriba a un decimal.
 */

@@ -36,13 +36,13 @@ func IsValidEndpointType(t string) bool {
 
 // TODO: Faltan campos respecto al nist, ademas se pueden subdividir en structs mas pequeñas para que sea mas legible
 type Endpoint struct {
-	EndpointID      int64  `json:"endpoint_id"`
-	Hostname        string `json:"hostname"`
-	Type            string `json:"tipo"` // Tipo/Rol del equipo en la red ('Server', 'Workstation', 'Domain Controller', 'Firewall', 'Router')
-	Status          string `json:"status"`
-	InternetExposed bool   `json:"internet_exposed"`
-	Environment     string `json:"environment"`
-	IPs []EndpointIP `json:"ips,omitempty"`
+	EndpointID      int64        `json:"endpoint_id"`
+	Hostname        string       `json:"hostname"`
+	Type            string       `json:"tipo"` // Tipo/Rol del equipo en la red ('Server', 'Workstation', 'Domain Controller', 'Firewall', 'Router')
+	Status          string       `json:"status"`
+	InternetExposed bool         `json:"internet_exposed"`
+	Environment     string       `json:"environment"`
+	IPs             []EndpointIP `json:"ips,omitempty"`
 
 	// Security requirements CIA del endpoint (Low/Medium/High), usados como CR/IR/AR
 	// en el cálculo del CVSS environmental de cada finding asociado.
