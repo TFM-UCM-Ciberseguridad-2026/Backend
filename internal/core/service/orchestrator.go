@@ -84,11 +84,13 @@ type Orchestrator struct {
 	ttpMapper           ports.TTPMapper
 	threatActorPort     ports.ThreatActorPort
 	notifier            ports.NotificationPort // nil si no se inyecta
+	cpeService          *CPEService
 	ttpSync             TTPBackgroundSyncManager
 	ttpQueueHigh        chan ttpTask
 	ttpQueueLow         chan ttpTask
 	CapecReady          chan struct{}
 }
+
 
 func NewOrchestrator(
 	projectPort ports.ProjectPort,
@@ -132,6 +134,29 @@ func NewOrchestrator(
 		},
 	}
 }
+
+// WithCPEResolution inyecta los componentes de resolución CPE e inicializa el CPEService
+func (o *Orchestrator) WithCPEResolution(resolver ports.CPEResolverPort) *Orchestrator {
+	o.cpeService = NewCPEService(resolver)
+	return o
+}
+
+
+// WithCPEService inyecta directamente un CPEService previamente instanciado
+func (o *Orchestrator) WithCPEService(cpeService *CPEService) *Orchestrator {
+	o.cpeService = cpeService
+	return o
+}
+
+// WithCPEGuesser inyecta el proveedor de búsqueda difusa cpe-guesser en el CPEService
+func (o *Orchestrator) WithCPEGuesser(guesser ports.CPEGuesserPort) *Orchestrator {
+	if o.cpeService != nil {
+		o.cpeService.WithCPEGuesser(guesser)
+	}
+	return o
+}
+
+
 
 // WithRisk inyecta los componentes del motor de riesgo y devuelve el mismo orquestador.
 // Permite que el código existente siga usando NewOrchestrator sin cambios.
@@ -321,12 +346,49 @@ func (o *Orchestrator) CreateNetwork(ctx context.Context, network *domain.Networ
 	return network.NetworkID, linked, nil
 }
 
+// ExecuteCPEPipeline ejecuta el pipeline completo de 5 fases para la sugerencia de CPEs
+func (o *Orchestrator) ExecuteCPEPipeline(ctx context.Context, rawInput string) ([]domain.CPEFinalItem, error) {
+	if o.cpeService != nil {
+		return o.cpeService.ExecuteCPEPipeline(ctx, rawInput)
+	}
+	return []domain.CPEFinalItem{}, nil
+}
+
+// SearchCPE busca candidatos a CPE combinando el diccionario de alias en Neo4j y la API NVD
+func (o *Orchestrator) SearchCPE(ctx context.Context, vendor, product, version string) ([]domain.CPESuggestion, error) {
+
+	if o.cpeService != nil {
+		return o.cpeService.SearchCPE(ctx, vendor, product, version)
+	}
+	return []domain.CPESuggestion{}, nil
+}
+
+// ResolveSoftwareCPE resuelve el CPE adecuado para un software siguiendo la estrategia multinivel
+func (o *Orchestrator) ResolveSoftwareCPE(ctx context.Context, software *domain.Software, saveAlias bool) (*domain.CPEMatchResult, error) {
+	if o.cpeService != nil {
+		return o.cpeService.ResolveSoftwareCPE(ctx, software, saveAlias)
+	}
+	return &domain.CPEMatchResult{
+		CPE:       software.CPE,
+		CPEStatus: software.CPEStatus,
+	}, nil
+}
+
 // RegisterSoftwareInstallation guarda la definición del software, la instancia instalada,
 // asocia la instancia al endpoint y el software genérico a la instancia instalada.
 func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpointID int64, software *domain.Software, installation *domain.SoftwareInstallation) error {
-	if strings.TrimSpace(software.Vendor) == "" {
-		return fmt.Errorf("el fabricante (vendor) es obligatorio para registrar el software y consultar vulnerabilidades en NIST")
+	if strings.TrimSpace(software.Vendor) == "" && strings.TrimSpace(software.CPE) != "" {
+		parts := strings.Split(software.CPE, ":")
+		if len(parts) >= 4 && parts[3] != "" && parts[3] != "*" {
+			software.Vendor = parts[3]
+		}
 	}
+	if strings.TrimSpace(software.Vendor) == "" {
+		software.Vendor = "custom"
+	}
+
+	// 1. Resolver CPE multinivel y aplicar alias guardados
+	_, _ = o.ResolveSoftwareCPE(ctx, software, true)
 
 	if software.SoftwareID == 0 {
 		swID, err := o.nextNodeID(ctx, "Software")
@@ -336,6 +398,12 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 		software.SoftwareID = swID
 	}
 
+	// 2. Guardar nodo :Software genérico en Neo4j
+	if err := o.softwarePort.Save(ctx, software); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+		return err
+	}
+
+
 	if installation.InstallationID == "" {
 		installation.InstallationID = o.nextInstallationID()
 	}
@@ -343,13 +411,6 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 	installation.CriticalityLevel = NormalizeSoftwareCriticalityLevel(installation.CriticalityLevel)
 	installation.CriticalityMultiplier = CalculateSoftwareCriticalityMultiplier(installation.CriticalityLevel)
 
-	if strings.TrimSpace(software.CPE) == "" || software.CPE == "N/A" {
-		software.CPE = domain.GenerateCPE23(software.Type, software.Vendor, software.Name, software.Version)
-	}
-
-	if err := o.softwarePort.Save(ctx, software); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
-		return err
-	}
 	if err := o.softwareInstPort.Save(ctx, installation); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
@@ -362,9 +423,19 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 // RegisterContainerSoftwareInstallation guarda la definición del software, la instancia instalada,
 // asocia la instancia al contenedor y el software genérico a la instancia instalada.
 func (o *Orchestrator) RegisterContainerSoftwareInstallation(ctx context.Context, containerID string, software *domain.Software, installation *domain.SoftwareInstallation) error {
-	if strings.TrimSpace(software.Vendor) == "" {
-		return fmt.Errorf("el fabricante (vendor) es obligatorio para registrar el software y consultar vulnerabilidades en NIST")
+	if strings.TrimSpace(software.Vendor) == "" && strings.TrimSpace(software.CPE) != "" {
+		parts := strings.Split(software.CPE, ":")
+		if len(parts) >= 4 && parts[3] != "" && parts[3] != "*" {
+			software.Vendor = parts[3]
+		}
 	}
+	if strings.TrimSpace(software.Vendor) == "" {
+		software.Vendor = "custom"
+	}
+
+	// 1. Resolver CPE multinivel y aplicar alias guardados
+	_, _ = o.ResolveSoftwareCPE(ctx, software, true)
+
 
 	if software.SoftwareID == 0 {
 		swID, err := o.nextNodeID(ctx, "Software")
@@ -374,20 +445,20 @@ func (o *Orchestrator) RegisterContainerSoftwareInstallation(ctx context.Context
 		software.SoftwareID = swID
 	}
 
+	// 2. Guardar nodo :Software genérico en Neo4j
+	if err := o.softwarePort.Save(ctx, software); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+		return err
+	}
+
+
 	if installation.InstallationID == "" {
+
 		installation.InstallationID = o.nextInstallationID()
 	}
 
 	installation.CriticalityLevel = NormalizeSoftwareCriticalityLevel(installation.CriticalityLevel)
 	installation.CriticalityMultiplier = CalculateSoftwareCriticalityMultiplier(installation.CriticalityLevel)
 
-	if strings.TrimSpace(software.CPE) == "" || software.CPE == "N/A" {
-		software.CPE = domain.GenerateCPE23(software.Type, software.Vendor, software.Name, software.Version)
-	}
-
-	if err := o.softwarePort.Save(ctx, software); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
-		return err
-	}
 	if err := o.softwareInstPort.Save(ctx, installation); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
@@ -396,6 +467,7 @@ func (o *Orchestrator) RegisterContainerSoftwareInstallation(ctx context.Context
 	}
 	return o.relationshipPort.LinkInstallationToSoftware(ctx, installation.InstallationID, software.SoftwareID)
 }
+
 
 // GenerateFinding registra un hallazgo de vulnerabilidad (Finding) a una instalación específica.
 func (o *Orchestrator) GenerateFinding(ctx context.Context, installationID string, finding *domain.Finding) error {
@@ -497,18 +569,29 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		return nil, fmt.Errorf("no se pudo recuperar el software: %w", err)
 	}
 
-	// 2. Resolver o generar CPE
+	// 2. Si es software interno o no verificado en NVD, omitir consulta a la API de vulnerabilidades
+	if sw.CPEStatus == domain.CPEStatusNotInNVD || sw.CPEStatus == domain.CPEStatusPendingConfirmation {
+
+		return &domain.VulnerabilityScanResult{
+			InstallationID:       installationID,
+			SoftwareID:           softwareID,
+			CPE:                  sw.CPE,
+			LimitApplied:         0,
+			VulnerabilitiesFound: 0,
+		}, nil
+	}
+
+	// 3. Resolver o generar CPE
 	cpe := sw.CPE
 	if cpe == "" || cpe == "N/A" {
-		// Generar automáticamente el CPE a partir del tipo (part), vendor, nombre del software y su versión
 		cpe = domain.GenerateCPE23(sw.Type, sw.Vendor, sw.Name, sw.Version)
 		sw.CPE = cpe
 
-		// Actualizar el software con el nuevo CPE generado
 		if err := o.softwarePort.Save(ctx, sw); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 			return nil, fmt.Errorf("error guardando software con CPE generado: %w", err)
 		}
 	}
+
 
 	// 3. Determinar el límite de vulnerabilidades a procesar
 	limit := autoScanVulnerabilityLimit
@@ -2101,5 +2184,34 @@ func (o *Orchestrator) AggregateProjectRiskFromCurrentEndpointScores(ctx context
 
 func (o *Orchestrator) GetTTPMatrix(ctx context.Context, projectID *int64) ([]domain.TTPMatrixItem, error) {
 	return o.infraPort.GetTTPMatrix(ctx, projectID)
+}
+
+// Métodos auxiliares de consulta de estado previo para auditoría
+func (o *Orchestrator) GetEndpointByID(ctx context.Context, id int64) (*domain.Endpoint, error) {
+	return o.endpointPort.GetByID(ctx, id)
+}
+
+func (o *Orchestrator) GetNetworkByID(ctx context.Context, id int64) (*domain.Network, error) {
+	return o.networkPort.GetByID(ctx, id)
+}
+
+func (o *Orchestrator) GetHardwareByID(ctx context.Context, id int64) (*domain.Hardware, error) {
+	return o.hardwarePort.GetByID(ctx, id)
+}
+
+func (o *Orchestrator) GetSoftwareByID(ctx context.Context, id int64) (*domain.Software, error) {
+	return o.softwarePort.GetByID(ctx, id)
+}
+
+func (o *Orchestrator) GetSoftwareInstallationByID(ctx context.Context, id string) (*domain.SoftwareInstallation, error) {
+	return o.softwareInstPort.GetByID(ctx, id)
+}
+
+func (o *Orchestrator) GetContainerByID(ctx context.Context, id string) (*domain.Container, error) {
+	return o.containerPort.GetContainer(ctx, id)
+}
+
+func (o *Orchestrator) GetProjectByID(ctx context.Context, id int64) (*domain.Project, error) {
+	return o.projectPort.GetByID(ctx, id)
 }
 

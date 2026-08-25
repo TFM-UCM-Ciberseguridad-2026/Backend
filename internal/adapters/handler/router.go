@@ -143,6 +143,10 @@ func NewRouter(h *OrchestratorHandler, hub *WSHub) *http.ServeMux {
 	
 	mux.HandleFunc("DELETE /api/nodes/{id}", h.DeleteNode)
 
+	// Búsqueda y Autocompletado de CPEs para la UI
+	mux.HandleFunc("GET /api/cpe/search", h.SearchCPE)
+
 	return mux
 }
+
 

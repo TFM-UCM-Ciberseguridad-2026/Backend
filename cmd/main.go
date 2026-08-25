@@ -66,6 +66,7 @@ func main() {
 
 	capecRepo := neo4j.NewCAPECRepository(driver)
 	capecProvider := provider.NewCapecSTIXProvider("", 120)
+	cpeGuesserAdapter := provider.NewCPEGuesserAdapter("", nil)
 
 	orchestrator := service.NewOrchestrator(
 		projectRepo,
@@ -83,7 +84,14 @@ func main() {
 		patchRepo,
 		dbHelper,
 		nistAPIAdapter,
-	).WithRisk(riskRepo, epssAdapter, kevAdapter).WithScout(scoutAdapter).WithPatchProvider(osvAdapter).WithTTPMapper(ollamaClient)
+	).WithRisk(riskRepo, epssAdapter, kevAdapter).
+		WithScout(scoutAdapter).
+		WithPatchProvider(osvAdapter).
+		WithTTPMapper(ollamaClient).
+		WithCPEResolution(nistAPIAdapter).
+		WithCPEGuesser(cpeGuesserAdapter)
+
+
 
 	// Hub WebSocket para notificaciones en tiempo real del worker de TTPs
 	wsHub := handler.NewWSHub()
