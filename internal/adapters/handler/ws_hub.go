@@ -91,7 +91,7 @@ func (h *WSHub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	client := &wsClient{
 		conn:      conn,
 		projectID: projectID,
-		send:      make(chan []byte, 64),
+		send:      make(chan []byte, 512),
 	}
 
 	h.mu.Lock()
