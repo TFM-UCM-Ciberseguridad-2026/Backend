@@ -1449,7 +1449,7 @@ func (r *infrastructureRepo) GetTTPMatrix(ctx context.Context, projectID *int64)
 func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (*domain.TTPStats, error) {
 	params := map[string]interface{}{"project_id": projectID}
 
-	totalQuery := `
+	baseWhere := `
 		MATCH (v:Vulnerability)
 		WHERE $project_id = 0 OR toString($project_id) = "0" OR
 		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
@@ -1459,63 +1459,57 @@ func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (
 		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
 		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
 		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) }
-		OPTIONAL MATCH (v)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(:TTP)
-		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(:TTP)
-		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(:TTP)
-		WITH v, count(*) AS mapped_paths
+	`
+
+	totalQuery := baseWhere + `
+		WITH v, 
+		  EXISTS { MATCH (v)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(:TTP) } AS has_t1,
+		  EXISTS { MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(:TTP) } AS has_t2,
+		  EXISTS { MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(:TTP) } AS has_t3
+		WITH v, (has_t1 OR has_t2 OR has_t3) AS is_mapped
 		RETURN 
 		  count(v) AS total,
-		  count(CASE WHEN mapped_paths > 0 THEN 1 END) AS mapped,
-		  count(CASE WHEN mapped_paths = 0 THEN 1 END) AS unmapped
+		  count(CASE WHEN is_mapped THEN 1 END) AS mapped,
+		  count(CASE WHEN NOT is_mapped THEN 1 END) AS unmapped
 	`
 
-	confidenceQuery := `
-		MATCH (v:Vulnerability)
-		WHERE $project_id = 0 OR toString($project_id) = "0" OR
-		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
-		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
-		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
-		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
-		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
-		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
-		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) }
-		
-		OPTIONAL MATCH (v)-[r1:MAPS_TO]->(t1:TTP)
-		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[r2:MAPS_TO]->(t2:TTP)
-		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t3:TTP)
-		
-		WITH v, t1, t2, t3,
-		     CASE WHEN t3 IS NOT NULL AND t1 IS NULL AND t2 IS NULL THEN 'high' ELSE coalesce(r1.confidence, r2.confidence, 'medium') END AS conf,
-		     CASE WHEN t3 IS NOT NULL AND t1 IS NULL AND t2 IS NULL THEN 'capec_static' ELSE coalesce(r1.source, r2.source, 'llm_enriched') END AS src
-		WHERE conf IS NOT NULL
+	confidenceQuery := baseWhere + `
+		CALL {
+			WITH v
+			MATCH (v)-[r:MAPS_TO]->(t:TTP)
+			RETURN t, coalesce(r.confidence, 'medium') AS conf, coalesce(r.source, 'llm_enriched') AS src
+			UNION
+			WITH v
+			MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[r:MAPS_TO]->(t:TTP)
+			RETURN t, coalesce(r.confidence, 'medium') AS conf, coalesce(r.source, 'llm_enriched') AS src
+			UNION
+			WITH v
+			MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t:TTP)
+			RETURN t, 'high' AS conf, 'capec_static' AS src
+		}
+		// AQUI ESTA LA MAGIA: AGRUPAMOS POR TTP (t) en lugar de por (v, t)
+		WITH t, collect({conf: conf, src: src})[0] AS map_info
 		RETURN
-		  count(CASE WHEN conf = 'high'   THEN 1 END) AS high_confidence,
-		  count(CASE WHEN conf = 'medium' THEN 1 END) AS medium_confidence,
-		  count(CASE WHEN src = 'capec_static'  THEN 1 END) AS capec_static,
-		  count(CASE WHEN src = 'llm_enriched'  THEN 1 END) AS llm_enriched
+		  count(CASE WHEN map_info.conf = 'high' THEN 1 END) AS high_confidence,
+		  count(CASE WHEN map_info.conf = 'medium' THEN 1 END) AS medium_confidence,
+		  count(CASE WHEN map_info.src = 'capec_static' THEN 1 END) AS capec_static,
+		  count(CASE WHEN map_info.src = 'llm_enriched' THEN 1 END) AS llm_enriched
 	`
 
-	topTTPsQuery := `
-		MATCH (v:Vulnerability)
-		WHERE $project_id = 0 OR toString($project_id) = "0" OR
-		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
-		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
-		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
-		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
-		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
-		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) } OR
-		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) }
-		OPTIONAL MATCH (v)-[:MAPS_TO]->(t1:TTP)
-		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t2:TTP)
-		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t3:TTP)
-		WITH v, [t IN [t1, t2, t3] WHERE t IS NOT NULL] AS ttps_raw
-		UNWIND (CASE WHEN size(ttps_raw) > 0 THEN ttps_raw ELSE [null] END) AS t
-		WITH v, t WHERE t IS NOT NULL
+	topTTPsQuery := baseWhere + `
+		CALL {
+			WITH v MATCH (v)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(t:TTP) RETURN t
+			UNION
+			WITH v MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t:TTP) RETURN t
+			UNION
+			WITH v MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t:TTP) RETURN t
+		}
+		WITH t, count(DISTINCT v) AS cnt
 		RETURN
 		  coalesce(t.ttp_id, t.id, '') AS id,
 		  coalesce(t.name, '')          AS name,
 		  coalesce(t.tactic, '')        AS tactic,
-		  count(DISTINCT v)             AS cnt
+		  cnt
 		ORDER BY cnt DESC
 		LIMIT 10
 	`
@@ -1527,7 +1521,7 @@ func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (
 
 	_, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
 		res1, err := tx.Run(ctx, totalQuery, params)
-		if err != nil { return nil, err }
+		if err != nil { return nil, fmt.Errorf("ttp-stats totalQuery: %w", err) }
 		if res1.Next(ctx) {
 			rec := res1.Record()
 			if v, ok := rec.Get("total"); ok && v != nil { stats.TotalCVEs = int(v.(int64)) }
@@ -1537,7 +1531,7 @@ func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (
 		_, _ = res1.Consume(ctx)
 
 		res2, err := tx.Run(ctx, confidenceQuery, params)
-		if err != nil { return nil, err }
+		if err != nil { return nil, fmt.Errorf("ttp-stats confidenceQuery: %w", err) }
 		if res2.Next(ctx) {
 			rec := res2.Record()
 			if v, ok := rec.Get("high_confidence"); ok && v != nil { stats.HighConfidence = int(v.(int64)) }
@@ -1548,7 +1542,7 @@ func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (
 		_, _ = res2.Consume(ctx)
 
 		res3, err := tx.Run(ctx, topTTPsQuery, params)
-		if err != nil { return nil, err }
+		if err != nil { return nil, fmt.Errorf("ttp-stats topTTPsQuery: %w", err) }
 		for res3.Next(ctx) {
 			rec := res3.Record()
 			item := domain.TTPTopItem{}

@@ -2214,7 +2214,7 @@ func (o *Orchestrator) GetContainerByID(ctx context.Context, id string) (*domain
 
 func (o *Orchestrator) GetProjectByID(ctx context.Context, id int64) (*domain.Project, error) {
 	return o.projectPort.GetByID(ctx, id)
-
+}
 // GetTTPStats devuelve las métricas agregadas para el dashboard de inteligencia de amenazas.
 func (o *Orchestrator) GetTTPStats(ctx context.Context, projectID int64) (*domain.TTPStats, error) {
 	return o.infraPort.GetTTPStats(ctx, projectID)
