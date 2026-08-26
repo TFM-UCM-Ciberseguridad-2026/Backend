@@ -236,6 +236,7 @@ type InfrastructurePort interface {
 	// IsAnalysisPending comprueba si hay vulnerabilidades de red pendientes de enriquecimiento en background.
 	IsAnalysisPending(ctx context.Context, projectID int64) (bool, error)
 	ImportGraphData(ctx context.Context, data *domain.GraphData) error
+	GetPaginatedInventory(ctx context.Context, query domain.InventoryQuery) (*domain.PaginatedInventoryResponse, error)
 }
 
 // ContainerPort define las operaciones para gestionar imágenes y contenedores.

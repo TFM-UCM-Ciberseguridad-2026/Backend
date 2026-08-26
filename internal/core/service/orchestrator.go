@@ -2412,3 +2412,14 @@ func (o *Orchestrator) GetContainerByID(ctx context.Context, id string) (*domain
 func (o *Orchestrator) GetProjectByID(ctx context.Context, id int64) (*domain.Project, error) {
 	return o.projectPort.GetByID(ctx, id)
 }
+
+// GetPaginatedInventory consulta el inventario paginado (50 elementos por página por defecto).
+func (o *Orchestrator) GetPaginatedInventory(ctx context.Context, query domain.InventoryQuery) (*domain.PaginatedInventoryResponse, error) {
+	if query.Page < 1 {
+		query.Page = 1
+	}
+	if query.Limit <= 0 {
+		query.Limit = 50
+	}
+	return o.infraPort.GetPaginatedInventory(ctx, query)
+}
