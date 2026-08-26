@@ -85,6 +85,22 @@ func GenerateCPE23(part, vendor, product, version string) string {
 	cleanProduct := cleanCPEToken(product)
 	cleanVersion := cleanCPEToken(version)
 
+	// Normalización canónica de productos de Microsoft Windows para evitar colisiones con CPEs heredados ("windows")
+	if cpePart == "o" && (cleanVendor == "microsoft" || cleanVendor == "windows" || cleanVendor == "*") {
+		if cleanVendor == "windows" || cleanVendor == "*" {
+			cleanVendor = "microsoft"
+		}
+		if cleanProduct == "windows" || cleanProduct == "win" {
+			if strings.HasPrefix(cleanVersion, "10.0.") || strings.HasPrefix(cleanVersion, "10.") || strings.Contains(cleanVersion, "10_0") {
+				cleanProduct = "windows_10"
+			} else if strings.HasPrefix(cleanVersion, "11.0.") || strings.HasPrefix(cleanVersion, "11.") {
+				cleanProduct = "windows_11"
+			} else if strings.HasPrefix(cleanVersion, "6.1.") {
+				cleanProduct = "windows_7"
+			}
+		}
+	}
+
 	return fmt.Sprintf("cpe:2.3:%s:%s:%s:%s:*:*:*:*:*:*:*", cpePart, cleanVendor, cleanProduct, cleanVersion)
 }
 

@@ -98,7 +98,8 @@ type NistConfigDTO struct {
 
 type NistNodeDTO struct {
 	CPEMatch []struct {
-		Criteria string `json:"criteria"`
+		Vulnerable bool   `json:"vulnerable"`
+		Criteria   string `json:"criteria"`
 	} `json:"cpeMatch"`
 }
 
@@ -395,12 +396,110 @@ func (a *NistAPIAdapter) FetchByCPE(ctx context.Context, cpe string) ([]domain.V
 
 	vulnerabilities := make([]domain.Vulnerability, 0, len(apiResponse.Vulnerabilities))
 	for _, item := range apiResponse.Vulnerabilities {
+		if !isVulnerableTargetForCPE(item, cpe) {
+			continue
+		}
 		vulnerabilities = append(vulnerabilities, toDomainEntity(item))
 	}
 
 	a.setCPECache(cpe, vulnerabilities)
 	return vulnerabilities, nil
 }
+
+// getPrimaryVulnerableCPE obtiene el componente primario marcado como vulnerable=true en las configuraciones del CVE.
+func getPrimaryVulnerableCPE(dto NistVulnerabilityDTO) (part, vendor, product string, criteria string) {
+	for _, config := range dto.CVE.Configurations {
+		for _, node := range config.Nodes {
+			for _, match := range node.CPEMatch {
+				if match.Vulnerable && match.Criteria != "" {
+					parts := strings.Split(match.Criteria, ":")
+					if len(parts) >= 5 {
+						return strings.ToLower(parts[2]), strings.ToLower(parts[3]), strings.ToLower(parts[4]), match.Criteria
+					}
+				}
+			}
+		}
+	}
+	return "", "", "", ""
+}
+
+// isVulnerableTargetForCPE comprueba si el CPE buscado corresponde a un componente marcado como vulnerable=true
+// en las configuraciones del CVE. Si las configuraciones del CVE no coinciden con el CPE objetivo o si el CPE
+// objetivo solo aparece marcado como entorno anfitrión no vulnerable (vulnerable=false), la vulnerabilidad se descarta.
+// Además, evita asignar vulnerabilidades primarias de aplicación (part='a') a un sistema operativo objetivo (part='o').
+func isVulnerableTargetForCPE(dto NistVulnerabilityDTO, targetCPE string) bool {
+	targetParts := strings.Split(targetCPE, ":")
+	if len(targetParts) < 5 {
+		return true
+	}
+	targetPart := strings.ToLower(targetParts[2])
+	targetVendor := strings.ToLower(targetParts[3])
+	targetProduct := strings.ToLower(targetParts[4])
+
+	primaryPart, primaryVendor, primaryProduct, _ := getPrimaryVulnerableCPE(dto)
+
+	// Regla de desambiguación: Si escaneamos un Sistema Operativo (part == "o"), la vulnerabilidad no debe
+	// pertenecer primariamente a una aplicación de terceros (part == "a") cuyo fabricante/producto difiera del SO.
+	if targetPart == "o" {
+		if primaryPart == "a" && (primaryVendor != targetVendor && primaryProduct != targetProduct) {
+			return false
+		}
+	}
+
+	// Si escaneamos una Aplicación (part == "a"), descartar vulnerabilidades primarias de Hardware (part == "h").
+	if targetPart == "a" && primaryPart == "h" {
+		return false
+	}
+
+	hasMatchingCriteria := false
+	isVulnerableMatch := false
+
+	for _, config := range dto.CVE.Configurations {
+		for _, node := range config.Nodes {
+			for _, match := range node.CPEMatch {
+				mParts := strings.Split(match.Criteria, ":")
+				if len(mParts) < 5 {
+					continue
+				}
+				mPart := strings.ToLower(mParts[2])
+				mVendor := strings.ToLower(mParts[3])
+				mProduct := strings.ToLower(mParts[4])
+
+				vendorMatch := mVendor == "*" || targetVendor == "*" || mVendor == targetVendor
+				productMatch := mProduct == "*" || targetProduct == "*" || mProduct == targetProduct
+				partMatch := mPart == "*" || targetPart == "*" || mPart == targetPart
+
+				// Coincidencia especial: Para activos SO (part == "o"), el kernel Linux base (vendor="linux", product="linux_kernel")
+				// también se considera coincidente con distribuciones Linux (como canonical/ubuntu_linux).
+				if targetPart == "o" && mPart == "o" {
+					if (mVendor == "linux" && mProduct == "linux_kernel") || (targetVendor == "linux" && targetProduct == "linux_kernel") {
+						vendorMatch = true
+						productMatch = true
+					}
+				}
+
+				if partMatch && vendorMatch && productMatch {
+					hasMatchingCriteria = true
+					if match.Vulnerable {
+						isVulnerableMatch = true
+					}
+				}
+			}
+		}
+	}
+
+	if len(dto.CVE.Configurations) > 0 {
+		if !hasMatchingCriteria {
+			return false
+		}
+		if !isVulnerableMatch {
+			return false
+		}
+	}
+	return true
+}
+
+
 
 // FetchByDate consulta la API REST oficial de NIST NVD v2.0 usando fechas de modificación.
 // Usa lastModStartDate y lastModEndDate. Las fechas deben estar en formato ISO 8601.
@@ -572,9 +671,25 @@ func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 		cweList = []string{}
 	}
 
-	// 4. Extraer el primer CPE identificable
+	// 4. Extraer el primer CPE identificable que sea realmente el objetivo vulnerable (vulnerable=true)
 	cpe := "N/A"
-	if len(cve.Configurations) > 0 && len(cve.Configurations[0].Nodes) > 0 && len(cve.Configurations[0].Nodes[0].CPEMatch) > 0 {
+	for _, config := range cve.Configurations {
+		for _, node := range config.Nodes {
+			for _, match := range node.CPEMatch {
+				if match.Vulnerable && match.Criteria != "" {
+					cpe = match.Criteria
+					break
+				}
+			}
+			if cpe != "N/A" {
+				break
+			}
+		}
+		if cpe != "N/A" {
+			break
+		}
+	}
+	if cpe == "N/A" && len(cve.Configurations) > 0 && len(cve.Configurations[0].Nodes) > 0 && len(cve.Configurations[0].Nodes[0].CPEMatch) > 0 {
 		cpe = cve.Configurations[0].Nodes[0].CPEMatch[0].Criteria
 	}
 

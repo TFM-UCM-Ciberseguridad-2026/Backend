@@ -76,8 +76,11 @@ func (s *CPEService) ResolveSoftwareCPE(ctx context.Context, software *domain.So
 		}, nil
 	}
 
-	// Si ya viene verificado manualmente por el usuario
-	if software.CPEStatus == domain.CPEStatusVerifiedManual && software.CPE != "" {
+	// Si ya viene un CPE especificado explícitamente (ej. seleccionado por el usuario desde la UI)
+	if software.CPE != "" {
+		if software.CPEStatus == "" {
+			software.CPEStatus = domain.CPEStatusVerifiedManual
+		}
 		return &domain.CPEMatchResult{
 			CPE:       software.CPE,
 			CPEStatus: software.CPEStatus,
@@ -101,25 +104,39 @@ func (s *CPEService) ResolveSoftwareCPE(ctx context.Context, software *domain.So
 		candidates, err := s.cpeResolver.SearchCPECandidates(ctx, software.Vendor, software.Name, software.Version)
 		if err == nil && len(candidates) > 0 {
 			best := candidates[0]
+			if best.MatchType == "EXACT_MATCH" || !best.RequiresUserConfirmation {
+				software.CPE = best.CPE
+				software.Vendor = best.Vendor
+				software.Name = best.Product
+				software.CPEStatus = domain.CPEStatusVerifiedAuto
+				return &domain.CPEMatchResult{
+					CPE:              best.CPE,
+					CPEStatus:        domain.CPEStatusVerifiedAuto,
+					CanonicalVendor:  best.Vendor,
+					CanonicalProduct: best.Product,
+				}, nil
+			}
+
+			// Coincidencia difusa: requiere confirmación del usuario y NO debe marcarse como VERIFIED_AUTO
 			software.CPE = best.CPE
-			software.Vendor = best.Vendor
-			software.Name = best.Product
-			software.CPEStatus = domain.CPEStatusVerifiedAuto
+			software.CPEStatus = domain.CPEStatusPendingConfirmation
 			return &domain.CPEMatchResult{
 				CPE:              best.CPE,
-				CPEStatus:        domain.CPEStatusVerifiedAuto,
+				CPEStatus:        domain.CPEStatusPendingConfirmation,
+				SuggestedCPE:     best.CPE,
+				Suggestions:      candidates,
 				CanonicalVendor:  best.Vendor,
 				CanonicalProduct: best.Product,
 			}, nil
 		}
 	}
 
-	// Sin coincidencias externas: usar sintáctico por defecto
+	// Sin coincidencias externas: usar sintáctico y marcar como NOT_IN_NVD si no fue validado en NVD
 	software.CPE = syntheticCPE
-	software.CPEStatus = domain.CPEStatusVerifiedAuto
+	software.CPEStatus = domain.CPEStatusNotInNVD
 	return &domain.CPEMatchResult{
 		CPE:       syntheticCPE,
-		CPEStatus: domain.CPEStatusVerifiedAuto,
+		CPEStatus: domain.CPEStatusNotInNVD,
 	}, nil
 }
 
