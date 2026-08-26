@@ -91,7 +91,6 @@ type Orchestrator struct {
 	CapecReady          chan struct{}
 }
 
-
 func NewOrchestrator(
 	projectPort ports.ProjectPort,
 	endpointPort ports.EndpointPort,
@@ -141,7 +140,6 @@ func (o *Orchestrator) WithCPEResolution(resolver ports.CPEResolverPort) *Orches
 	return o
 }
 
-
 // WithCPEService inyecta directamente un CPEService previamente instanciado
 func (o *Orchestrator) WithCPEService(cpeService *CPEService) *Orchestrator {
 	o.cpeService = cpeService
@@ -155,8 +153,6 @@ func (o *Orchestrator) WithCPEGuesser(guesser ports.CPEGuesserPort) *Orchestrato
 	}
 	return o
 }
-
-
 
 // WithRisk inyecta los componentes del motor de riesgo y devuelve el mismo orquestador.
 // Permite que el código existente siga usando NewOrchestrator sin cambios.
@@ -403,7 +399,6 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 		return err
 	}
 
-
 	if installation.InstallationID == "" {
 		installation.InstallationID = o.nextInstallationID()
 	}
@@ -436,7 +431,6 @@ func (o *Orchestrator) RegisterContainerSoftwareInstallation(ctx context.Context
 	// 1. Resolver CPE multinivel y aplicar alias guardados
 	_, _ = o.ResolveSoftwareCPE(ctx, software, true)
 
-
 	if software.SoftwareID == 0 {
 		swID, err := o.nextNodeID(ctx, "Software")
 		if err != nil {
@@ -449,7 +443,6 @@ func (o *Orchestrator) RegisterContainerSoftwareInstallation(ctx context.Context
 	if err := o.softwarePort.Save(ctx, software); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
-
 
 	if installation.InstallationID == "" {
 
@@ -467,7 +460,6 @@ func (o *Orchestrator) RegisterContainerSoftwareInstallation(ctx context.Context
 	}
 	return o.relationshipPort.LinkInstallationToSoftware(ctx, installation.InstallationID, software.SoftwareID)
 }
-
 
 // GenerateFinding registra un hallazgo de vulnerabilidad (Finding) a una instalación específica.
 func (o *Orchestrator) GenerateFinding(ctx context.Context, installationID string, finding *domain.Finding) error {
@@ -592,7 +584,6 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		}
 	}
 
-
 	// 3. Determinar el límite de vulnerabilidades a procesar
 	limit := autoScanVulnerabilityLimit
 	if len(limits) > 0 && limits[0] > 0 && limits[0] < limit {
@@ -661,7 +652,7 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 			result.FindingsExisting++
 		}
 	}
-	
+
 	// Lanzar barrido inteligente para mapear solo las vulnerabilidades nuevas de este escaneo
 	go o.StartBackgroundTTPMapping(0)
 
@@ -1048,9 +1039,16 @@ func (o *Orchestrator) DeclarePatchApplied(
 
 	// Un parche oficial cierra el finding; una mitigación lo deja abierto con menos riesgo.
 	status := "OPEN"
-	if level.FullyRemediates() {
-		status = "PATCHED"
+
+	switch level {
+	case domain.RemediationLevelOfficialFix:
+			status = "PATCHED"
+	case domain.RemediationLevelTemporaryFix, domain.RemediationLevelWorkaround:
+			status = "MITIGATED"
+	case domain.RemediationLevelUnavailable:
+			status = "OPEN"
 	}
+
 
 	affected, err := o.findingPort.ApplyRemediationByInstallationAndCVE(
 		ctx, installationID, cveID, remediationFactor, status,
@@ -1309,7 +1307,8 @@ func (o *Orchestrator) GetAppliedPatchHistory(ctx context.Context, installationI
 // Log4Shell en 2.3.1 / 2.12.2 / 2.15.0) se persisten todas separadas por coma: sin conocer
 // la rama del software instalado no podemos elegir una, y descartar el resto perdería
 // información necesaria para calcular el salto de versión.
-func (o *Orchestrator) EnrichPatchesFromProvider(ctx context.Context, cveID string) (*domain.PatchIntelligence, error) {
+func (o *Orchestrator) EnrichPatchesFromProvider(ctx context.Context, cveID string) (*domain.PatchIntelligence,
+	error) {
 	if cveID == "" {
 		return nil, fmt.Errorf("cve_id vacío")
 	}
@@ -1323,6 +1322,12 @@ func (o *Orchestrator) EnrichPatchesFromProvider(ctx context.Context, cveID stri
 	}
 	if info == nil {
 		return nil, nil
+	}
+
+	if len(info.Patches) == 0 && len(info.FixedVersions) > 0 {
+		if synthetic := syntheticPatchFromFixedVersions(cveID, info.FixedVersions); synthetic != nil {
+			info.Patches = append(info.Patches, *synthetic)
+		}
 	}
 
 	if len(info.Patches) > 0 {
@@ -1969,8 +1974,8 @@ func (o *Orchestrator) StartTTPWorker(ctx context.Context) {
 			var task ttpTask
 			var ok bool
 
-			// Prevención de Inanición (Starvation): 
-			// Si hemos procesado 10 tareas de alta prioridad seguidas, intentamos 
+			// Prevención de Inanición (Starvation):
+			// Si hemos procesado 10 tareas de alta prioridad seguidas, intentamos
 			// forzar el consumo de 1 tarea de baja prioridad si está disponible.
 			if highCount >= 10 {
 				select {
@@ -2112,7 +2117,7 @@ func (o *Orchestrator) endProcessingCVE(cveID string, projectID int64) {
 	defer o.ttpSync.mu.Unlock()
 	state.CurrentCVE = ""
 	delete(state.QueuedCVEs, cveID)
-	
+
 	if len(state.QueuedCVEs) == 0 {
 		state.Processing = false
 	}
@@ -2197,7 +2202,7 @@ func (o *Orchestrator) addTTPLog(msg string, projectID int64) {
 	defer o.ttpSync.mu.Unlock()
 	logLine := fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), msg)
 	state.Logs = append(state.Logs, logLine)
-	
+
 	prefix := "[TTP-BG-GLOBAL]"
 	if projectID > 0 {
 		prefix = fmt.Sprintf("[TTP-PROJ-%d]", projectID)
@@ -2378,6 +2383,18 @@ func (o *Orchestrator) RefreshProjectPatches(ctx context.Context, projectID int6
 	}
 
 	return result, nil
+}
+
+// SyntheticPatchFromFixedVersions genera un objeto Patch sintético basado en la existencia de versiones fijas para un CVE dado.
+func syntheticPatchFromFixedVersions(cveID string, fixedVersions []domain.FixedVersion) *domain.Patch {
+	if strings.TrimSpace(cveID) == "" || len(fixedVersions) == 0 {
+		return nil
+	}
+
+	return &domain.Patch{
+		Description: fmt.Sprintf("Mitigación por actualización de versión (%s)", cveID),
+		URL:         fmt.Sprintf("fixed-version://%s", cveID),
+	}
 }
 
 func (o *Orchestrator) GetTTPMatrix(ctx context.Context, projectID *int64) ([]domain.TTPMatrixItem, error) {
