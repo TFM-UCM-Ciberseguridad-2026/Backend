@@ -148,5 +148,8 @@ func NewRouter(h *OrchestratorHandler, hub *WSHub) *http.ServeMux {
 	// Búsqueda y Autocompletado de CPEs para la UI
 	mux.HandleFunc("GET /api/cpe/search", h.SearchCPE)
 
+	/* GET /api/inventory: Devuelve la lista paginada de activos de inventario según filtros y ordenación. */
+	mux.HandleFunc("GET /api/inventory", h.GetInventory)
+
 	return mux
 }
