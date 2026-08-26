@@ -444,29 +444,40 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, projectID *int64, page int
 		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset))
 		MATCH (asset)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
-		  AND ($project_id IS NULL OR EXISTS { (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e) })
+		AND ($project_id IS NULL OR EXISTS { (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e) })
 		OPTIONAL MATCH (asset)-[:INSTANCE_OF]->(s:Software)
 		OPTIONAL MATCH (c:Container)-[:HAS_INSTALLATION|USES_IMAGE]->(asset)
 		OPTIONAL MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
+		OPTIONAL MATCH (p:Patch)-[:FIXES]->(v)
+		WITH f, v, asset, s, e, c, rem, collect(p.url) AS patch_urls
+		WITH f, v, asset, s, e, c, rem, patch_urls,
+			coalesce(rem.fixed_version, v.fixed_version, '') AS fixed_version
 		RETURN f.id                AS finding_id,
-		       f.status            AS status,
-		       v.cve_id            AS cve_id,
-		       asset.id            AS installation_id,
-		       coalesce(s.name, asset.name, asset.id) AS software_name,
-		       coalesce(s.version, 'N/A') AS software_version,
-		       s.vendor            AS software_vendor,
-		       s.cpe               AS software_cpe,
-		       coalesce(rem.fixed_version, v.fixed_version) AS fixed_version,
-		       e.id                AS endpoint_id,
-		       e.hostname          AS hostname,
-		       e.environment       AS environment,
-		       c IS NOT NULL       AS in_container,
-		       c.name              AS container_name,
-		       f.risk_score        AS risk_score,
-		       f.asset_criticality AS asset_criticality,
-		       f.urgency_boost     AS urgency_boost,
-		       f.priority_score    AS priority_score,
-		       EXISTS { (:Patch)-[:FIXES]->(v) } AS patch_available
+			f.status            AS status,
+			v.cve_id            AS cve_id,
+			asset.id            AS installation_id,
+			coalesce(s.name, asset.name, asset.id) AS software_name,
+			coalesce(s.version, 'N/A') AS software_version,
+			s.vendor            AS software_vendor,
+			s.cpe               AS software_cpe,
+			fixed_version       AS fixed_version,
+			e.id                AS endpoint_id,
+			e.hostname          AS hostname,
+			e.environment       AS environment,
+			c IS NOT NULL       AS in_container,
+			c.name              AS container_name,
+			f.risk_score        AS risk_score,
+			f.asset_criticality AS asset_criticality,
+			f.urgency_boost     AS urgency_boost,
+			f.priority_score    AS priority_score,
+			size(patch_urls) > 0 OR fixed_version <> '' AS patch_available,
+			CASE
+				WHEN size(patch_urls) > 0 AND all(url IN patch_urls WHERE url STARTS WITH 'fixed-version://') THEN
+				'WORKAROUND'
+				WHEN size(patch_urls) > 0 THEN 'OFFICIAL_FIX'
+				WHEN fixed_version <> '' THEN 'WORKAROUND'
+				ELSE 'UNAVAILABLE'
+			END AS remediation_kind
 		ORDER BY coalesce(priority_score, 0.0) DESC, coalesce(risk_score, 0.0) DESC, finding_id ASC
 		SKIP $offset
 		LIMIT $limit
@@ -517,6 +528,7 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, projectID *int64, page int
 				UrgencyBoost:     getFloat64(props, "urgency_boost"),
 				PriorityScore:    getFloat64(props, "priority_score"),
 				PatchAvailable:   getBool(props, "patch_available"),
+			  	RemediationKind: getString(props, "remediation_kind"),
 			})
 		}
 		return items, result.Err()

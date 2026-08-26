@@ -36,6 +36,9 @@ type PatchQueueItem struct {
 	// PatchAvailable indica si hay un parche registrado para el CVE. Un finding muy
 	// prioritario sin parche disponible no es accionable todavía.
 	PatchAvailable bool `json:"patch_available"`
+
+	// RemediationKind indica si la remediación es un parche oficial, una mitigación o una
+	RemediationKind string `json:"remediation_kind"`
 }
 
 type PatchQueueResponse struct {

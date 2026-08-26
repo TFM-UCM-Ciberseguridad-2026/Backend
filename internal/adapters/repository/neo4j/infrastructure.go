@@ -28,36 +28,118 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 	// Consulta de lectura optimizada para obtener los nodos, relaciones y mapeos TTP de la infraestructura
 
 	query := `
-		MATCH (n)
-		WHERE NOT (n:ThreatActor OR n:TTP OR n:IPAddress)
-		OPTIONAL MATCH (n)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(t1:TTP) WHERE "Vulnerability" IN labels(n)
-		WITH n, collect(DISTINCT t1) AS t1List
-		OPTIONAL MATCH (n)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t2:TTP) WHERE "Vulnerability" IN labels(n)
-		WITH n, t1List, collect(DISTINCT t2) AS t2List
-		OPTIONAL MATCH (n)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t3:TTP) WHERE "Vulnerability" IN labels(n)
-		WITH n, t1List, t2List, collect(DISTINCT t3) AS t3List
-		WITH n, t1List + t2List + t3List AS combinedTTPs
-		UNWIND case when size(combinedTTPs) > 0 then combinedTTPs else [null] end AS t
-		WITH n, collect(DISTINCT case when t is not null and t.ttp_id is not null then {ttp_id: t.ttp_id, name: coalesce(t.name, ''), tactic: coalesce(t.tactic, ''), description: coalesce(t.description, '')} else null end) AS inferredTTPs
-		WITH n, [x IN inferredTTPs WHERE x IS NOT NULL] AS cleanTTPs
-		WITH collect({
-			id: elementId(n), 
-			labels: labels(n), 
-			properties: n {.*, ttps: cleanTTPs}, 
-			hasVuln: COUNT { (n)-[:OF_VULNERABILITY]->(:Vulnerability) } > 0
-		}) AS nodes
-		OPTIONAL MATCH (s)-[rel]->(t)
-		WHERE NOT (startNode(rel):ThreatActor OR startNode(rel):TTP OR startNode(rel):IPAddress OR endNode(rel):ThreatActor OR endNode(rel):TTP OR endNode(rel):IPAddress)
-		WITH nodes, collect({
-			id: elementId(rel),
-			type: type(rel),
-			source: elementId(startNode(rel)),
-			target: elementId(endNode(rel)),
-			properties: properties(rel)
-		}) AS cleanRels
-		OPTIONAL MATCH (n)-[:HAS_IP]->(ip:IPAddress) WHERE n:Endpoint OR n:Container
-		WITH nodes, cleanRels, collect(case when n is null or ip is null then null else {node_id: elementId(n), ip: coalesce(ip.ip, ""), vlan_id: coalesce(ip.vlan_id, 0)} end) AS ipMaps
-		RETURN nodes, cleanRels AS relationships, [] AS ttp_mappings, [i in ipMaps WHERE i IS NOT NULL] AS ip_mappings
+			MATCH (n)
+			WHERE NOT (n:ThreatActor OR n:TTP OR n:IPAddress)
+
+			OPTIONAL MATCH (n)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(t1:TTP)
+			WHERE "Vulnerability" IN labels(n)
+			WITH n, collect(DISTINCT t1) AS t1List
+
+			OPTIONAL MATCH (n)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t2:TTP)
+			WHERE "Vulnerability" IN labels(n)
+			WITH n, t1List, collect(DISTINCT t2) AS t2List
+
+			OPTIONAL MATCH (n)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t3:TTP)
+			WHERE "Vulnerability" IN labels(n)
+			WITH n, t1List, t2List, collect(DISTINCT t3) AS t3List
+
+			WITH n, t1List + t2List + t3List AS combinedTTPs
+			UNWIND CASE WHEN size(combinedTTPs) > 0 THEN combinedTTPs ELSE [null] END AS t
+
+			WITH n,
+				collect(DISTINCT CASE
+				WHEN t IS NOT NULL AND t.ttp_id IS NOT NULL
+				THEN {
+					ttp_id: t.ttp_id,
+					name: coalesce(t.name, ''),
+					tactic: coalesce(t.tactic, ''),
+					description: coalesce(t.description, '')
+				}
+				ELSE null
+				END) AS inferredTTPs
+
+			WITH n, [x IN inferredTTPs WHERE x IS NOT NULL] AS cleanTTPs
+
+			OPTIONAL MATCH (n)-[:OF_VULNERABILITY]->(v:Vulnerability)
+			OPTIONAL MATCH (n)-[:HAS_REMEDIATION]->(rem:Remediation)
+			OPTIONAL MATCH (p:Patch)-[:FIXES]->(v)
+
+			WITH n,
+				cleanTTPs,
+				v,
+				rem,
+				collect(p.url) AS patchUrls
+
+			WITH n,
+				cleanTTPs,
+				patchUrls,
+				coalesce(rem.fixed_version, v.fixed_version, '') AS fixedVersion
+
+			WITH collect({
+					id: elementId(n),
+					labels: labels(n),
+					properties: n {
+							.*,
+							ttps: cleanTTPs,
+							patch_available: CASE
+									WHEN "Finding" IN labels(n)
+									THEN size(patchUrls) > 0 OR fixedVersion <> ''
+									ELSE null
+							END,
+							fixed_version: CASE
+									WHEN "Finding" IN labels(n)
+									THEN fixedVersion
+									ELSE null
+							END,
+							remediation_kind: CASE
+									WHEN NOT "Finding" IN labels(n) THEN null
+									WHEN size(patchUrls) > 0 AND all(url IN patchUrls WHERE url STARTS WITH 'fixed-version://') THEN 'WORKAROUND'
+									WHEN size(patchUrls) > 0 THEN 'OFFICIAL_FIX'
+									WHEN fixedVersion <> '' THEN 'WORKAROUND'
+									ELSE 'UNAVAILABLE'
+							END
+					},
+					hasVuln: COUNT { (n)-[:OF_VULNERABILITY]->(:Vulnerability) } > 0
+			}) AS nodes
+
+			OPTIONAL MATCH (s)-[rel]->(t)
+			WHERE NOT (
+					startNode(rel):ThreatActor OR
+					startNode(rel):TTP OR
+					startNode(rel):IPAddress OR
+					endNode(rel):ThreatActor OR
+					endNode(rel):TTP OR
+					endNode(rel):IPAddress
+			)
+
+			WITH nodes, collect({
+					id: elementId(rel),
+					type: type(rel),
+					source: elementId(startNode(rel)),
+					target: elementId(endNode(rel)),
+					properties: properties(rel)
+			}) AS cleanRels
+
+			OPTIONAL MATCH (n)-[:HAS_IP]->(ip:IPAddress)
+			WHERE n:Endpoint OR n:Container
+
+			WITH nodes,
+				cleanRels,
+				collect(
+				CASE
+					WHEN n IS NULL OR ip IS NULL THEN null
+					ELSE {
+					node_id: elementId(n),
+					ip: coalesce(ip.ip, ""),
+					vlan_id: coalesce(ip.vlan_id, 0)
+					}
+				END
+				) AS ipMaps
+
+			RETURN nodes,
+				cleanRels AS relationships,
+				[] AS ttp_mappings,
+				[i IN ipMaps WHERE i IS NOT NULL] AS ip_mappings
 	`
 
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
@@ -366,25 +448,26 @@ func (r *infrastructureRepo) GetTotalMitreTTPs(ctx context.Context) (int, error)
 // hasta los actores de amenaza, calculando qué APTs cubren más TTPs vinculadas a las CVEs detectadas.
 //
 // FIX 2026-08-23: Corregidos dos bugs que provocaban una discrepancia numérica respecto a GetTTPMatrix:
-//   Bug A (coalesce): coalesce(t1,t2,t3) solo devuelve el primer nodo no nulo por fila,
-//          descartando silenciosamente TTPs de rutas alternativas. Corregido usando
-//          combinación explícita: [t IN [t1,t2,t3] WHERE t IS NOT NULL].
-//          Diagnóstico diferencial: en el proyecto Simon (id=1787471430021), el Bug A
-//          NO contribuía a la discrepancia observada (67 con coalesce = 67 con combinación,
-//          ambos sobre ruta rígida). El 100% del hueco lo causaba el Bug B.
-//   Bug B (ruta rígida inicial): la cadena fija HAS_ENDPOINT→…→OF_VULNERABILITY no alcanzaba
-//          vulnerabilidades vinculadas por rutas alternativas (ej. contenedores).
-//   Bug C (fuga lateral por traversal dinámico): el intento de arreglar el Bug B usando un
-//          traversal de longitud variable sin restricción de tipo de relación ([*1..6])
-//          causó contaminación cruzada entre proyectos, saltando a través de nodos TTP 
-//          (vía TARGETS_VULN, datos de demo de cmd/Pruebas/Poblar_repo/main.go) hacia
-//          vulnerabilidades ajenas al proyecto.
-//          Fix Final: Se reemplazó el traversal genérico por 7 rutas EXACTAS de pertenencia
-//          usando EXISTS. Esto garantiza aislamiento criptográfico entre proyectos.
-//          Verificación final (Proyecto Simon, id=1787471430021): Tras aplicar las rutas
-//          exactas, el conteo purgado devuelve 16 vulnerabilidades legítimas (sin las 2
-//          de demo filtradas) y total_infra_ttps=67, que es el número correcto real.
-//          Ambos GetTopAPTs y GetTTPMatrix coinciden ahora en este valor corregido.
+//
+//	Bug A (coalesce): coalesce(t1,t2,t3) solo devuelve el primer nodo no nulo por fila,
+//	       descartando silenciosamente TTPs de rutas alternativas. Corregido usando
+//	       combinación explícita: [t IN [t1,t2,t3] WHERE t IS NOT NULL].
+//	       Diagnóstico diferencial: en el proyecto Simon (id=1787471430021), el Bug A
+//	       NO contribuía a la discrepancia observada (67 con coalesce = 67 con combinación,
+//	       ambos sobre ruta rígida). El 100% del hueco lo causaba el Bug B.
+//	Bug B (ruta rígida inicial): la cadena fija HAS_ENDPOINT→…→OF_VULNERABILITY no alcanzaba
+//	       vulnerabilidades vinculadas por rutas alternativas (ej. contenedores).
+//	Bug C (fuga lateral por traversal dinámico): el intento de arreglar el Bug B usando un
+//	       traversal de longitud variable sin restricción de tipo de relación ([*1..6])
+//	       causó contaminación cruzada entre proyectos, saltando a través de nodos TTP
+//	       (vía TARGETS_VULN, datos de demo de cmd/Pruebas/Poblar_repo/main.go) hacia
+//	       vulnerabilidades ajenas al proyecto.
+//	       Fix Final: Se reemplazó el traversal genérico por 7 rutas EXACTAS de pertenencia
+//	       usando EXISTS. Esto garantiza aislamiento criptográfico entre proyectos.
+//	       Verificación final (Proyecto Simon, id=1787471430021): Tras aplicar las rutas
+//	       exactas, el conteo purgado devuelve 16 vulnerabilidades legítimas (sin las 2
+//	       de demo filtradas) y total_infra_ttps=67, que es el número correcto real.
+//	       Ambos GetTopAPTs y GetTTPMatrix coinciden ahora en este valor corregido.
 func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int, projectID int64) ([]domain.APTThreatResult, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
