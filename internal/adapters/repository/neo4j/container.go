@@ -299,10 +299,18 @@ func (r *containerRepo) GetContainer(ctx context.Context, containerID string) (*
 				if val == nil {
 					return 0
 				}
-				if i, ok := val.(int64); ok {
-					return i
+				switch v := val.(type) {
+				case int64:
+					return v
+				case float64:
+					return int64(v)
+				case int:
+					return int64(v)
+				case int32:
+					return int64(v)
+				default:
+					return 0
 				}
-				return 0
 			}
 
 			imgID, _ := record.Get("image_id")
@@ -319,14 +327,32 @@ func (r *containerRepo) GetContainer(ctx context.Context, containerID string) (*
 			}
 
 			return &domain.Container{
-				ContainerID:     getString(props["id"]),
-				Name:            getString(props["name"]),
-				State:           getString(props["state"]),
-				RiskScore:       getFloat(props["risk_score"]),
-				InternetExposed: getBool(props["internet_exposed"]),
-				Privileged:      getBool(props["privileged"]),
-				ImageID:         getString(imgID),
-				HostID:          getInt(hostID),
+				ContainerID:                 getString(props["id"]),
+				Name:                        getString(props["name"]),
+				State:                       getString(props["state"]),
+				RiskScore:                   getFloat(props["risk_score"]),
+				RiskTier:                    getString(props["risk_tier"]),
+				PriorityScore:               getFloat(props["priority_score"]),
+				PriorityTier:                getString(props["priority_tier"]),
+				TechnicalDriverType:         getString(props["technical_driver_type"]),
+				TechnicalDriverAssetID:      getString(props["technical_driver_asset_id"]),
+				TechnicalDriverAssetName:    getString(props["technical_driver_asset_name"]),
+				TechnicalDriverFindingID:    getInt(props["technical_driver_finding_id"]),
+				TechnicalDriverCVEID:        getString(props["technical_driver_cve_id"]),
+				TechnicalDriverRiskScore:    getFloat(props["technical_driver_risk_score"]),
+				PriorityDriverType:         getString(props["priority_driver_type"]),
+				PriorityDriverAssetID:      getString(props["priority_driver_asset_id"]),
+				PriorityDriverAssetName:    getString(props["priority_driver_asset_name"]),
+				PriorityDriverFindingID:    getInt(props["priority_driver_finding_id"]),
+				PriorityDriverCVEID:        getString(props["priority_driver_cve_id"]),
+				PriorityDriverPriorityScore: getFloat(props["priority_driver_priority_score"]),
+				RiskyAssetCount:             int(getInt(props["risky_asset_count"])),
+				RiskComputedAt:              getTimePtr(props, "risk_computed_at"),
+				PriorityComputedAt:          getTimePtr(props, "priority_computed_at"),
+				InternetExposed:             getBool(props["internet_exposed"]),
+				Privileged:                  getBool(props["privileged"]),
+				ImageID:                     getString(imgID),
+				HostID:                      getInt(hostID),
 			}, nil
 		}
 		return nil, nil
@@ -341,7 +367,83 @@ func (r *containerRepo) GetContainer(ctx context.Context, containerID string) (*
 	return res.(*domain.Container), nil
 }
 
-// LinkVulnerabilityToImage enlaza una imagen de contenedor con un CVE (descubierto por ejemplo por Docker Scout)
+// GetContainerIDsByImage devuelve los IDs de todos los contenedores que usan la imagen indicada.
+func (r *containerRepo) GetContainerIDsByImage(ctx context.Context, imageID string) ([]string, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (c:Container)-[:USES_IMAGE]->(ci:ContainerImage {id: $image_id})
+		RETURN c.id AS container_id
+	`
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"image_id": imageID})
+		if err != nil {
+			return nil, err
+		}
+		var ids []string
+		for result.Next(ctx) {
+			idVal, _ := result.Record().Get("container_id")
+			if s, ok := idVal.(string); ok {
+				ids = append(ids, s)
+			}
+		}
+		return ids, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []string{}, nil
+	}
+	return res.([]string), nil
+}
+
+// GetVulnerabilitiesByContainerImage devuelve las vulnerabilidades enlazadas a la imagen (inteligencia compartida).
+func (r *containerRepo) GetVulnerabilitiesByContainerImage(ctx context.Context, imageID string) ([]domain.Vulnerability, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (ci:ContainerImage {id: $image_id})-[:HAS_VULNERABILITY]->(v:Vulnerability)
+		RETURN properties(v) AS props
+	`
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"image_id": imageID})
+		if err != nil {
+			return nil, err
+		}
+		var vulns []domain.Vulnerability
+		for result.Next(ctx) {
+			rec := result.Record()
+			propsRaw, _ := rec.Get("props")
+			if props, ok := propsRaw.(map[string]any); ok {
+				vulns = append(vulns, domain.Vulnerability{
+					CVEID:       getString(props, "cve_id"),
+					Description: getString(props, "description"),
+					BaseScore:   getFloat64(props, "base_score"),
+					CVSSVector:  getString(props, "cvss_vector"),
+					NVDVector:   getString(props, "nvd_vector"),
+					CWE:         getStringSlice(props, "cwe"),
+					CPE:         getString(props, "cpe"),
+					Exploit:     getBool(props, "exploit"),
+					KEV:         getBool(props, "kev"),
+					EPSSScore:   getFloat64(props, "epss_score"),
+				})
+			}
+		}
+		return vulns, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.Vulnerability{}, nil
+	}
+	return res.([]domain.Vulnerability), nil
+}
+
+// LinkVulnerabilityToImage enlaza una imagen de contenedor con un CVE para inteligencia compartida (HAS_VULNERABILITY)
 func (r *containerRepo) LinkVulnerabilityToImage(ctx context.Context, imageID string, cveID string) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
@@ -349,17 +451,7 @@ func (r *containerRepo) LinkVulnerabilityToImage(ctx context.Context, imageID st
 	query := `
 		MATCH (ci:ContainerImage {id: $image_id})
 		MATCH (v:Vulnerability {cve_id: $cve_id})
-		MERGE (f:Finding {unique_ref: 'finding-' + $image_id + '-' + $cve_id})
-		ON CREATE SET f.id = id(f),
-		              f.status = 'OPEN',
-		              f.severity = coalesce(v.severity, 'CRITICAL'),
-		              f.risk_score = coalesce(v.base_score / 10.0, 0.98),
-		              f.impact_score = coalesce(v.base_score / 10.0, 0.98),
-		              f.likelihood = 1.0,
-		              f.exposure_factor = 1.0,
-		              f.remediation_factor = 1.0
-		MERGE (ci)-[:HAS_FINDING]->(f)
-		MERGE (f)-[:OF_VULNERABILITY]->(v)
+		MERGE (ci)-[:HAS_VULNERABILITY]->(v)
 	`
 	params := map[string]any{
 		"image_id": imageID,

@@ -856,7 +856,7 @@ func (o *Orchestrator) ComputeEndpointRisk(ctx context.Context, endpointID int64
 		priorityDriver = domain.SoftwareRiskSummary{}
 	}
 
-	return o.riskPort.UpdateEndpointRiskAndPriority(
+	if err := o.riskPort.UpdateEndpointRiskAndPriority(
 		ctx,
 		endpointID,
 		endpointRisk,
@@ -872,7 +872,19 @@ func (o *Orchestrator) ComputeEndpointRisk(ctx context.Context, endpointID int64
 		priorityDriver.PriorityScore,
 		priorityDriver.DriverCVEID,
 		riskySoftwareCount,
-	)
+	); err != nil {
+		return err
+	}
+
+	// 5. Recalcular el riesgo agregado de los contenedores alojados en este endpoint.
+	containerIDs, err := o.riskPort.GetContainerIDsByEndpoint(ctx, endpointID)
+	if err == nil {
+		for _, cid := range containerIDs {
+			_, _ = o.ComputeContainerRisk(ctx, cid)
+		}
+	}
+
+	return nil
 }
 
 // ComputeAllEndpointsRisk recalcula el riesgo de todos los endpoints (para el cron diario).
@@ -953,6 +965,134 @@ func (o *Orchestrator) ComputeSoftwareInstallationRisk(ctx context.Context, inst
 	}
 
 	return softwareRisk, nil
+}
+
+// ComputeContainerRisk recalcula y persiste el riesgo y la prioridad agregados de un contenedor.
+func (o *Orchestrator) ComputeContainerRisk(ctx context.Context, containerID string) (domain.ContainerRiskSummary, error) {
+	container, err := o.containerPort.GetContainer(ctx, containerID)
+	if err != nil || container == nil {
+		return domain.ContainerRiskSummary{}, fmt.Errorf("contenedor %s no encontrado: %w", containerID, err)
+	}
+
+	state := strings.ToLower(container.State)
+	// Si el contenedor está detenido/exited, conserva sus findings pero su riesgo operativo es 0.0
+	if state != "running" && state != "" {
+		summary := domain.ContainerRiskSummary{
+			ContainerID:   container.ContainerID,
+			ContainerName: container.Name,
+			State:         container.State,
+			RiskScore:     0.0,
+			RiskTier:      "LOW",
+			PriorityScore: 0.0,
+			PriorityTier:  "LOW",
+		}
+		_ = o.riskPort.UpdateContainerRiskAndPriority(ctx, summary)
+		return summary, nil
+	}
+
+	directFindings, err := o.riskPort.GetDirectFindingScoresByContainer(ctx, containerID)
+	if err != nil {
+		return domain.ContainerRiskSummary{}, fmt.Errorf("error obteniendo findings directos de contenedor %s: %w", containerID, err)
+	}
+
+	swSummaries, err := o.riskPort.GetSoftwareRiskSummariesByContainer(ctx, containerID)
+	if err != nil {
+		return domain.ContainerRiskSummary{}, fmt.Errorf("error obteniendo software summaries de contenedor %s: %w", containerID, err)
+	}
+
+	allRiskScores := make([]float64, 0, len(directFindings)+len(swSummaries))
+	allPriorityScores := make([]float64, 0, len(directFindings)+len(swSummaries))
+
+	var bestTechType, bestTechAssetID, bestTechAssetName, bestTechCVE string
+	var bestTechFindingID int64
+	var maxTechRisk float64 = -1
+
+	var bestPrioType, bestPrioAssetID, bestPrioAssetName, bestPrioCVE string
+	var bestPrioFindingID int64
+	var maxPrioScore float64 = -1
+
+	for _, df := range directFindings {
+		allRiskScores = append(allRiskScores, df.RiskScore)
+		allPriorityScores = append(allPriorityScores, df.PriorityScore)
+
+		if df.RiskScore > maxTechRisk {
+			maxTechRisk = df.RiskScore
+			bestTechType = "CONTAINER_IMAGE_FINDING"
+			bestTechAssetID = container.ContainerID
+			bestTechAssetName = container.Name
+			bestTechFindingID = df.FindingID
+			bestTechCVE = df.CVEID
+		}
+		if df.PriorityScore > maxPrioScore {
+			maxPrioScore = df.PriorityScore
+			bestPrioType = "CONTAINER_IMAGE_FINDING"
+			bestPrioAssetID = container.ContainerID
+			bestPrioAssetName = container.Name
+			bestPrioFindingID = df.FindingID
+			bestPrioCVE = df.CVEID
+		}
+	}
+
+	for _, sw := range swSummaries {
+		allRiskScores = append(allRiskScores, sw.RiskScore)
+		allPriorityScores = append(allPriorityScores, sw.PriorityScore)
+
+		if sw.RiskScore > maxTechRisk {
+			maxTechRisk = sw.RiskScore
+			bestTechType = "SOFTWARE_INSTALLATION"
+			bestTechAssetID = sw.InstallationID
+			bestTechAssetName = sw.SoftwareName
+			bestTechFindingID = sw.DriverFindingID
+			bestTechCVE = sw.DriverCVEID
+		}
+		if sw.PriorityScore > maxPrioScore {
+			maxPrioScore = sw.PriorityScore
+			bestPrioType = "SOFTWARE_INSTALLATION"
+			bestPrioAssetID = sw.InstallationID
+			bestPrioAssetName = sw.SoftwareName
+			bestPrioFindingID = sw.DriverFindingID
+			bestPrioCVE = sw.DriverCVEID
+		}
+	}
+
+	totalRisk := AggregateRiskScores(allRiskScores)
+	totalPriority := AggregateRiskScores(allPriorityScores)
+
+	summary := domain.ContainerRiskSummary{
+		ContainerID:                 container.ContainerID,
+		ContainerName:               container.Name,
+		State:                       container.State,
+		RiskScore:                   totalRisk,
+		RiskTier:                    ClassifyRiskTier(totalRisk),
+		PriorityScore:               totalPriority,
+		PriorityTier:                ClassifyRiskTier(totalPriority),
+		TechnicalDriverType:         bestTechType,
+		TechnicalDriverAssetID:      bestTechAssetID,
+		TechnicalDriverAssetName:    bestTechAssetName,
+		TechnicalDriverFindingID:    bestTechFindingID,
+		TechnicalDriverCVEID:        bestTechCVE,
+		TechnicalDriverRiskScore:    maxTechRisk,
+		PriorityDriverType:         bestPrioType,
+		PriorityDriverAssetID:      bestPrioAssetID,
+		PriorityDriverAssetName:    bestPrioAssetName,
+		PriorityDriverFindingID:    bestPrioFindingID,
+		PriorityDriverCVEID:        bestPrioCVE,
+		PriorityDriverPriorityScore: maxPrioScore,
+		RiskyAssetCount:             len(directFindings) + len(swSummaries),
+	}
+
+	if summary.TechnicalDriverRiskScore < 0 {
+		summary.TechnicalDriverRiskScore = 0
+	}
+	if summary.PriorityDriverPriorityScore < 0 {
+		summary.PriorityDriverPriorityScore = 0
+	}
+
+	if err := o.riskPort.UpdateContainerRiskAndPriority(ctx, summary); err != nil {
+		return domain.ContainerRiskSummary{}, fmt.Errorf("error persistiendo riesgo del contenedor %s: %w", containerID, err)
+	}
+
+	return summary, nil
 }
 
 // SyncNistDaily obtiene las vulnerabilidades modificadas en las últimas 24 horas y actualiza la BBDD.
@@ -1315,24 +1455,19 @@ func FilterFixedVersionForSoftware(rawFixedVersion, currentVersion, swName, swVe
 	return strings.Join(validEntries, ", ")
 }
 
-// GetPatchQueue devuelve los findings pendientes ordenados por prioridad de parcheo.
-// projectID nulo recorre toda la infraestructura.
-//
-// Clasifica cada entrada en el momento de servirla en lugar de leer un tier persistido:
-// así la cola queda consistente aunque el finding se haya calculado con un baremo
-// anterior.
-func (o *Orchestrator) GetPatchQueue(ctx context.Context, projectID *int64, page int, limit int) (*domain.PatchQueueResponse, error) {
+// GetPatchQueue devuelve los findings pendientes ordenados por prioridad de parcheo con soporte para filtrado avanzado, ordenación y paginación.
+func (o *Orchestrator) GetPatchQueue(ctx context.Context, query domain.PatchQueueQuery) (*domain.PatchQueueResponse, error) {
 	if o.riskPort == nil {
 		return nil, fmt.Errorf("el motor de riesgo no está configurado")
 	}
-	if page <= 0 {
-		page = 1
+	if query.Page <= 0 {
+		query.Page = 1
 	}
-	if limit <= 0 {
-		limit = 20
+	if query.Limit <= 0 {
+		query.Limit = 20
 	}
 
-	resp, err := o.riskPort.GetPatchQueue(ctx, projectID, page, limit)
+	resp, err := o.riskPort.GetPatchQueue(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("error obteniendo la cola de parcheo: %w", err)
 	}
@@ -1546,7 +1681,43 @@ func (o *Orchestrator) SaveContainerImage(ctx context.Context, image *domain.Con
 // SaveContainer registra una instancia de contenedor en ejecución en Neo4j,
 // asociándolo al Endpoint host y a la imagen base si existe.
 func (o *Orchestrator) SaveContainer(ctx context.Context, container *domain.Container) error {
-	return o.containerPort.SaveContainer(ctx, container)
+	if err := o.containerPort.SaveContainer(ctx, container); err != nil {
+		return err
+	}
+	// Sincronización automática de findings si la imagen ya tiene vulnerabilidades conocidas
+	if container.ImageID != "" {
+		vulns, err := o.containerPort.GetVulnerabilitiesByContainerImage(ctx, container.ImageID)
+		if err == nil && len(vulns) > 0 {
+			_ = o.syncContainerFindingsForImage(ctx, container.ImageID, vulns)
+		}
+	}
+	return nil
+}
+
+// syncContainerFindingsForImage sincroniza/materializa los findings contextuales para todos los contenedores que usan la imagen.
+func (o *Orchestrator) syncContainerFindingsForImage(ctx context.Context, imageID string, vulns []domain.Vulnerability) error {
+	containerIDs, err := o.containerPort.GetContainerIDsByImage(ctx, imageID)
+	if err != nil || len(containerIDs) == 0 {
+		return err
+	}
+
+	now := time.Now().UTC()
+	for _, cid := range containerIDs {
+		for _, v := range vulns {
+			finding := &domain.Finding{
+				FindingID:         0, // Asignado atómicamente en Cypher solo en ON CREATE SET
+				Status:            "OPEN",
+				FirstSeen:         now,
+				LastSeen:          &now,
+				ImpactScore:       v.BaseScore,
+				Likelihood:        0.5,
+				RemediationFactor: 1.0,
+				RiskScore:         v.BaseScore * 0.5,
+			}
+			_, _, _ = o.findingPort.EnsureForContainerImageContextAndCVE(ctx, cid, imageID, v.CVEID, finding)
+		}
+	}
+	return nil
 }
 
 // ScanAndSaveContainerImage escanea una imagen de contenedor usando el ScoutAdapter
@@ -1579,6 +1750,11 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 			scanCompletedAt := time.Now().UTC()
 			result.ScanCompletedAt = &scanCompletedAt
 			_ = o.updateContainerImageScanMetadata(ctx, imageID, result, scanStartedAt)
+
+			// Sincronizar findings contextuales para contenedores existentes en caso de cache hit
+			if vulns, err := o.containerPort.GetVulnerabilitiesByContainerImage(ctx, imageID); err == nil && len(vulns) > 0 {
+				_ = o.syncContainerFindingsForImage(ctx, imageID, vulns)
+			}
 			return result, nil
 		}
 	}
@@ -1591,10 +1767,9 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 	result.VulnerabilitiesFound = len(vulns)
 	result.TotalAvailable = len(vulns)
 
-	// 2. Guardar las vulnerabilidades y enlazarlas a la imagen de forma síncrona
+	// 2. Guardar inteligencia compartida (HAS_VULNERABILITY) y sincronizar findings por contenedor
 	var vulnsToEnrich []domain.Vulnerability
 	for _, v := range vulns {
-		// Obtener vulnerabilidad existente para no perder enriquecimiento previo (ej. NVD)
 		if existingVuln, err := o.vulnPort.GetByID(ctx, v.CVEID); err == nil && existingVuln != nil {
 			v.NVDEnriched = existingVuln.NVDEnriched
 			v.NVDEnrichedAt = existingVuln.NVDEnrichedAt
@@ -1615,44 +1790,19 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 			}
 		}
 
-		// Guardar Vulnerabilidad
-		err = o.saveVulnerabilityWithTTPs(ctx, &v)
-		if err != nil {
-			// Ignoramos error de duplicado
-		}
-		// Crear un Finding (Hallazgo) para esta imagen y vulnerabilidad
-		now := time.Now().UTC()
-		findingID, err := o.nextNodeID(ctx, "Finding")
-		if err != nil {
-			findingID = int64(rand.Int31n(1000000) + 1)
-		}
-		finding := &domain.Finding{
-			FindingID:         findingID,
-			Status:            "OPEN",
-			FirstSeen:         now,
-			LastSeen:          &now,
-			ImpactScore:       v.BaseScore,
-			Likelihood:        0.5,
-			RemediationFactor: 1.0,
-			RiskScore:         v.BaseScore * 0.5,
-		}
+		_ = o.saveVulnerabilityWithTTPs(ctx, &v)
+		_ = o.containerPort.LinkVulnerabilityToImage(ctx, imageID, v.CVEID)
 
-		_, created, err := o.findingPort.EnsureForContainerImageAndCVE(ctx, imageID, v.CVEID, finding)
-		if err != nil {
-			return nil, fmt.Errorf("error creando finding para imagen %s y CVE %s: %w", imageID, v.CVEID, err)
-		}
-		if created {
-			result.FindingsCreated++
-		} else {
-			result.FindingsExisting++
-		}
 		result.Processed++
-
-		// Filtrar para enriquecimiento asíncrono: no enriquecida o enriquecimiento NVD caducado.
 		if !isNVDEnrichmentFresh(v) {
 			vulnsToEnrich = append(vulnsToEnrich, v)
 		}
-		o.EnqueueCVE(v.CVEID, 0) // 0 = sin contexto de proyecto (cron Docker Scout)
+		o.EnqueueCVE(v.CVEID, 0)
+	}
+
+	// Materializar/Sincronizar los findings contextuales en todos los contenedores que usan la imagen
+	if len(vulns) > 0 {
+		_ = o.syncContainerFindingsForImage(ctx, imageID, vulns)
 	}
 
 	// Ordenar por BaseScore descendente (CRITICAL -> HIGH -> MEDIUM -> LOW) para enriquecer primero las más severas

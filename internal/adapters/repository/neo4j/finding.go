@@ -403,17 +403,19 @@ func (r *findingRepo) GetVulnerabilitiesByFinding(ctx context.Context, findingID
 	return res.([]domain.Vulnerability), nil
 }
 
-// EnsureForContainerImageAndCVE ensures that a finding exists for the given ContainerImage and CVE.
-func (r *findingRepo) EnsureForContainerImageAndCVE(ctx context.Context, imageID string, cveID string, f *domain.Finding) (*domain.Finding, bool, error) {
+// EnsureForContainerImageContextAndCVE crea o actualiza un finding contextual único para la combinación container_id + image_id + cve_id.
+func (r *findingRepo) EnsureForContainerImageContextAndCVE(ctx context.Context, containerID string, imageID string, cveID string, f *domain.Finding) (*domain.Finding, bool, error) {
 	now := time.Now().UTC()
-	findingKey := imageID + "|" + cveID
+	findingKey := containerID + "|" + imageID + "|" + cveID
 
 	query := `
-		MERGE (ci:ContainerImage {id: $image_id})
-		MERGE (v:Vulnerability {cve_id: $cve_id})
+		MATCH (c:Container {id: $container_id})-[:USES_IMAGE]->(ci:ContainerImage {id: $image_id})
+		MATCH (v:Vulnerability {cve_id: $cve_id})
+		OPTIONAL MATCH (f_max:Finding)
+		WITH c, ci, v, coalesce(max(f_max.id), 0) + 1 AS auto_id
 		MERGE (n:Finding {finding_key: $finding_key})
 		ON CREATE SET
-			n.id = $id,
+			n.id = CASE WHEN $id > 0 THEN $id ELSE auto_id END,
 			n.status = $status,
 			n.first_seen = $first_seen,
 			n.last_seen = $last_seen,
@@ -427,11 +429,15 @@ func (r *findingRepo) EnsureForContainerImageAndCVE(ctx context.Context, imageID
 			n.urgency_boost = $urgency_boost,
 			n.priority_score = $priority_score,
 			n.risk_computed_at = $risk_computed_at,
+			n.context_type = 'CONTAINER_IMAGE',
+			n.container_id = $container_id,
+			n.image_id = $image_id,
+			n.source = 'DOCKER_SCOUT',
 			n._ensure_created = true
 		ON MATCH SET
 			n.last_seen = $now,
 			n._ensure_created = false
-		MERGE (ci)-[:HAS_FINDING]->(n)
+		MERGE (c)-[:HAS_FINDING]->(n)
 		MERGE (n)-[:OF_VULNERABILITY]->(v)
 		WITH n, n._ensure_created AS created
 		REMOVE n._ensure_created
@@ -450,6 +456,7 @@ func (r *findingRepo) EnsureForContainerImageAndCVE(ctx context.Context, imageID
 	}
 
 	params := map[string]any{
+		"container_id":       containerID,
 		"image_id":           imageID,
 		"cve_id":             cveID,
 		"finding_key":        findingKey,
@@ -487,7 +494,7 @@ func (r *findingRepo) EnsureForContainerImageAndCVE(ctx context.Context, imageID
 				"created": created,
 			}, nil
 		}
-		return nil, fmt.Errorf("no se pudo asegurar/crear el finding")
+		return nil, fmt.Errorf("no se pudo asegurar/crear el finding para el contenedor %s e imagen %s", containerID, imageID)
 	})
 
 	if err != nil {

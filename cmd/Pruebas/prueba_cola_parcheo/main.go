@@ -142,7 +142,7 @@ func main() {
 	// ── 4. Cola de parcheo ─────────────────────────────────────────────────
 	fmt.Println("\n[4/5] Consultando la cola de parcheo del proyecto...")
 	pid := projectID
-	resp, err := orch.GetPatchQueue(ctx, &pid, 1, 20)
+	resp, err := orch.GetPatchQueue(ctx, domain.PatchQueueQuery{ProjectID: &pid, Page: 1, Limit: 20})
 	if err != nil {
 		log.Fatalf("cola: %v", err)
 	}
@@ -207,7 +207,7 @@ func main() {
 		cola[0].AssetCriticality, cola[2].AssetCriticality)
 
 	// Sin filtro de proyecto debe devolver al menos lo mismo
-	globalResp, err := orch.GetPatchQueue(ctx, nil, 1, 100)
+	globalResp, err := orch.GetPatchQueue(ctx, domain.PatchQueueQuery{Page: 1, Limit: 100})
 	if err != nil {
 		log.Fatalf("cola global: %v", err)
 	}
@@ -218,7 +218,7 @@ func main() {
 	fmt.Printf("    ✓ Sin filtro devuelve toda la infraestructura (%d entradas)\n", len(global))
 
 	// El límite se respeta
-	limitadaResp, err := orch.GetPatchQueue(ctx, &pid, 1, 2)
+	limitadaResp, err := orch.GetPatchQueue(ctx, domain.PatchQueueQuery{ProjectID: &pid, Page: 1, Limit: 2})
 	if err != nil {
 		log.Fatalf("cola limitada: %v", err)
 	}
@@ -240,7 +240,7 @@ func main() {
 		log.Fatalf("declaración: %v", err)
 	}
 
-	trasParcheResp, err := orch.GetPatchQueue(ctx, &pid, 1, 20)
+	trasParcheResp, err := orch.GetPatchQueue(ctx, domain.PatchQueueQuery{ProjectID: &pid, Page: 1, Limit: 20})
 	if err != nil {
 		log.Fatalf("cola tras parche: %v", err)
 	}

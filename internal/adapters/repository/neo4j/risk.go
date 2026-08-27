@@ -2,6 +2,7 @@ package neo4j
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -21,14 +22,13 @@ func NewRiskRepository(driver neo4j.DriverWithContext) ports.RiskPort {
 // Devuelve el contexto completo de cada finding abierto para calcular su riesgo.
 func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID int64) ([]domain.FindingRiskContext, error) {
 	query := `
-		// El software o imagen cuelga del endpoint o de un contenedor que este aloja; el recorrido
-		// variable cubre ambos caminos.
+		// Rama A: Software nativo del Endpoint
 		MATCH (e:Endpoint {id: $endpoint_id})
-		MATCH path = (e)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)
-		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset))
-		MATCH (asset)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
-		  AND NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
+		WHERE NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
+		MATCH (e)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+		MATCH (si)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+		  AND coalesce(f.remediation_factor, 1.0) > 0.0
 		RETURN
 		    f.id                    AS finding_id,
 		    f.status                AS finding_status,
@@ -45,11 +45,95 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 		    v.epss_score            AS cached_epss,
 		    v.kev                   AS cached_kev,
 		    v.exploit               AS has_exploit,
-			e.internet_exposed      AS internet_exposed,
-			e.environment            AS environment,
+		    coalesce(e.internet_exposed, false) AS internet_exposed,
+		    coalesce(e.environment, '') AS environment,
 		    e.confidentiality_req   AS cr,
 		    e.integrity_req         AS ir,
-		    e.availability_req      AS ar
+		    e.availability_req      AS ar,
+		    'SOFTWARE_INSTALLATION' AS asset_type,
+		    si.id                   AS asset_id,
+		    coalesce(si.name, si.id) AS asset_name,
+		    ''                      AS container_id,
+		    ''                      AS container_name,
+		    ''                      AS image_id,
+		    false                   AS in_container
+
+		UNION ALL
+
+		// Rama B: Software dentro de contenedor alojado en el Endpoint
+		MATCH (e:Endpoint {id: $endpoint_id})-[:HOSTS]->(c:Container)
+		WHERE NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
+		MATCH (c)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+		MATCH (si)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+		  AND coalesce(f.remediation_factor, 1.0) > 0.0
+		RETURN
+		    f.id                    AS finding_id,
+		    f.status                AS finding_status,
+		    f.remediation_factor    AS remediation_factor,
+		    f.exposure_factor       AS exposure_factor,
+		    (
+		        EXISTS { (f)-[:HAS_REMEDIATION]->(:Remediation)-[:USES_PATCH]->(:Patch) }
+		        OR
+		        EXISTS { (:Patch)-[:FIXES]->(v) }
+		    )                       AS has_patch,
+		    v.cve_id                AS cve_id,
+		    v.cvss_vector           AS cvss_vector,
+		    v.base_score            AS cached_base_score,
+		    v.epss_score            AS cached_epss,
+		    v.kev                   AS cached_kev,
+		    v.exploit               AS has_exploit,
+		    (coalesce(e.internet_exposed, false) OR coalesce(c.internet_exposed, false)) AS internet_exposed,
+		    coalesce(e.environment, '') AS environment,
+		    e.confidentiality_req   AS cr,
+		    e.integrity_req         AS ir,
+		    e.availability_req      AS ar,
+		    'SOFTWARE_INSTALLATION' AS asset_type,
+		    si.id                   AS asset_id,
+		    coalesce(si.name, si.id) AS asset_name,
+		    c.id                    AS container_id,
+		    c.name                  AS container_name,
+		    c.image_id              AS image_id,
+		    true                    AS in_container
+
+		UNION ALL
+
+		// Rama C: Finding contextual de imagen de contenedor
+		MATCH (e:Endpoint {id: $endpoint_id})-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)
+		WHERE NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
+		MATCH (c)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE f.context_type = 'CONTAINER_IMAGE'
+		  AND f.image_id = ci.id
+		  AND NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+		  AND coalesce(f.remediation_factor, 1.0) > 0.0
+		RETURN
+		    f.id                    AS finding_id,
+		    f.status                AS finding_status,
+		    f.remediation_factor    AS remediation_factor,
+		    f.exposure_factor       AS exposure_factor,
+		    (
+		        EXISTS { (f)-[:HAS_REMEDIATION]->(:Remediation)-[:USES_PATCH]->(:Patch) }
+		        OR
+		        EXISTS { (:Patch)-[:FIXES]->(v) }
+		    )                       AS has_patch,
+		    v.cve_id                AS cve_id,
+		    v.cvss_vector           AS cvss_vector,
+		    v.base_score            AS cached_base_score,
+		    v.epss_score            AS cached_epss,
+		    v.kev                   AS cached_kev,
+		    v.exploit               AS has_exploit,
+		    (coalesce(e.internet_exposed, false) OR coalesce(c.internet_exposed, false)) AS internet_exposed,
+		    coalesce(e.environment, '') AS environment,
+		    e.confidentiality_req   AS cr,
+		    e.integrity_req         AS ir,
+		    e.availability_req      AS ar,
+		    'CONTAINER_IMAGE_FINDING' AS asset_type,
+		    c.id                    AS asset_id,
+		    c.name                  AS asset_name,
+		    c.id                    AS container_id,
+		    c.name                  AS container_name,
+		    ci.id                   AS image_id,
+		    true                    AS in_container
 	`
 
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
@@ -62,10 +146,16 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 		}
 
 		var contexts []domain.FindingRiskContext
+		seenFindings := make(map[int64]bool)
 		for result.Next(ctx) {
 			rec := result.Record()
 
-			findingID, _ := rec.Get("finding_id")
+			findingID := toInt64(rec.Values[0])
+			if seenFindings[findingID] {
+				continue
+			}
+			seenFindings[findingID] = true
+
 			findingStatus, _ := rec.Get("finding_status")
 			remFactor, _ := rec.Get("remediation_factor")
 			hasPatch, _ := rec.Get("has_patch")
@@ -81,8 +171,16 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 			ir, _ := rec.Get("ir")
 			ar, _ := rec.Get("ar")
 
+			assetType, _ := rec.Get("asset_type")
+			assetID, _ := rec.Get("asset_id")
+			assetName, _ := rec.Get("asset_name")
+			containerID, _ := rec.Get("container_id")
+			containerName, _ := rec.Get("container_name")
+			imageID, _ := rec.Get("image_id")
+			inContainer, _ := rec.Get("in_container")
+
 			contexts = append(contexts, domain.FindingRiskContext{
-				FindingID:          toInt64(findingID),
+				FindingID:          findingID,
 				FindingStatus:      toStr(findingStatus),
 				RemediationFactor:  toFloat64(remFactor),
 				PatchAvailable:     toBool(hasPatch),
@@ -97,6 +195,13 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 				ConfidentialityReq: toStr(cr),
 				IntegrityReq:       toStr(ir),
 				AvailabilityReq:    toStr(ar),
+				AssetType:          toStr(assetType),
+				AssetID:            toStr(assetID),
+				AssetName:          toStr(assetName),
+				ContainerID:        toStr(containerID),
+				ContainerName:      toStr(containerName),
+				ImageID:            toStr(imageID),
+				InContainer:        toBool(inContainer),
 			})
 		}
 
@@ -413,148 +518,256 @@ func (r *riskRepo) GetSoftwareCriticalityLevel(ctx context.Context, installation
 	return res.(string), nil
 }
 
-// GetPatchQueue devuelve los findings pendientes ordenados por prioridad y paginados.
-func (r *riskRepo) GetPatchQueue(ctx context.Context, projectID *int64, page int, limit int) (*domain.PatchQueueResponse, error) {
-	if page <= 0 {
-		page = 1
+// GetPatchQueue devuelve los findings pendientes ordenados por prioridad y paginados con soporte para filtrado avanzado.
+func (r *riskRepo) GetPatchQueue(ctx context.Context, query domain.PatchQueueQuery) (*domain.PatchQueueResponse, error) {
+	if query.Page <= 0 {
+		query.Page = 1
 	}
-	if limit <= 0 {
-		limit = 20
+	if query.Limit <= 0 {
+		query.Limit = 20
 	}
-	offset := (page - 1) * limit
+	offset := (query.Page - 1) * query.Limit
 
 	var projectParam any
-	if projectID != nil {
-		projectParam = *projectID
+	if query.ProjectID != nil {
+		projectParam = *query.ProjectID
 	}
 
-	countQuery := `
+	sortDir := "DESC"
+	if strings.ToUpper(query.SortDirection) == "ASC" {
+		sortDir = "ASC"
+	}
+
+	var orderExpr string
+	switch strings.ToLower(query.SortField) {
+	case "cve_id", "cve":
+		orderExpr = "toLower(coalesce(item.cve_id, ''))"
+	case "software_name", "software":
+		orderExpr = "toLower(coalesce(item.software_name, ''))"
+	case "hostname", "asset":
+		orderExpr = "toLower(coalesce(item.hostname, ''))"
+	case "risk_score", "risk":
+		orderExpr = "coalesce(item.risk_score, 0.0)"
+	case "asset_criticality", "criticality":
+		orderExpr = "coalesce(item.asset_criticality, 0.0)"
+	case "urgency_boost", "urgency":
+		orderExpr = "coalesce(item.urgency_boost, 0.0)"
+	case "priority_score", "priority":
+		orderExpr = "coalesce(item.priority_score, 0.0)"
+	default:
+		orderExpr = "coalesce(item.priority_score, 0.0) " + sortDir + ", coalesce(item.risk_score, 0.0)"
+	}
+
+	cypherQuery := fmt.Sprintf(`
 		MATCH (e:Endpoint)
 		MATCH path = (e)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)
-		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset))
+		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset) OR 'Container' IN labels(asset))
 		MATCH (asset)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
 		  AND ($project_id IS NULL OR EXISTS { (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e) })
-		RETURN count(DISTINCT f) AS total
-	`
-
-	query := `
-		MATCH (e:Endpoint)
-		MATCH path = (e)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)
-		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset))
-		MATCH (asset)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
-		AND ($project_id IS NULL OR EXISTS { (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e) })
 		OPTIONAL MATCH (asset)-[:INSTANCE_OF]->(s:Software)
 		OPTIONAL MATCH (c:Container)-[:HAS_INSTALLATION|USES_IMAGE]->(asset)
 		OPTIONAL MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
 		OPTIONAL MATCH (p:Patch)-[:FIXES]->(v)
-		WITH f, v, asset, s, e, c, rem, collect(p.url) AS patch_urls
+		WITH DISTINCT f, v, asset, s, e, c, rem, collect(p.url) AS patch_urls
 		WITH f, v, asset, s, e, c, rem, patch_urls,
-			coalesce(rem.fixed_version, v.fixed_version, '') AS fixed_version
-		RETURN f.id                AS finding_id,
-			f.status            AS status,
-			v.cve_id            AS cve_id,
-			asset.id            AS installation_id,
+			coalesce(rem.fixed_version, v.fixed_version, '') AS fixed_version,
 			coalesce(s.name, asset.name, asset.id) AS software_name,
 			coalesce(s.version, 'N/A') AS software_version,
-			s.vendor            AS software_vendor,
-			s.cpe               AS software_cpe,
-			fixed_version       AS fixed_version,
-			e.id                AS endpoint_id,
-			e.hostname          AS hostname,
-			e.environment       AS environment,
-			c IS NOT NULL       AS in_container,
-			c.name              AS container_name,
-			f.risk_score        AS risk_score,
+			s.vendor AS software_vendor,
+			s.cpe AS software_cpe,
+			e.id AS endpoint_id,
+			e.hostname AS hostname,
+			e.environment AS environment,
+			(c IS NOT NULL OR 'Container' IN labels(asset)) AS in_container,
+			coalesce(c.name, CASE WHEN 'Container' IN labels(asset) THEN asset.name ELSE null END) AS container_name,
+			f.id AS finding_id,
+			f.status AS status,
+			v.cve_id AS cve_id,
+			f.risk_score AS risk_score,
 			f.asset_criticality AS asset_criticality,
-			f.urgency_boost     AS urgency_boost,
-			f.priority_score    AS priority_score,
-			size(patch_urls) > 0 OR fixed_version <> '' AS patch_available,
+			f.urgency_boost AS urgency_boost,
+			f.priority_score AS priority_score,
+			(size(patch_urls) > 0 OR coalesce(rem.fixed_version, v.fixed_version, '') <> '') AS patch_available,
 			CASE
-				WHEN size(patch_urls) > 0 AND all(url IN patch_urls WHERE url STARTS WITH 'fixed-version://') THEN
-				'WORKAROUND'
+				WHEN size(patch_urls) > 0 AND all(url IN patch_urls WHERE url STARTS WITH 'fixed-version://') THEN 'WORKAROUND'
 				WHEN size(patch_urls) > 0 THEN 'OFFICIAL_FIX'
-				WHEN fixed_version <> '' THEN 'WORKAROUND'
+				WHEN coalesce(rem.fixed_version, v.fixed_version, '') <> '' THEN 'WORKAROUND'
 				ELSE 'UNAVAILABLE'
-			END AS remediation_kind
-		ORDER BY coalesce(priority_score, 0.0) DESC, coalesce(risk_score, 0.0) DESC, finding_id ASC
-		SKIP $offset
-		LIMIT $limit
-	`
+			END AS remediation_kind,
+			CASE
+				WHEN coalesce(f.priority_score, 0.0) >= 0.9 THEN 'CRITICAL'
+				WHEN coalesce(f.priority_score, 0.0) >= 0.7 THEN 'HIGH'
+				WHEN coalesce(f.priority_score, 0.0) >= 0.4 THEN 'MEDIUM'
+				ELSE 'LOW'
+			END AS priority_tier
+		WHERE ($search = "" OR 
+		       toLower(coalesce(cve_id, "")) CONTAINS toLower($search) OR
+		       toLower(coalesce(software_name, "")) CONTAINS toLower($search) OR
+		       toLower(coalesce(hostname, "")) CONTAINS toLower($search) OR
+		       toLower(coalesce(container_name, "")) CONTAINS toLower($search)
+		      )
+		  AND ($vendor_search = "" OR toLower(coalesce(software_vendor, "")) CONTAINS toLower($vendor_search))
+		  AND ($hostname_search = "" OR 
+		       toLower(coalesce(hostname, "")) CONTAINS toLower($hostname_search) OR
+		       toLower(coalesce(container_name, "")) CONTAINS toLower($hostname_search)
+		      )
+		  AND ($environment = "" OR $environment = "ALL" OR toLower(coalesce(environment, "")) = toLower($environment))
+		  AND ($internet_exposed = "" OR $internet_exposed = "ALL" OR 
+		       ($internet_exposed = "TRUE" AND (e.internet_exposed = true OR toString(e.internet_exposed) = "true")) OR 
+		       ($internet_exposed = "FALSE" AND (e.internet_exposed IS NULL OR e.internet_exposed = false OR toString(e.internet_exposed) = "false"))
+		      )
+		  AND ($in_container = "" OR $in_container = "ALL" OR 
+		       ($in_container = "TRUE" AND in_container = true) OR 
+		       ($in_container = "FALSE" AND in_container = false)
+		      )
+		  AND ($priority_tier = "" OR $priority_tier = "ALL" OR toLower(priority_tier) = toLower($priority_tier))
+		  AND ($patch_available = "" OR $patch_available = "ALL" OR 
+		       ($patch_available = "TRUE" AND patch_available = true) OR 
+		       ($patch_available = "FALSE" AND patch_available = false)
+		      )
+		  AND ($remediation_kind = "" OR $remediation_kind = "ALL" OR toLower(remediation_kind) = toLower($remediation_kind))
+
+		WITH collect({
+			finding_id: finding_id,
+			status: status,
+			cve_id: cve_id,
+			installation_id: asset.id,
+			software_name: software_name,
+			software_version: software_version,
+			software_vendor: software_vendor,
+			software_cpe: software_cpe,
+			fixed_version: fixed_version,
+			endpoint_id: endpoint_id,
+			hostname: hostname,
+			environment: environment,
+			in_container: in_container,
+			container_name: container_name,
+			risk_score: risk_score,
+			asset_criticality: asset_criticality,
+			urgency_boost: urgency_boost,
+			priority_score: priority_score,
+			priority_tier: priority_tier,
+			patch_available: patch_available,
+			remediation_kind: remediation_kind
+		}) AS matchedItems, count(finding_id) AS totalCount
+
+		UNWIND (CASE WHEN size(matchedItems) > 0 THEN matchedItems ELSE [null] END) AS item
+		WITH matchedItems, totalCount, item WHERE item IS NOT NULL
+
+		WITH matchedItems, totalCount, item.priority_tier AS tierLabel, collect(item) AS tierItems
+		WITH matchedItems, totalCount, collect({tier: tierLabel, count: size(tierItems)}) AS tierMetrics
+
+		UNWIND matchedItems AS item
+		WITH totalCount, tierMetrics, item
+		ORDER BY %s %s
+		SKIP $offset LIMIT $limit
+
+		RETURN totalCount, tierMetrics, collect(item) AS pagedItems
+	`, orderExpr, sortDir)
+
+	params := map[string]any{
+		"project_id":       projectParam,
+		"search":           strings.TrimSpace(query.Search),
+		"vendor_search":    strings.TrimSpace(query.VendorSearch),
+		"hostname_search":  strings.TrimSpace(query.HostnameSearch),
+		"environment":      strings.TrimSpace(query.Environment),
+		"internet_exposed": strings.ToUpper(strings.TrimSpace(query.InternetExposed)),
+		"in_container":     strings.ToUpper(strings.TrimSpace(query.InContainer)),
+		"priority_tier":    strings.TrimSpace(query.PriorityTier),
+		"patch_available":  strings.ToUpper(strings.TrimSpace(query.PatchAvailable)),
+		"remediation_kind": strings.TrimSpace(query.RemediationKind),
+		"offset":           int64(offset),
+		"limit":            int64(query.Limit),
+	}
 
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	var totalCount int
-	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		countResult, err := tx.Run(ctx, countQuery, map[string]any{"project_id": projectParam})
-		if err == nil && countResult.Next(ctx) {
-			if t, ok := countResult.Record().Get("total"); ok {
-				totalCount = int(toInt64(t))
-			}
-		}
+	response := &domain.PatchQueueResponse{
+		Queue:              []domain.PatchQueueItem{},
+		Total:              0,
+		Page:               query.Page,
+		Limit:              query.Limit,
+		TotalPages:         0,
+		PriorityTierCounts: make(map[string]int64),
+	}
 
-		result, err := tx.Run(ctx, query, map[string]any{
-			"project_id": projectParam,
-			"offset":     int64(offset),
-			"limit":      int64(limit),
-		})
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, cypherQuery, params)
 		if err != nil {
 			return nil, err
 		}
-
-		items := make([]domain.PatchQueueItem, 0)
-		for result.Next(ctx) {
-			props := result.Record().AsMap()
-			items = append(items, domain.PatchQueueItem{
-				Position:         offset + len(items) + 1,
-				FindingID:        getInt64(props, "finding_id"),
-				CVEID:            getString(props, "cve_id"),
-				Status:           getString(props, "status"),
-				InstallationID:   getString(props, "installation_id"),
-				SoftwareName:     getString(props, "software_name"),
-				SoftwareVersion:  getString(props, "software_version"),
-				SoftwareVendor:   getString(props, "software_vendor"),
-				SoftwareCPE:      getString(props, "software_cpe"),
-				FixedVersion:     getString(props, "fixed_version"),
-				EndpointID:       getInt64(props, "endpoint_id"),
-				Hostname:         getString(props, "hostname"),
-				Environment:      getString(props, "environment"),
-				InContainer:      getBool(props, "in_container"),
-				ContainerName:    getString(props, "container_name"),
-				RiskScore:        getFloat64(props, "risk_score"),
-				AssetCriticality: getFloat64(props, "asset_criticality"),
-				UrgencyBoost:     getFloat64(props, "urgency_boost"),
-				PriorityScore:    getFloat64(props, "priority_score"),
-				PatchAvailable:   getBool(props, "patch_available"),
-			  	RemediationKind: getString(props, "remediation_kind"),
-			})
+		if result.Next(ctx) {
+			return result.Record().AsMap(), nil
 		}
-		return items, result.Err()
+		return nil, nil
 	})
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error al consultar cola de parcheo en Neo4j: %w", err)
 	}
 
-	queueItems := make([]domain.PatchQueueItem, 0)
-	if res != nil {
-		queueItems = res.([]domain.PatchQueueItem)
+	if res == nil {
+		return response, nil
 	}
 
-	totalPages := 1
-	if totalCount > 0 {
-		totalPages = (totalCount + limit - 1) / limit
+	recordMap := res.(map[string]interface{})
+
+	if tc, ok := recordMap["totalCount"].(int64); ok {
+		response.Total = int(tc)
+		if tc > 0 && query.Limit > 0 {
+			response.TotalPages = int((tc + int64(query.Limit) - 1) / int64(query.Limit))
+		}
 	}
 
-	return &domain.PatchQueueResponse{
-		Queue:      queueItems,
-		Total:      totalCount,
-		Page:       page,
-		Limit:      limit,
-		TotalPages: totalPages,
-	}, nil
+	if metricsRaw, ok := recordMap["tierMetrics"].([]interface{}); ok {
+		var grandTotal int64 = 0
+		for _, item := range metricsRaw {
+			if m, ok := item.(map[string]interface{}); ok {
+				tier, _ := m["tier"].(string)
+				cnt, _ := m["count"].(int64)
+				if tier != "" {
+					response.PriorityTierCounts[tier] = cnt
+					grandTotal += cnt
+				}
+			}
+		}
+		response.PriorityTierCounts["ALL"] = grandTotal
+	}
+
+	if itemsRaw, ok := recordMap["pagedItems"].([]interface{}); ok {
+		for _, raw := range itemsRaw {
+			if m, ok := raw.(map[string]interface{}); ok {
+				response.Queue = append(response.Queue, domain.PatchQueueItem{
+					Position:         offset + len(response.Queue) + 1,
+					FindingID:        getInt64(m, "finding_id"),
+					CVEID:            getString(m, "cve_id"),
+					Status:           getString(m, "status"),
+					InstallationID:   getString(m, "installation_id"),
+					SoftwareName:     getString(m, "software_name"),
+					SoftwareVersion:  getString(m, "software_version"),
+					SoftwareVendor:   getString(m, "software_vendor"),
+					SoftwareCPE:      getString(m, "software_cpe"),
+					FixedVersion:     getString(m, "fixed_version"),
+					EndpointID:       getInt64(m, "endpoint_id"),
+					Hostname:         getString(m, "hostname"),
+					Environment:      getString(m, "environment"),
+					InContainer:      getBool(m, "in_container"),
+					ContainerName:    getString(m, "container_name"),
+					RiskScore:        getFloat64(m, "risk_score"),
+					AssetCriticality: getFloat64(m, "asset_criticality"),
+					UrgencyBoost:     getFloat64(m, "urgency_boost"),
+					PriorityScore:    getFloat64(m, "priority_score"),
+					PriorityTier:     getString(m, "priority_tier"),
+					PatchAvailable:   getBool(m, "patch_available"),
+					RemediationKind:  getString(m, "remediation_kind"),
+				})
+			}
+		}
+	}
+
+	return response, nil
 }
 
 // GetEndpointIDsByInstallation es el recorrido inverso de GetInstallationIDsByEndpoint.
@@ -976,4 +1189,206 @@ func (r *riskRepo) GetOpenFindingCVEsByProject(ctx context.Context, projectID in
 		return []string{}, nil
 	}
 	return res.([]string), nil
+}
+
+// GetContainerIDsByEndpoint devuelve los IDs de los contenedores alojados en un endpoint.
+func (r *riskRepo) GetContainerIDsByEndpoint(ctx context.Context, endpointID int64) ([]string, error) {
+	query := `
+		MATCH (e:Endpoint {id: $endpoint_id})-[:HOSTS]->(c:Container)
+		RETURN c.id AS container_id
+		ORDER BY container_id
+	`
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"endpoint_id": endpointID})
+		if err != nil {
+			return nil, err
+		}
+		var ids []string
+		for result.Next(ctx) {
+			rec := result.Record()
+			cid, _ := rec.Get("container_id")
+			if s, ok := cid.(string); ok {
+				ids = append(ids, s)
+			}
+		}
+		return ids, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []string{}, nil
+	}
+	return res.([]string), nil
+}
+
+// GetDirectFindingScoresByContainer devuelve los scores de findings contextuales directos de la imagen del contenedor.
+func (r *riskRepo) GetDirectFindingScoresByContainer(ctx context.Context, containerID string) ([]domain.FindingRiskSummary, error) {
+	query := `
+		MATCH (c:Container {id: $container_id})-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE f.context_type = 'CONTAINER_IMAGE'
+		  AND NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+		  AND coalesce(f.remediation_factor, 1.0) > 0.0
+		RETURN f.id AS finding_id,
+		       v.cve_id AS cve_id,
+		       coalesce(f.risk_score, 0.0) AS risk_score,
+		       coalesce(f.priority_score, 0.0) AS priority_score,
+		       coalesce(f.status, 'OPEN') AS status
+		ORDER BY risk_score DESC
+	`
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"container_id": containerID})
+		if err != nil {
+			return nil, err
+		}
+		var summaries []domain.FindingRiskSummary
+		for result.Next(ctx) {
+			rec := result.Record()
+			fid, _ := rec.Get("finding_id")
+			cve, _ := rec.Get("cve_id")
+			rs, _ := rec.Get("risk_score")
+			ps, _ := rec.Get("priority_score")
+			st, _ := rec.Get("status")
+			summaries = append(summaries, domain.FindingRiskSummary{
+				FindingID:     toInt64(fid),
+				CVEID:         toStr(cve),
+				RiskScore:     toFloat64(rs),
+				PriorityScore: toFloat64(ps),
+				Status:        toStr(st),
+			})
+		}
+		return summaries, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.FindingRiskSummary{}, nil
+	}
+	return res.([]domain.FindingRiskSummary), nil
+}
+
+// GetSoftwareRiskSummariesByContainer devuelve el resumen de riesgo de software instalado dentro de un contenedor.
+func (r *riskRepo) GetSoftwareRiskSummariesByContainer(ctx context.Context, containerID string) ([]domain.SoftwareRiskSummary, error) {
+	query := `
+		MATCH (c:Container {id: $container_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+		OPTIONAL MATCH (si)-[:INSTANCE_OF]->(s:Software)
+		WHERE NOT coalesce(si.status, 'INSTALLED') IN ['REMOVED', 'UNINSTALLED', 'DELETED']
+		RETURN si.id AS installation_id,
+		       s.id AS software_id,
+		       coalesce(s.name, si.name, si.id) AS software_name,
+		       coalesce(si.risk_score, 0.0) AS risk_score,
+		       coalesce(si.risk_tier, 'LOW') AS risk_tier,
+		       coalesce(si.criticality_level, 'STANDARD') AS criticality_level,
+		       coalesce(si.criticality_multiplier, 1.0) AS criticality_multiplier,
+		       coalesce(si.priority_score, 0.0) AS priority_score,
+		       coalesce(si.priority_tier, 'LOW') AS priority_tier,
+		       si.driver_finding_id AS driver_finding_id,
+		       si.driver_cve_id AS driver_cve_id,
+		       si.status AS status
+		ORDER BY priority_score DESC
+	`
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"container_id": containerID})
+		if err != nil {
+			return nil, err
+		}
+		var summaries []domain.SoftwareRiskSummary
+		for result.Next(ctx) {
+			rec := result.Record()
+			instID, _ := rec.Get("installation_id")
+			swID, _ := rec.Get("software_id")
+			swName, _ := rec.Get("software_name")
+			riskScore, _ := rec.Get("risk_score")
+			riskTier, _ := rec.Get("risk_tier")
+			critLvl, _ := rec.Get("criticality_level")
+			critMult, _ := rec.Get("criticality_multiplier")
+			prioScore, _ := rec.Get("priority_score")
+			prioTier, _ := rec.Get("priority_tier")
+			driverFindingID, _ := rec.Get("driver_finding_id")
+			driverCVEID, _ := rec.Get("driver_cve_id")
+			st, _ := rec.Get("status")
+
+			summaries = append(summaries, domain.SoftwareRiskSummary{
+				InstallationID:        toStr(instID),
+				SoftwareID:            toInt64(swID),
+				SoftwareName:          toStr(swName),
+				RiskScore:             toFloat64(riskScore),
+				RiskTier:              toStr(riskTier),
+				CriticalityLevel:      toStr(critLvl),
+				CriticalityMultiplier: toFloat64(critMult),
+				PriorityScore:         toFloat64(prioScore),
+				PriorityTier:          toStr(prioTier),
+				DriverFindingID:       toInt64(driverFindingID),
+				DriverCVEID:           toStr(driverCVEID),
+				DriverRiskScore:       toFloat64(riskScore),
+				Status:                toStr(st),
+			})
+		}
+		return summaries, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.SoftwareRiskSummary{}, nil
+	}
+	return res.([]domain.SoftwareRiskSummary), nil
+}
+
+// UpdateContainerRiskAndPriority persiste las puntuaciones agregadas, tiers y drivers en el nodo Container.
+func (r *riskRepo) UpdateContainerRiskAndPriority(ctx context.Context, summary domain.ContainerRiskSummary) error {
+	query := `
+		MATCH (c:Container {id: $container_id})
+		SET c.risk_score = $risk_score,
+		    c.risk_tier = $risk_tier,
+		    c.risk_computed_at = $now,
+		    c.priority_score = $priority_score,
+		    c.priority_tier = $priority_tier,
+		    c.priority_computed_at = $now,
+		    c.technical_driver_type = $technical_driver_type,
+		    c.technical_driver_asset_id = $technical_driver_asset_id,
+		    c.technical_driver_asset_name = $technical_driver_asset_name,
+		    c.technical_driver_finding_id = $technical_driver_finding_id,
+		    c.technical_driver_cve_id = $technical_driver_cve_id,
+		    c.technical_driver_risk_score = $technical_driver_risk_score,
+		    c.priority_driver_type = $priority_driver_type,
+		    c.priority_driver_asset_id = $priority_driver_asset_id,
+		    c.priority_driver_asset_name = $priority_driver_asset_name,
+		    c.priority_driver_finding_id = $priority_driver_finding_id,
+		    c.priority_driver_cve_id = $priority_driver_cve_id,
+		    c.priority_driver_priority_score = $priority_driver_priority_score,
+		    c.risky_asset_count = $risky_asset_count
+	`
+	params := map[string]any{
+		"container_id":                    summary.ContainerID,
+		"risk_score":                      summary.RiskScore,
+		"risk_tier":                       summary.RiskTier,
+		"priority_score":                  summary.PriorityScore,
+		"priority_tier":                   summary.PriorityTier,
+		"technical_driver_type":           summary.TechnicalDriverType,
+		"technical_driver_asset_id":       summary.TechnicalDriverAssetID,
+		"technical_driver_asset_name":     summary.TechnicalDriverAssetName,
+		"technical_driver_finding_id":     summary.TechnicalDriverFindingID,
+		"technical_driver_cve_id":         summary.TechnicalDriverCVEID,
+		"technical_driver_risk_score":     summary.TechnicalDriverRiskScore,
+		"priority_driver_type":            summary.PriorityDriverType,
+		"priority_driver_asset_id":        summary.PriorityDriverAssetID,
+		"priority_driver_asset_name":      summary.PriorityDriverAssetName,
+		"priority_driver_finding_id":      summary.PriorityDriverFindingID,
+		"priority_driver_cve_id":          summary.PriorityDriverCVEID,
+		"priority_driver_priority_score":  summary.PriorityDriverPriorityScore,
+		"risky_asset_count":               summary.RiskyAssetCount,
+		"now":                             time.Now().UTC(),
+	}
+	return executeWriteHelper(ctx, r.driver, query, params)
 }

@@ -786,12 +786,13 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 	}, http.StatusCreated)
 }
 
-// GET /api/patch-queue?project_id={id}&page={p}&limit={n}
-// Cola de parcheo: findings pendientes ordenados por prioridad y paginados. Sin project_id recorre
-// toda la infraestructura.
+// GET /api/patch-queue?project_id={id}&page={p}&limit={n}&search={s}&vendor_search={v}&...
+// Cola de parcheo: findings pendientes ordenados por prioridad/riesgo con filtrado avanzado y paginado.
 func (h *OrchestratorHandler) GetPatchQueue(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
 	var projectID *int64
-	if raw := r.URL.Query().Get("project_id"); raw != "" {
+	if raw := q.Get("project_id"); raw != "" {
 		parsed, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
 			sendError(w, "Invalid project_id", http.StatusBadRequest)
@@ -801,22 +802,37 @@ func (h *OrchestratorHandler) GetPatchQueue(w http.ResponseWriter, r *http.Reque
 	}
 
 	page := 1
-	if raw := r.URL.Query().Get("page"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err == nil && parsed > 0 {
+	if raw := q.Get("page"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
 			page = parsed
 		}
 	}
 
 	limit := 20
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err == nil && parsed > 0 {
+	if raw := q.Get("limit"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
 			limit = parsed
 		}
 	}
 
-	res, err := h.orchestrator.GetPatchQueue(r.Context(), projectID, page, limit)
+	query := domain.PatchQueueQuery{
+		ProjectID:       projectID,
+		Page:            page,
+		Limit:           limit,
+		Search:          strings.TrimSpace(q.Get("search")),
+		VendorSearch:    strings.TrimSpace(q.Get("vendor_search")),
+		HostnameSearch:  strings.TrimSpace(q.Get("hostname_search")),
+		Environment:     strings.TrimSpace(q.Get("environment")),
+		InternetExposed: strings.TrimSpace(q.Get("internet_exposed")),
+		InContainer:     strings.TrimSpace(q.Get("in_container")),
+		PriorityTier:    strings.TrimSpace(q.Get("priority_tier")),
+		PatchAvailable:  strings.TrimSpace(q.Get("patch_available")),
+		RemediationKind: strings.TrimSpace(q.Get("remediation_kind")),
+		SortField:       strings.TrimSpace(q.Get("sort_field")),
+		SortDirection:   strings.TrimSpace(q.Get("sort_direction")),
+	}
+
+	res, err := h.orchestrator.GetPatchQueue(r.Context(), query)
 	if err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return

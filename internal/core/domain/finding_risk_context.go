@@ -22,4 +22,13 @@ type FindingRiskContext struct {
 	ConfidentialityReq string
 	IntegrityReq       string
 	AvailabilityReq    string
+
+	// Metadatos del activo de origen (SoftwareInstallation o ContainerImage)
+	AssetType     string // SOFTWARE_INSTALLATION o CONTAINER_IMAGE_FINDING
+	AssetID       string
+	AssetName     string
+	ContainerID   string
+	ContainerName string
+	ImageID       string
+	InContainer   bool
 }
