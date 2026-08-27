@@ -16,7 +16,8 @@ import (
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/ports"
 )
 
-const autoScanVulnerabilityLimit = 100
+const autoScanVulnerabilityLimit = 0
+const nvdEnrichmentTTL = 6 * time.Hour
 
 /*
 Este archivo contiene el Servicio de Aplicación (Application Service) u Orquestador de Casos de Uso.
@@ -541,6 +542,13 @@ func (o *Orchestrator) saveVulnerabilityWithTTPs(ctx context.Context, vuln *doma
 	return nil
 }
 
+func isNVDEnrichmentFresh(v domain.Vulnerability) bool {
+	if !v.NVDEnriched || v.NVDEnrichedAt == nil {
+		return false
+	}
+	return time.Since(*v.NVDEnrichedAt) <= nvdEnrichmentTTL
+}
+
 /*
 AutoScanAndRegisterVulnerabilities implementa el caso de uso central para automatizar la detección y registro de
 fallos:
@@ -554,7 +562,13 @@ software (aplicación, sistema operativo, etc.) y la guarda en la base de datos 
  6. Devuelve un resumen del escaneo para que el frontend pueda mostrar cuántas vulnerabilidades se encontraron,
     cuántos findings se crearon y cuántos ya existían.
 */
-func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, installationID string, softwareID int64, limits ...int) (*domain.VulnerabilityScanResult, error) {
+func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, installationID string, softwareID int64, opts ...domain.VulnerabilityScanOptions) (*domain.VulnerabilityScanResult, error) {
+	scanStartedAt := time.Now().UTC()
+	scanOpts := domain.VulnerabilityScanOptions{}
+	if len(opts) > 0 {
+		scanOpts = opts[0]
+	}
+
 	// 1. Obtener la entidad de software
 	sw, err := o.softwarePort.GetByID(ctx, softwareID)
 	if err != nil {
@@ -586,8 +600,8 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 
 	// 3. Determinar el límite de vulnerabilidades a procesar
 	limit := autoScanVulnerabilityLimit
-	if len(limits) > 0 && limits[0] > 0 && limits[0] < limit {
-		limit = limits[0]
+	if scanOpts.Limit >= 0 {
+		limit = scanOpts.Limit
 	}
 
 	// Preparar el resultado detallado del escaneo para API/frontend
@@ -596,20 +610,30 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		SoftwareID:     softwareID,
 		CPE:            cpe,
 		LimitApplied:   limit,
+		ScanStartedAt:  &scanStartedAt,
 	}
 
 	// 4. Buscar vulnerabilidades a través del puerto de escaneo
-	vulns, err := o.vulnScannerPort.FetchByCPE(ctx, cpe)
+	fetchResult, err := o.vulnScannerPort.FetchByCPE(ctx, cpe, domain.VulnerabilityFetchOptions{
+		ForceRefresh: scanOpts.ForceRefresh,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("error consultando la API de vulnerabilidades para el CPE %s: %w", cpe, err)
 	}
+	vulns := fetchResult.Vulnerabilities
 
 	// VulnerabilitiesFound refleja lo devuelto por NVD antes de aplicar el límite local
 	result.VulnerabilitiesFound = len(vulns)
+	result.TotalAvailable = fetchResult.TotalAvailable
+	result.CacheHit = fetchResult.CacheHit
+	result.CacheExpiresAt = fetchResult.CacheExpiresAt
+	result.ProviderPagesFetched = fetchResult.PagesFetched
 
-	if len(vulns) > limit {
+	if limit > 0 && len(vulns) > limit {
 		vulns = vulns[:limit]
 	}
+	result.Processed = len(vulns)
+	result.Truncated = limit > 0 && result.VulnerabilitiesFound > limit
 
 	// 5. Registrar vulnerabilidades y enlazarlas como hallazgos (Findings)
 	for _, v := range vulns {
@@ -656,7 +680,46 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 	// Lanzar barrido inteligente para mapear solo las vulnerabilidades nuevas de este escaneo
 	go o.StartBackgroundTTPMapping(0)
 
+	scanCompletedAt := time.Now().UTC()
+	result.ScanCompletedAt = &scanCompletedAt
+	if err := o.updateSoftwareInstallationScanMetadata(ctx, result, scanStartedAt); err != nil {
+		return nil, err
+	}
+
 	return result, nil
+}
+
+func (o *Orchestrator) updateSoftwareInstallationScanMetadata(ctx context.Context, result *domain.VulnerabilityScanResult, startedAt time.Time) error {
+	if o.dbHelper == nil || result == nil {
+		return nil
+	}
+
+	completedAt := time.Now().UTC()
+	if result.ScanCompletedAt != nil {
+		completedAt = *result.ScanCompletedAt
+	}
+
+	query := `
+		MATCH (si:SoftwareInstallation {id: $installation_id})
+		SET si.vuln_scan_started_at = $started_at,
+		    si.vuln_scan_completed_at = $completed_at,
+		    si.vuln_scan_cache_hit = $cache_hit,
+		    si.vuln_scan_cpe = $cpe,
+		    si.vuln_scan_total_available = $total_available,
+		    si.vuln_scan_processed = $processed,
+		    si.vuln_scan_pages_fetched = $pages_fetched
+	`
+
+	return o.dbHelper.ExecuteWrite(ctx, query, map[string]any{
+		"installation_id": result.InstallationID,
+		"started_at":      startedAt,
+		"completed_at":    completedAt,
+		"cache_hit":       result.CacheHit,
+		"cpe":             result.CPE,
+		"total_available": result.TotalAvailable,
+		"processed":       result.Processed,
+		"pages_fetched":   result.ProviderPagesFetched,
+	})
 }
 
 // ComputeEndpointRisk calcula y persiste el riesgo de todos los findings abiertos de un endpoint.
@@ -1042,13 +1105,12 @@ func (o *Orchestrator) DeclarePatchApplied(
 
 	switch level {
 	case domain.RemediationLevelOfficialFix:
-			status = "PATCHED"
+		status = "PATCHED"
 	case domain.RemediationLevelTemporaryFix, domain.RemediationLevelWorkaround:
-			status = "MITIGATED"
+		status = "MITIGATED"
 	case domain.RemediationLevelUnavailable:
-			status = "OPEN"
+		status = "OPEN"
 	}
-
 
 	affected, err := o.findingPort.ApplyRemediationByInstallationAndCVE(
 		ctx, installationID, cveID, remediationFactor, status,
@@ -1489,16 +1551,45 @@ func (o *Orchestrator) SaveContainer(ctx context.Context, container *domain.Cont
 
 // ScanAndSaveContainerImage escanea una imagen de contenedor usando el ScoutAdapter
 // y guarda los resultados (Vulnerabilidades) en la BD, enlazándolos a la imagen.
-func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName string, imageID string) error {
+func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName string, imageID string, opts ...domain.VulnerabilityScanOptions) (*domain.VulnerabilityScanResult, error) {
 	if o.scoutPort == nil {
-		return errors.New("scoutPort is not initialized")
+		return nil, errors.New("scoutPort is not initialized")
+	}
+
+	scanStartedAt := time.Now().UTC()
+	scanOpts := domain.VulnerabilityScanOptions{}
+	if len(opts) > 0 {
+		scanOpts = opts[0]
+	}
+
+	result := &domain.VulnerabilityScanResult{
+		InstallationID: imageID,
+		CPE:            imageName,
+		ScanStartedAt:  &scanStartedAt,
+	}
+
+	if !scanOpts.ForceRefresh {
+		image, err := o.containerPort.GetContainerImage(ctx, imageID)
+		if err == nil && image != nil && image.VulnScanCompletedAt != nil && time.Since(*image.VulnScanCompletedAt) <= nvdEnrichmentTTL {
+			result.VulnerabilitiesFound = image.VulnScanProcessed
+			result.TotalAvailable = image.VulnScanTotalAvailable
+			result.Processed = image.VulnScanProcessed
+			result.CacheHit = true
+			result.ProviderPagesFetched = image.VulnScanPagesFetched
+			scanCompletedAt := time.Now().UTC()
+			result.ScanCompletedAt = &scanCompletedAt
+			_ = o.updateContainerImageScanMetadata(ctx, imageID, result, scanStartedAt)
+			return result, nil
+		}
 	}
 
 	// 1. Llamar a Docker Scout
 	vulns, err := o.scoutPort.ScanImage(ctx, imageName)
 	if err != nil {
-		return fmt.Errorf("error escaneando imagen %s: %w", imageName, err)
+		return nil, fmt.Errorf("error escaneando imagen %s: %w", imageName, err)
 	}
+	result.VulnerabilitiesFound = len(vulns)
+	result.TotalAvailable = len(vulns)
 
 	// 2. Guardar las vulnerabilidades y enlazarlas a la imagen de forma síncrona
 	var vulnsToEnrich []domain.Vulnerability
@@ -1506,6 +1597,7 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		// Obtener vulnerabilidad existente para no perder enriquecimiento previo (ej. NVD)
 		if existingVuln, err := o.vulnPort.GetByID(ctx, v.CVEID); err == nil && existingVuln != nil {
 			v.NVDEnriched = existingVuln.NVDEnriched
+			v.NVDEnrichedAt = existingVuln.NVDEnrichedAt
 			if len(v.CWE) == 0 {
 				v.CWE = existingVuln.CWE
 			}
@@ -1545,17 +1637,19 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 			RiskScore:         v.BaseScore * 0.5,
 		}
 
-		_, _, err = o.findingPort.EnsureForContainerImageAndCVE(ctx, imageID, v.CVEID, finding)
+		_, created, err := o.findingPort.EnsureForContainerImageAndCVE(ctx, imageID, v.CVEID, finding)
 		if err != nil {
-			return fmt.Errorf("error creando finding para imagen %s y CVE %s: %w", imageID, v.CVEID, err)
+			return nil, fmt.Errorf("error creando finding para imagen %s y CVE %s: %w", imageID, v.CVEID, err)
 		}
+		if created {
+			result.FindingsCreated++
+		} else {
+			result.FindingsExisting++
+		}
+		result.Processed++
 
-		// Filtrar para enriquecimiento asíncrono: toda vulnerabilidad no enriquecida
-		if !v.NVDEnriched {
-			vulnsToEnrich = append(vulnsToEnrich, v)
-		}
-		// Filtrar para enriquecimiento asíncrono: toda vulnerabilidad no enriquecida
-		if !v.NVDEnriched {
+		// Filtrar para enriquecimiento asíncrono: no enriquecida o enriquecimiento NVD caducado.
+		if !isNVDEnrichmentFresh(v) {
 			vulnsToEnrich = append(vulnsToEnrich, v)
 		}
 		o.EnqueueCVE(v.CVEID, 0) // 0 = sin contexto de proyecto (cron Docker Scout)
@@ -1600,7 +1694,9 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 					if enrichedData.Description != "" {
 						v.Description = enrichedData.Description
 					}
+					enrichedAt := time.Now().UTC()
 					v.NVDEnriched = true
+					v.NVDEnrichedAt = &enrichedAt
 					_ = o.vulnPort.Save(ctx, &v)
 					descSnippet := v.Description
 					if len(descSnippet) > 40 {
@@ -1649,7 +1745,9 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 							v.Description = enriched.Description
 						}
 					}
+					enrichedAt := time.Now().UTC()
 					v.NVDEnriched = true
+					v.NVDEnrichedAt = &enrichedAt
 					// Actualizar la vulnerabilidad en la base de datos
 					_ = repo.Save(bgCtx, &v)
 				} else {
@@ -1662,7 +1760,46 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		}(vulnsToEnrich, o.vulnScannerPort, o.vulnPort)
 	}
 
-	return nil
+	scanCompletedAt := time.Now().UTC()
+	result.ScanCompletedAt = &scanCompletedAt
+	result.ProviderPagesFetched = 1
+
+	if err := o.updateContainerImageScanMetadata(ctx, imageID, result, scanStartedAt); err != nil {
+		return nil, fmt.Errorf("error guardando metadata de escaneo de imagen %s: %w", imageID, err)
+	}
+
+	return result, nil
+}
+
+func (o *Orchestrator) updateContainerImageScanMetadata(ctx context.Context, imageID string, result *domain.VulnerabilityScanResult, startedAt time.Time) error {
+	if o.dbHelper == nil || result == nil {
+		return nil
+	}
+
+	completedAt := time.Now().UTC()
+	if result.ScanCompletedAt != nil {
+		completedAt = *result.ScanCompletedAt
+	}
+
+	query := `
+		MATCH (ci:ContainerImage {id: $image_id})
+		SET ci.vuln_scan_started_at = $started_at,
+		    ci.vuln_scan_completed_at = $completed_at,
+		    ci.vuln_scan_cache_hit = $cache_hit,
+		    ci.vuln_scan_total_available = $total_available,
+		    ci.vuln_scan_processed = $processed,
+		    ci.vuln_scan_pages_fetched = $pages_fetched
+	`
+
+	return o.dbHelper.ExecuteWrite(ctx, query, map[string]any{
+		"image_id":        imageID,
+		"started_at":      startedAt,
+		"completed_at":    completedAt,
+		"cache_hit":       result.CacheHit,
+		"total_available": result.TotalAvailable,
+		"processed":       result.Processed,
+		"pages_fetched":   result.ProviderPagesFetched,
+	})
 }
 
 // SyncScoutDaily obtiene todas las imágenes de contenedores registradas
@@ -1688,7 +1825,7 @@ func (o *Orchestrator) SyncScoutDaily(ctx context.Context) error {
 		}
 
 		fmt.Printf("[Scout Sync] Escaneando imagen: %s\n", imageName)
-		err := o.ScanAndSaveContainerImage(ctx, imageName, img.ImageID)
+		_, err := o.ScanAndSaveContainerImage(ctx, imageName, img.ImageID, domain.VulnerabilityScanOptions{ForceRefresh: true})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("fallo al escanear %s: %v", imageName, err))
 		}

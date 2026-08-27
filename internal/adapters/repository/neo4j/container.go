@@ -27,14 +27,26 @@ func (r *containerRepo) SaveContainerImage(ctx context.Context, image *domain.Co
 		SET i.name = $name,
 		    i.tag = $tag,
 		    i.digest = $digest,
-		    i.risk_score = $risk_score
+		    i.risk_score = $risk_score,
+		    i.vuln_scan_started_at = coalesce($vuln_scan_started_at, i.vuln_scan_started_at),
+		    i.vuln_scan_completed_at = coalesce($vuln_scan_completed_at, i.vuln_scan_completed_at),
+		    i.vuln_scan_cache_hit = coalesce($vuln_scan_cache_hit, i.vuln_scan_cache_hit),
+		    i.vuln_scan_total_available = coalesce($vuln_scan_total_available, i.vuln_scan_total_available),
+		    i.vuln_scan_processed = coalesce($vuln_scan_processed, i.vuln_scan_processed),
+		    i.vuln_scan_pages_fetched = coalesce($vuln_scan_pages_fetched, i.vuln_scan_pages_fetched)
 	`
 	params := map[string]any{
-		"id":         image.ImageID,
-		"name":       image.Name,
-		"tag":        image.Tag,
-		"digest":     image.Digest,
-		"risk_score": image.RiskScore,
+		"id":                        image.ImageID,
+		"name":                      image.Name,
+		"tag":                       image.Tag,
+		"digest":                    image.Digest,
+		"risk_score":                image.RiskScore,
+		"vuln_scan_started_at":      timePtrValue(image.VulnScanStartedAt),
+		"vuln_scan_completed_at":    timePtrValue(image.VulnScanCompletedAt),
+		"vuln_scan_cache_hit":       image.VulnScanCacheHit,
+		"vuln_scan_total_available": image.VulnScanTotalAvailable,
+		"vuln_scan_processed":       image.VulnScanProcessed,
+		"vuln_scan_pages_fetched":   image.VulnScanPagesFetched,
 	}
 
 	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
@@ -80,11 +92,17 @@ func (r *containerRepo) GetContainerImage(ctx context.Context, imageID string) (
 			}
 
 			return &domain.ContainerImage{
-				ImageID:   getString(props["id"]),
-				Name:      getString(props["name"]),
-				Tag:       getString(props["tag"]),
-				Digest:    getString(props["digest"]),
-				RiskScore: getFloat(props["risk_score"]),
+				ImageID:                getString(props["id"]),
+				Name:                   getString(props["name"]),
+				Tag:                    getString(props["tag"]),
+				Digest:                 getString(props["digest"]),
+				RiskScore:              getFloat(props["risk_score"]),
+				VulnScanStartedAt:      getTimePtr(props, "vuln_scan_started_at"),
+				VulnScanCompletedAt:    getTimePtr(props, "vuln_scan_completed_at"),
+				VulnScanCacheHit:       getBool(props, "vuln_scan_cache_hit"),
+				VulnScanTotalAvailable: int(getInt64(props, "vuln_scan_total_available")),
+				VulnScanProcessed:      int(getInt64(props, "vuln_scan_processed")),
+				VulnScanPagesFetched:   int(getInt64(props, "vuln_scan_pages_fetched")),
 			}, nil
 		}
 		return nil, nil
@@ -131,10 +149,16 @@ func (r *containerRepo) GetAllContainerImages(ctx context.Context) ([]domain.Con
 			props := iNode.GetProperties()
 
 			images = append(images, domain.ContainerImage{
-				ImageID: getString(props, "id"),
-				Name:    getString(props, "name"),
-				Tag:     getString(props, "tag"),
-				Digest:  getString(props, "digest"),
+				ImageID:                getString(props, "id"),
+				Name:                   getString(props, "name"),
+				Tag:                    getString(props, "tag"),
+				Digest:                 getString(props, "digest"),
+				VulnScanStartedAt:      getTimePtr(props, "vuln_scan_started_at"),
+				VulnScanCompletedAt:    getTimePtr(props, "vuln_scan_completed_at"),
+				VulnScanCacheHit:       getBool(props, "vuln_scan_cache_hit"),
+				VulnScanTotalAvailable: int(getInt64(props, "vuln_scan_total_available")),
+				VulnScanProcessed:      int(getInt64(props, "vuln_scan_processed")),
+				VulnScanPagesFetched:   int(getInt64(props, "vuln_scan_pages_fetched")),
 			})
 		}
 		return images, result.Err()

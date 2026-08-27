@@ -618,12 +618,18 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		    (n:Network) OR 
 		    (n:Endpoint AND (
 			  EXISTS { MATCH (n)-[:HOSTS]-(c2:Container) WHERE c2 IN nodes(path) } OR
-		      EXISTS {
-		        MATCH (n)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(v:Vulnerability)
-		        WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269']))
-		      } OR EXISTS {
-		        MATCH (n)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(v:Vulnerability)
-		        WHERE toLower(c.state) = 'running' AND ((v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269'])))
+			      EXISTS {
+			        MATCH (n)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->(fNative:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+			        WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269']))
+			          AND NOT (toUpper(coalesce(fNative.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			          AND coalesce(fNative.remediation_factor, 1.0) > 0.0
+			          AND coalesce(fNative.risk_score, 0.0) > 0.0
+			      } OR EXISTS {
+			        MATCH (n)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->(fHosted:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+			        WHERE toLower(c.state) = 'running' AND ((v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(cwe IN coalesce(v.cwe, []) WHERE cwe IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269'])))
+			          AND NOT (toUpper(coalesce(fHosted.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			          AND coalesce(fHosted.remediation_factor, 1.0) > 0.0
+			          AND coalesce(fHosted.risk_score, 0.0) > 0.0
 		      } OR EXISTS {
 		        MATCH (n)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(v:Vulnerability)
 		        WHERE toLower(c.state) = 'running' AND ((v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269'])))
@@ -635,9 +641,12 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			  EXISTS { MATCH (ep:Endpoint)-[:HOSTS]->(n) WHERE ep IN nodes(path) }
 		      OR
 		      (EXISTS { MATCH (n)-[:CONNECTED_TO]->(:Network) } AND (
-		        EXISTS {
-		          MATCH (n)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(v:Vulnerability)
-		          WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269']))
+			        EXISTS {
+			          MATCH (n)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->(fDirect:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+			          WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269']))
+			            AND NOT (toUpper(coalesce(fDirect.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			            AND coalesce(fDirect.remediation_factor, 1.0) > 0.0
+			            AND coalesce(fDirect.risk_score, 0.0) > 0.0
 		        } OR EXISTS {
 		          MATCH (n)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(v:Vulnerability)
 		          WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269']))
@@ -660,54 +669,72 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			// Caso 1: ep es Endpoint y la vuln está en un software nativo
 			MATCH (ep:Endpoint)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 			WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269']))
+			  AND NOT (toUpper(coalesce(f.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			  AND coalesce(f.remediation_factor, 1.0) > 0.0
+			  AND coalesce(f.risk_score, 0.0) > 0.0
 			RETURN si, null AS ci, f, elementId(f) AS f_id, v, false AS is_container, null AS container, 1 AS priority
 			UNION
 			// Caso 2: ep es Endpoint, con vuln en software de un contenedor hosteado
 			WITH ep
 			MATCH (ep:Endpoint)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-			WHERE toLower(c.state) = 'running' AND ((v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269'])))
+			WHERE toLower(c.state) = 'running' AND ((v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(cwe IN coalesce(v.cwe, []) WHERE cwe IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269'])))
+			  AND NOT (toUpper(coalesce(f.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			  AND coalesce(f.remediation_factor, 1.0) > 0.0
+			  AND coalesce(f.risk_score, 0.0) > 0.0
 			RETURN si, null AS ci, f, elementId(f) AS f_id, v, true AS is_container, c AS container, 2 AS priority
 			UNION
 			// Caso 3a: ep es Endpoint, con vuln en imagen de un contenedor hosteado (con nodo Finding)
 			WITH ep
 			MATCH (ep:Endpoint)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-			WHERE toLower(c.state) = 'running' AND ((v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269'])))
+			WHERE toLower(c.state) = 'running' AND ((v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(cwe IN coalesce(v.cwe, []) WHERE cwe IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269'])))
+			  AND NOT (toUpper(coalesce(f.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			  AND coalesce(f.remediation_factor, 1.0) > 0.0
+			  AND coalesce(f.risk_score, 0.0) > 0.0
 			RETURN null AS si, ci, f, elementId(f) AS f_id, v, true AS is_container, c AS container, 3 AS priority
 			UNION
 			// Caso 3b: ep es Endpoint, con vuln directa en imagen de contenedor hosteado sin finding
 			WITH ep
 			MATCH (ep:Endpoint)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
 			WHERE toLower(c.state) = 'running' AND ((v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269'])))
-			RETURN null AS si, ci, {risk_score: coalesce(v.base_score / 10.0, 0.98), severity: coalesce(v.severity, "CRITICAL"), status: "OPEN"} AS f, elementId(v) AS f_id, v, true AS is_container, c AS container, 4 AS priority
+			RETURN null AS si, ci, {risk_score: coalesce(v.base_score / 10.0, 0.0), severity: coalesce(v.severity, "UNKNOWN"), status: "LEGACY_UNCONTEXTUALIZED", risk_source: "LEGACY_VULNERABILITY_BASE_SCORE"} AS f, elementId(v) AS f_id, v, true AS is_container, c AS container, 4 AS priority
 			UNION
 			// Caso 4: ep es Container directamente enrutado, con vuln en software (AV:N RCE - MAYOR PRIORIDAD PARA CONTENEDORES)
 			WITH ep
 			MATCH (ep:Container)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 			WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269']))
+			  AND NOT (toUpper(coalesce(f.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			  AND coalesce(f.remediation_factor, 1.0) > 0.0
+			  AND coalesce(f.risk_score, 0.0) > 0.0
 			RETURN si, null AS ci, f, elementId(f) AS f_id, v, true AS is_container, ep AS container, 1 AS priority
 			UNION
 			// Caso 5a: ep es Container directamente enrutado, con vuln en imagen (con nodo Finding)
 			WITH ep
 			MATCH (ep:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 			WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269']))
+			  AND NOT (toUpper(coalesce(f.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			  AND coalesce(f.remediation_factor, 1.0) > 0.0
+			  AND coalesce(f.risk_score, 0.0) > 0.0
 			RETURN null AS si, ci, f, elementId(f) AS f_id, v, true AS is_container, ep AS container, 1 AS priority
 			UNION
 			// Caso 5b: ep es Container, con vuln directa sin nodo Finding
 			WITH ep
 			MATCH (ep:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
 			WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269']))
-			RETURN null AS si, ci, {risk_score: coalesce(v.base_score / 10.0, 0.98), severity: coalesce(v.severity, "CRITICAL"), status: "OPEN"} AS f, elementId(v) AS f_id, v, true AS is_container, ep AS container, 2 AS priority
+			RETURN null AS si, ci, {risk_score: coalesce(v.base_score / 10.0, 0.0), severity: coalesce(v.severity, "UNKNOWN"), status: "LEGACY_UNCONTEXTUALIZED", risk_source: "LEGACY_VULNERABILITY_BASE_SCORE"} AS f, elementId(v) AS f_id, v, true AS is_container, ep AS container, 2 AS priority
 			UNION
 			// Caso 6: Endpoint (host) atravesado por HOSTS - solo aplica a Endpoints, no a Containers
 			WITH ep, path, indexed, ie
 			MATCH (ep:Endpoint)-[:HOSTS]->(c2:Container)
 			WHERE c2 IN nodes(path) AND ie.index > 0 AND elementId(indexed[ie.index-1].asset) = elementId(c2)
-			OPTIONAL MATCH (c2)-[:HAS_INSTALLATION|USES_IMAGE*1..2]->()-[:HAS_FINDING|HAS_VULNERABILITY|OF_VULNERABILITY*1..3]->(vLPE:Vulnerability)
-			WHERE toLower(vLPE.description) CONTAINS 'container escape' OR toLower(vLPE.description) CONTAINS 'sandbox escape' OR toLower(vLPE.description) CONTAINS 'privilege escalation' OR toLower(vLPE.description) CONTAINS 'privilege' OR toLower(vLPE.description) CONTAINS 'out-of-bounds' OR toLower(vLPE.description) CONTAINS 'out of bounds' OR toLower(vLPE.description) CONTAINS 'buffer overflow' OR toLower(vLPE.description) CONTAINS 'arbitrary code' OR toLower(vLPE.description) CONTAINS 'code execution' OR any(c IN coalesce(vLPE.cwe, []) WHERE c IN ['CWE-787', 'CWE-119', 'CWE-120', 'CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-269'])
+			OPTIONAL MATCH (c2)-[:HAS_INSTALLATION|USES_IMAGE*1..2]->()-[:HAS_FINDING]->(fLPE:Finding)-[:OF_VULNERABILITY]->(vLPE:Vulnerability)
+			WHERE (toLower(vLPE.description) CONTAINS 'container escape' OR toLower(vLPE.description) CONTAINS 'sandbox escape' OR toLower(vLPE.description) CONTAINS 'privilege escalation' OR toLower(vLPE.description) CONTAINS 'privilege' OR toLower(vLPE.description) CONTAINS 'out-of-bounds' OR toLower(vLPE.description) CONTAINS 'out of bounds' OR toLower(vLPE.description) CONTAINS 'buffer overflow' OR toLower(vLPE.description) CONTAINS 'arbitrary code' OR toLower(vLPE.description) CONTAINS 'code execution' OR any(c IN coalesce(vLPE.cwe, []) WHERE c IN ['CWE-787', 'CWE-119', 'CWE-120', 'CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-269']))
+			  AND NOT (toUpper(coalesce(fLPE.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			  AND coalesce(fLPE.remediation_factor, 1.0) > 0.0
+			  AND coalesce(fLPE.risk_score, 0.0) > 0.0
 			WITH ep, vLPE, c2
 			ORDER BY vLPE.base_score DESC
 			WITH ep, collect(vLPE)[0] as bestLPE, c2
-			RETURN null AS si, null AS ci, {risk_score: coalesce(bestLPE.base_score, 8.8)} AS f, "" AS f_id, 
+			RETURN null AS si, null AS ci, {risk_score: coalesce(bestLPE.base_score / 10.0, 0.88), risk_source: "LEGACY_LPE_BASE_SCORE"} AS f, "" AS f_id,
 			       CASE WHEN bestLPE IS NOT NULL THEN bestLPE 
 			       ELSE {cve_id: CASE WHEN coalesce(c2.privileged, false) = true THEN "Privileged Container" ELSE "LPE / Movement" END, cvss_vector: "AV:L/AC:L", exploit: true} 
 			       END AS v, false AS is_container, null AS container, 0 AS priority
@@ -725,25 +752,40 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		
 		WITH path, e1, indexed, ie, ep, allNets,
 		  EXISTS { MATCH (ep)-[:CONNECTED_TO]->(:Network)<-[:CONNECTED_TO]-(lastNode) WHERE lastNode = last(nodes(path)) } AS canReachTargetDirectly,
-		  EXISTS {
-		    MATCH (ep)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(vLocal:Vulnerability)
-		    WHERE vLocal.cvss_vector CONTAINS 'AV:L' AND vLocal.cvss_vector CONTAINS 'C:H' AND vLocal.cvss_vector CONTAINS 'I:H'
-		  } AS hasHostLPE,
-		  EXISTS {
-		    MATCH (ep)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING|HAS_VULNERABILITY|OF_VULNERABILITY*1..3]->(vContLocal:Vulnerability)
-		    WHERE toLower(c.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'container escape' OR toLower(vContLocal.description) CONTAINS 'sandbox escape' OR toLower(vContLocal.description) CONTAINS 'escape container' OR toLower(vContLocal.description) CONTAINS 'runc escape')
-		  } AS hasContLPE,
-		  EXISTS {
-		    MATCH (ep)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING|HAS_VULNERABILITY|OF_VULNERABILITY*1..3]->(vContLocal:Vulnerability)
-		    WHERE toLower(c.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'container escape' OR toLower(vContLocal.description) CONTAINS 'sandbox escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation' OR toLower(vContLocal.description) CONTAINS 'privilege' OR toLower(vContLocal.description) CONTAINS 'out-of-bounds' OR toLower(vContLocal.description) CONTAINS 'out of bounds' OR toLower(vContLocal.description) CONTAINS 'buffer overflow' OR toLower(vContLocal.description) CONTAINS 'arbitrary code' OR toLower(vContLocal.description) CONTAINS 'code execution' OR any(c IN coalesce(vContLocal.cwe, []) WHERE c IN ['CWE-787', 'CWE-119', 'CWE-120', 'CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-269']))
-		  } AS hasImageContLPE,
-		  EXISTS {
-		    MATCH (ep:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING|HAS_VULNERABILITY|OF_VULNERABILITY*1..3]->(vContLocal:Vulnerability)
-		    WHERE toLower(ep.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'container escape' OR toLower(vContLocal.description) CONTAINS 'sandbox escape' OR toLower(vContLocal.description) CONTAINS 'escape container' OR toLower(vContLocal.description) CONTAINS 'runc escape')
-		  } AS hasDirectContLPE,
-		  EXISTS {
-		    MATCH (ep:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING|HAS_VULNERABILITY|OF_VULNERABILITY*1..3]->(vContLocal:Vulnerability)
-		    WHERE toLower(ep.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'container escape' OR toLower(vContLocal.description) CONTAINS 'sandbox escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation' OR toLower(vContLocal.description) CONTAINS 'privilege' OR toLower(vContLocal.description) CONTAINS 'out-of-bounds' OR toLower(vContLocal.description) CONTAINS 'out of bounds' OR toLower(vContLocal.description) CONTAINS 'buffer overflow' OR toLower(vContLocal.description) CONTAINS 'arbitrary code' OR toLower(vContLocal.description) CONTAINS 'code execution' OR any(c IN coalesce(vContLocal.cwe, []) WHERE c IN ['CWE-787', 'CWE-119', 'CWE-120', 'CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-269']))
+			  EXISTS {
+			    MATCH (ep)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->(fLocal:Finding)-[:OF_VULNERABILITY]->(vLocal:Vulnerability)
+			    WHERE vLocal.cvss_vector CONTAINS 'AV:L' AND vLocal.cvss_vector CONTAINS 'C:H' AND vLocal.cvss_vector CONTAINS 'I:H'
+			      AND NOT (toUpper(coalesce(fLocal.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			      AND coalesce(fLocal.remediation_factor, 1.0) > 0.0
+			      AND coalesce(fLocal.risk_score, 0.0) > 0.0
+			  } AS hasHostLPE,
+			  EXISTS {
+			    MATCH (ep)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->(fContLocal:Finding)-[:OF_VULNERABILITY]->(vContLocal:Vulnerability)
+			    WHERE toLower(c.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'container escape' OR toLower(vContLocal.description) CONTAINS 'sandbox escape' OR toLower(vContLocal.description) CONTAINS 'escape container' OR toLower(vContLocal.description) CONTAINS 'runc escape')
+			      AND NOT (toUpper(coalesce(fContLocal.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			      AND coalesce(fContLocal.remediation_factor, 1.0) > 0.0
+			      AND coalesce(fContLocal.risk_score, 0.0) > 0.0
+			  } AS hasContLPE,
+			  EXISTS {
+			    MATCH (ep)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING]->(fImageLocal:Finding)-[:OF_VULNERABILITY]->(vContLocal:Vulnerability)
+			    WHERE toLower(c.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'container escape' OR toLower(vContLocal.description) CONTAINS 'sandbox escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation' OR toLower(vContLocal.description) CONTAINS 'privilege' OR toLower(vContLocal.description) CONTAINS 'out-of-bounds' OR toLower(vContLocal.description) CONTAINS 'out of bounds' OR toLower(vContLocal.description) CONTAINS 'buffer overflow' OR toLower(vContLocal.description) CONTAINS 'arbitrary code' OR toLower(vContLocal.description) CONTAINS 'code execution' OR any(c IN coalesce(vContLocal.cwe, []) WHERE c IN ['CWE-787', 'CWE-119', 'CWE-120', 'CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-269']))
+			      AND NOT (toUpper(coalesce(fImageLocal.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			      AND coalesce(fImageLocal.remediation_factor, 1.0) > 0.0
+			      AND coalesce(fImageLocal.risk_score, 0.0) > 0.0
+			  } AS hasImageContLPE,
+			  EXISTS {
+			    MATCH (ep:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->(fDirectContLocal:Finding)-[:OF_VULNERABILITY]->(vContLocal:Vulnerability)
+			    WHERE toLower(ep.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'container escape' OR toLower(vContLocal.description) CONTAINS 'sandbox escape' OR toLower(vContLocal.description) CONTAINS 'escape container' OR toLower(vContLocal.description) CONTAINS 'runc escape')
+			      AND NOT (toUpper(coalesce(fDirectContLocal.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			      AND coalesce(fDirectContLocal.remediation_factor, 1.0) > 0.0
+			      AND coalesce(fDirectContLocal.risk_score, 0.0) > 0.0
+			  } AS hasDirectContLPE,
+			  EXISTS {
+			    MATCH (ep:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING]->(fDirectImageLocal:Finding)-[:OF_VULNERABILITY]->(vContLocal:Vulnerability)
+			    WHERE toLower(ep.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'container escape' OR toLower(vContLocal.description) CONTAINS 'sandbox escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation' OR toLower(vContLocal.description) CONTAINS 'privilege' OR toLower(vContLocal.description) CONTAINS 'out-of-bounds' OR toLower(vContLocal.description) CONTAINS 'out of bounds' OR toLower(vContLocal.description) CONTAINS 'buffer overflow' OR toLower(vContLocal.description) CONTAINS 'arbitrary code' OR toLower(vContLocal.description) CONTAINS 'code execution' OR any(c IN coalesce(vContLocal.cwe, []) WHERE c IN ['CWE-787', 'CWE-119', 'CWE-120', 'CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-269']))
+			      AND NOT (toUpper(coalesce(fDirectImageLocal.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			      AND coalesce(fDirectImageLocal.remediation_factor, 1.0) > 0.0
+			      AND coalesce(fDirectImageLocal.risk_score, 0.0) > 0.0
 		  } AS hasDirectImageContLPE
 		
 		WITH path, e1, indexed, ie, ep, allNets, 
@@ -780,12 +822,24 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		)
 
 		RETURN e1 AS e1_node, e1.id AS entry_id, steps,
-		  // ¿Tiene el entry container un LPE real (CVE) sin depender de privileged=true?
-		  CASE
-		    WHEN e1:Container THEN (
-		      EXISTS { MATCH (e1)-[:HAS_INSTALLATION]->()-[:HAS_FINDING|HAS_VULNERABILITY|OF_VULNERABILITY*1..3]->(vLPE:Vulnerability) WHERE toLower(vLPE.description) CONTAINS 'container escape' OR toLower(vLPE.description) CONTAINS 'sandbox escape' OR toLower(vLPE.description) CONTAINS 'escape container' OR toLower(vLPE.description) CONTAINS 'runc escape' }
-		      OR EXISTS { MATCH (e1)-[:USES_IMAGE]->()-[:HAS_FINDING|HAS_VULNERABILITY|OF_VULNERABILITY*1..3]->(vLPE2:Vulnerability) WHERE toLower(vLPE2.description) CONTAINS 'container escape' OR toLower(vLPE2.description) CONTAINS 'sandbox escape' OR toLower(vLPE2.description) CONTAINS 'privilege escalation' OR toLower(vLPE2.description) CONTAINS 'privilege' OR toLower(vLPE2.description) CONTAINS 'out-of-bounds' OR toLower(vLPE2.description) CONTAINS 'out of bounds' OR toLower(vLPE2.description) CONTAINS 'buffer overflow' OR toLower(vLPE2.description) CONTAINS 'arbitrary code' OR toLower(vLPE2.description) CONTAINS 'code execution' OR any(c IN coalesce(vLPE2.cwe, []) WHERE c IN ['CWE-787', 'CWE-119', 'CWE-120', 'CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-269']) }
-		    )
+			  // ¿Tiene el entry container un LPE real (CVE) sin depender de privileged=true?
+			  CASE
+			    WHEN e1:Container THEN (
+			      EXISTS {
+			        MATCH (e1)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->(fEntryLPE:Finding)-[:OF_VULNERABILITY]->(vLPE:Vulnerability)
+			        WHERE (toLower(vLPE.description) CONTAINS 'container escape' OR toLower(vLPE.description) CONTAINS 'sandbox escape' OR toLower(vLPE.description) CONTAINS 'escape container' OR toLower(vLPE.description) CONTAINS 'runc escape')
+			          AND NOT (toUpper(coalesce(fEntryLPE.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			          AND coalesce(fEntryLPE.remediation_factor, 1.0) > 0.0
+			          AND coalesce(fEntryLPE.risk_score, 0.0) > 0.0
+			      }
+			      OR EXISTS {
+			        MATCH (e1)-[:USES_IMAGE]->()-[:HAS_FINDING]->(fEntryImageLPE:Finding)-[:OF_VULNERABILITY]->(vLPE2:Vulnerability)
+			        WHERE (toLower(vLPE2.description) CONTAINS 'container escape' OR toLower(vLPE2.description) CONTAINS 'sandbox escape' OR toLower(vLPE2.description) CONTAINS 'privilege escalation' OR toLower(vLPE2.description) CONTAINS 'privilege' OR toLower(vLPE2.description) CONTAINS 'out-of-bounds' OR toLower(vLPE2.description) CONTAINS 'out of bounds' OR toLower(vLPE2.description) CONTAINS 'buffer overflow' OR toLower(vLPE2.description) CONTAINS 'arbitrary code' OR toLower(vLPE2.description) CONTAINS 'code execution' OR any(c IN coalesce(vLPE2.cwe, []) WHERE c IN ['CWE-787', 'CWE-119', 'CWE-120', 'CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-269']))
+			          AND NOT (toUpper(coalesce(fEntryImageLPE.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			          AND coalesce(fEntryImageLPE.remediation_factor, 1.0) > 0.0
+			          AND coalesce(fEntryImageLPE.risk_score, 0.0) > 0.0
+			      }
+			    )
 		    ELSE true
 		  END AS hasRealLPE
 		ORDER BY hasRealLPE DESC
@@ -1018,6 +1072,15 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 
 							cvss := getStringLocal(vulnProps["cvss_vector"])
 							risk := getFloatLocal(findingProps["risk_score"])
+							if risk < 0 {
+								risk = 0
+							}
+							if risk > 1 {
+								risk /= 10.0
+							}
+							if risk > 1 {
+								risk = 1
+							}
 
 							findingElementID := getStringLocal(netMap["f_id"])
 							vulnCVE := getStringLocal(vulnProps["cve_id"])

@@ -21,10 +21,8 @@ import (
 	"sync"
 	"time"
 
-
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 )
-
 
 // --- Formato JSON de NIST v2.0 ---
 
@@ -121,10 +119,17 @@ type NistAPIAdapter struct {
 // nvdMaxRetries define el número máximo de reintentos para llamadas a la API del NIST en caso de errores.
 const nvdMaxRetries = 3
 
+// nvdCPEPageSize define el tamaño de página para consultas NVD por CPE.
+// Se mantiene conservador para evitar timeouts/rate limits en análisis síncronos.
+const nvdCPEPageSize = 100
+
 // nvdCacheEntry representa una entrada en caché de vulnerabilidades obtenidas de NVD, junto con su fecha de expiración.
 type nvdCacheEntry struct {
 	vulnerabilities []domain.Vulnerability
+	cachedAt        time.Time
 	expiresAt       time.Time
+	totalAvailable  int
+	pagesFetched    int
 }
 
 // NewNistAPIAdapter inicializa el adaptador de infraestructura
@@ -142,12 +147,20 @@ func NewNistAPIAdapter(baseURL string, apiKey string, timeoutSeconds int) *NistA
 		baseURL:     baseURL,
 		apiKey:      apiKey,
 		minInterval: minInterval,
-		cacheTTL:    24 * time.Hour,
+		cacheTTL:    6 * time.Hour,
 		cpeCache:    make(map[string]nvdCacheEntry),
 		httpClient: &http.Client{
 			Timeout: time.Duration(timeoutSeconds) * time.Second,
 		},
 	}
+}
+
+// SetCacheTTL permite configurar cuánto tiempo se reutilizan resultados NVD cacheados por CPE.
+func (a *NistAPIAdapter) SetCacheTTL(ttl time.Duration) {
+	if ttl <= 0 {
+		return
+	}
+	a.cacheTTL = ttl
 }
 
 // waitTurn implementa un mecanismo de rate limiting para cumplir con las restricciones de la API del NIST.
@@ -317,7 +330,7 @@ func sleepBackoff(ctx context.Context, attempt int, retryAfter time.Duration) er
 }
 
 // getCPECache obtiene las vulnerabilidades en caché para un CPE dado, si existen y no han expirado.
-func (a *NistAPIAdapter) getCPECache(cpe string) ([]domain.Vulnerability, bool) {
+func (a *NistAPIAdapter) getCPECache(cpe string) (*domain.VulnerabilityFetchResult, bool) {
 	a.cacheMu.RLock()
 	entry, ok := a.cpeCache[cpe]
 	a.cacheMu.RUnlock()
@@ -335,19 +348,42 @@ func (a *NistAPIAdapter) getCPECache(cpe string) ([]domain.Vulnerability, bool) 
 
 	out := make([]domain.Vulnerability, len(entry.vulnerabilities))
 	copy(out, entry.vulnerabilities)
-	return out, true
+	cachedAt := entry.cachedAt
+	expiresAt := entry.expiresAt
+	return &domain.VulnerabilityFetchResult{
+		Vulnerabilities: out,
+		CacheHit:        true,
+		CachedAt:        &cachedAt,
+		CacheExpiresAt:  &expiresAt,
+		TotalAvailable:  entry.totalAvailable,
+		PagesFetched:    entry.pagesFetched,
+	}, true
 }
 
-func (a *NistAPIAdapter) setCPECache(cpe string, vulns []domain.Vulnerability) {
+func (a *NistAPIAdapter) setCPECache(cpe string, vulns []domain.Vulnerability, totalAvailable int, pagesFetched int) *domain.VulnerabilityFetchResult {
 	copyVulns := make([]domain.Vulnerability, len(vulns))
 	copy(copyVulns, vulns)
+	now := time.Now()
+	expiresAt := now.Add(a.cacheTTL)
 
 	a.cacheMu.Lock()
 	a.cpeCache[cpe] = nvdCacheEntry{
 		vulnerabilities: copyVulns,
-		expiresAt:       time.Now().Add(a.cacheTTL),
+		cachedAt:        now,
+		expiresAt:       expiresAt,
+		totalAvailable:  totalAvailable,
+		pagesFetched:    pagesFetched,
 	}
 	a.cacheMu.Unlock()
+
+	return &domain.VulnerabilityFetchResult{
+		Vulnerabilities: copyVulns,
+		CacheHit:        false,
+		CachedAt:        &now,
+		CacheExpiresAt:  &expiresAt,
+		TotalAvailable:  totalAvailable,
+		PagesFetched:    pagesFetched,
+	}
 }
 
 /*
@@ -357,13 +393,90 @@ FetchByCPE consulta la API REST oficial de NIST NVD v2.0 usando un CPE (Common P
 3. Inyecta la API Key en las cabeceras (si está configurada) para evitar bloqueos por límite de peticiones.
 4. Envía la solicitud y decodifica la respuesta JSON en DTOs, mapeando el resultado a entidades limpias de dominio.
 */
-func (a *NistAPIAdapter) FetchByCPE(ctx context.Context, cpe string) ([]domain.Vulnerability, error) {
-	if vulns, ok := a.getCPECache(cpe); ok {
-		return vulns, nil
+func (a *NistAPIAdapter) FetchByCPE(ctx context.Context, cpe string, opts ...domain.VulnerabilityFetchOptions) (*domain.VulnerabilityFetchResult, error) {
+	fetchOpts := domain.VulnerabilityFetchOptions{}
+	if len(opts) > 0 {
+		fetchOpts = opts[0]
+	}
+
+	if !fetchOpts.ForceRefresh {
+		if cached, ok := a.getCPECache(cpe); ok {
+			return cached, nil
+		}
+	}
+
+	all := make([]domain.Vulnerability, 0)
+	seen := make(map[string]bool)
+	startIndex := 0
+	totalAvailable := 0
+	pagesFetched := 0
+	pageSize := fetchOpts.PageSize
+	if pageSize <= 0 {
+		pageSize = nvdCPEPageSize
+	}
+
+	for {
+		page, err := a.fetchByCPEPage(ctx, cpe, pageSize, startIndex)
+		if err != nil {
+			return nil, err
+		}
+		pagesFetched++
+		if page.TotalResults > totalAvailable {
+			totalAvailable = page.TotalResults
+		}
+
+		for _, item := range page.Vulnerabilities {
+			if !isVulnerableTargetForCPE(item, cpe) {
+				continue
+			}
+
+			vuln := toDomainEntity(item)
+			if vuln.CVEID == "" || seen[vuln.CVEID] {
+				continue
+			}
+
+			seen[vuln.CVEID] = true
+			all = append(all, vuln)
+		}
+
+		if len(page.Vulnerabilities) == 0 {
+			break
+		}
+
+		resultsPerPage := page.ResultsPerPage
+		if resultsPerPage <= 0 {
+			resultsPerPage = len(page.Vulnerabilities)
+		}
+		if resultsPerPage <= 0 {
+			break
+		}
+
+		startIndex += resultsPerPage
+		if startIndex >= page.TotalResults {
+			break
+		}
+	}
+
+	return a.setCPECache(cpe, all, totalAvailable, pagesFetched), nil
+}
+
+// fetchByCPEPage realiza una consulta paginada a la API de NIST NVD para un CPE específico, devolviendo un DTO con los resultados.
+func (a *NistAPIAdapter) fetchByCPEPage(ctx context.Context, cpe string, resultsPerPage int, startIndex int) (*NistResponseDTO, error) {
+	if resultsPerPage <= 0 {
+		resultsPerPage = nvdCPEPageSize
+	}
+	if startIndex < 0 {
+		startIndex = 0
 	}
 
 	escapedCPE := url.QueryEscape(cpe)
-	reqURL := fmt.Sprintf("%s?cpeName=%s&resultsPerPage=100", a.baseURL, escapedCPE)
+	reqURL := fmt.Sprintf(
+		"%s?cpeName=%s&resultsPerPage=%d&startIndex=%d",
+		a.baseURL,
+		escapedCPE,
+		resultsPerPage,
+		startIndex,
+	)
 
 	resp, err := a.doRequestWithRetry(ctx, func() (*http.Request, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
@@ -373,37 +486,32 @@ func (a *NistAPIAdapter) FetchByCPE(ctx context.Context, cpe string) ([]domain.V
 		return req, nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("error ejecutando llamada HTTP a NIST por CPE: %w", err)
+		return nil, fmt.Errorf("error ejecutando llamada HTTP a NIST por CPE %s startIndex=%d: %w", cpe, startIndex, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusNotFound {
-			empty := []domain.Vulnerability{}
-			a.setCPECache(cpe, empty)
-			return empty, nil
+			return &NistResponseDTO{
+				ResultsPerPage:  0,
+				StartIndex:      startIndex,
+				TotalResults:    0,
+				Vulnerabilities: []NistVulnerabilityDTO{},
+			}, nil
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
 			return nil, fmt.Errorf("api nist rate limit por CPE %s: status 429 tras reintentos", cpe)
 		}
-		return nil, fmt.Errorf("api nist devolvió status code inválido por CPE %s: %d", cpe, resp.StatusCode)
+		return nil, fmt.Errorf("api nist devolvió status code inválido por CPE %s startIndex=%d: %d", cpe, startIndex,
+			resp.StatusCode)
 	}
 
 	var apiResponse NistResponseDTO
 	if err := json.NewDecoder(resp.Body).Decode(&apiResponse); err != nil {
-		return nil, fmt.Errorf("error decodificando JSON de NIST por CPE: %w", err)
+		return nil, fmt.Errorf("error decodificando JSON de NIST por CPE %s startIndex=%d: %w", cpe, startIndex, err)
 	}
 
-	vulnerabilities := make([]domain.Vulnerability, 0, len(apiResponse.Vulnerabilities))
-	for _, item := range apiResponse.Vulnerabilities {
-		if !isVulnerableTargetForCPE(item, cpe) {
-			continue
-		}
-		vulnerabilities = append(vulnerabilities, toDomainEntity(item))
-	}
-
-	a.setCPECache(cpe, vulnerabilities)
-	return vulnerabilities, nil
+	return &apiResponse, nil
 }
 
 // getPrimaryVulnerableCPE obtiene el componente primario marcado como vulnerable=true en las configuraciones del CVE.
@@ -499,8 +607,6 @@ func isVulnerableTargetForCPE(dto NistVulnerabilityDTO, targetCPE string) bool {
 	return true
 }
 
-
-
 // FetchByDate consulta la API REST oficial de NIST NVD v2.0 usando fechas de modificación.
 // Usa lastModStartDate y lastModEndDate. Las fechas deben estar en formato ISO 8601.
 func (a *NistAPIAdapter) FetchByDate(ctx context.Context, startDate, endDate time.Time) ([]domain.Vulnerability,
@@ -594,6 +700,7 @@ func (a *NistAPIAdapter) FetchByCVE(ctx context.Context, cve string) (*domain.Vu
 // toDomainEntity es el "Traductor" (Mapper) de Infraestructura -> Dominio
 func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 	cve := dto.CVE
+	now := time.Now().UTC()
 
 	// 1. Extraer descripción (Prioridad Inglés, fallback a Español)
 	var finalDesc string
@@ -726,6 +833,8 @@ func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 		KEV:             false,
 		EPSSScore:       0.0,
 		Patches:         patches,
+		NVDEnriched:     true,
+		NVDEnrichedAt:   &now,
 	}
 }
 
@@ -737,11 +846,11 @@ type NVDCPERefDTO struct {
 }
 
 type NVDCPEMatchDTO struct {
-	CPEName      string        `json:"cpeName"`
-	CPENameID    string        `json:"cpeNameId"`
-	Deprecated   bool          `json:"deprecated"`
-	Created      string        `json:"created"`
-	LastModified string        `json:"lastModified"`
+	CPEName      string `json:"cpeName"`
+	CPENameID    string `json:"cpeNameId"`
+	Deprecated   bool   `json:"deprecated"`
+	Created      string `json:"created"`
+	LastModified string `json:"lastModified"`
 	Titles       []struct {
 		Title string `json:"title"`
 		Lang  string `json:"lang"`
@@ -767,8 +876,6 @@ func extractURLFromRefs(refs []NVDCPERefDTO) string {
 	}
 	return ""
 }
-
-
 
 type NVDCPENodeDTO struct {
 	CPE NVDCPEMatchDTO `json:"cpe"`
@@ -867,7 +974,6 @@ func (a *NistAPIAdapter) SearchCPECandidates(ctx context.Context, vendor, produc
 	if len(suggestions) > 10 {
 		suggestions = suggestions[:10]
 	}
-
 
 	return suggestions, nil
 }
@@ -997,6 +1103,3 @@ func (a *NistAPIAdapter) FetchNVDProductsByCPEMatch(ctx context.Context, cpeBase
 
 	return items, nil
 }
-
-
-

@@ -18,7 +18,6 @@ import (
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/service"
 )
 
-
 type OrchestratorHandler struct {
 	orchestrator *service.Orchestrator
 }
@@ -27,10 +26,7 @@ func NewOrchestratorHandler(o *service.Orchestrator) *OrchestratorHandler {
 	return &OrchestratorHandler{orchestrator: o}
 }
 
-
 // ESTRUCTURAS Y EMISOR DE AUDITORÍA (STDOUT + FICHERO PERSISTENTE)
-
-
 
 func extractJustification(r *http.Request) string {
 	if q := r.URL.Query().Get("justification"); strings.TrimSpace(q) != "" {
@@ -287,16 +283,23 @@ func (h *OrchestratorHandler) ScanContainerImageVulnerabilities(w http.ResponseW
 		imageName = imageID
 	}
 
-	if err := h.orchestrator.ScanAndSaveContainerImage(r.Context(), imageName, imageID); err != nil {
+	forceRefresh := strings.EqualFold(r.URL.Query().Get("force_refresh"), "true")
+
+	result, err := h.orchestrator.ScanAndSaveContainerImage(
+		r.Context(),
+		imageName,
+		imageID,
+		domain.VulnerabilityScanOptions{
+			ForceRefresh: forceRefresh,
+		},
+	)
+	if err != nil {
 		fmt.Printf("[ScanContainerImage] Error escaneando %s: %v\n", imageName, err)
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	sendJSON(w, map[string]string{
-		"status":  "success",
-		"message": fmt.Sprintf("Escaneo de '%s' completado.", imageName),
-	}, http.StatusOK)
+	sendJSON(w, result, http.StatusOK)
 }
 
 // POST /api/containers/{id}/installations
@@ -530,19 +533,27 @@ func (h *OrchestratorHandler) ScanSoftwareVulnerabilities(w http.ResponseWriter,
 		return
 	}
 
-	limit := 100
+	limit := 0
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		parsedLimit, err := strconv.Atoi(limitStr)
-		if err != nil || parsedLimit <= 0 {
+		if err != nil || parsedLimit < 0 {
 			sendError(w, "Invalid limit", http.StatusBadRequest)
 			return
 		}
-		if parsedLimit < limit {
-			limit = parsedLimit
-		}
+		limit = parsedLimit
 	}
 
-	result, err := h.orchestrator.AutoScanAndRegisterVulnerabilities(r.Context(), instID, swID, limit)
+	forceRefresh := strings.EqualFold(r.URL.Query().Get("force_refresh"), "true")
+
+	result, err := h.orchestrator.AutoScanAndRegisterVulnerabilities(
+		r.Context(),
+		instID,
+		swID,
+		domain.VulnerabilityScanOptions{
+			Limit:        limit,
+			ForceRefresh: forceRefresh,
+		},
+	)
 	if err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1493,7 +1504,6 @@ func (h *OrchestratorHandler) MapTTPsManually(w http.ResponseWriter, r *http.Req
 		"enqueued": enqueued,
 	}, http.StatusOK)
 }
-
 
 // POST /api/endpoints/{id}/containers
 func (h *OrchestratorHandler) AddContainerToEndpoint(w http.ResponseWriter, r *http.Request) {
