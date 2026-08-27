@@ -146,3 +146,10 @@ func getTimePtr(m map[string]any, k string) *time.Time {
 	}
 	return nil
 }
+
+func timePtrValue(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return *t
+}

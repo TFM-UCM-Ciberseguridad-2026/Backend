@@ -54,11 +54,6 @@ type CPEGuesserPort interface {
 	SearchBaseCPEs(ctx context.Context, tokens []string, topK int) ([]string, error)
 }
 
-
-
-
-
-
 type FindingPort interface {
 	Save(ctx context.Context, finding *domain.Finding) error
 	Update(ctx context.Context, finding *domain.Finding) error
@@ -188,7 +183,7 @@ type VulnerabilityAPIscanner interface {
 	// FetchVulnerabilities obtiene una lista de vulnerabilidades desde el API externa.
 	FetchVulnerabilities(ctx context.Context, limit int, offset int) ([]domain.Vulnerability, error)
 	// FetchByCPE obtiene las vulnerabilidades asociadas a un CPE específico.
-	FetchByCPE(ctx context.Context, cpe string) ([]domain.Vulnerability, error)
+	FetchByCPE(ctx context.Context, cpe string, opts ...domain.VulnerabilityFetchOptions) (*domain.VulnerabilityFetchResult, error)
 	// FetchByDate obtiene las vulnerabilidades modificadas en un rango de fechas.
 	FetchByDate(ctx context.Context, startDate, endDate time.Time) ([]domain.Vulnerability, error)
 	// FetchByCVE obtiene el detalle completo de una vulnerabilidad específica.
@@ -356,12 +351,12 @@ type RiskPort interface {
 // TTPMappedEvent se emite por el worker de TTPs cada vez que una CVE queda mapeada.
 // ProjectID = 0 indica origen global (sweep automático, cron, o escaneo sin contexto de proyecto).
 type TTPMappedEvent struct {
-	CVEID      string  `json:"cve_id"`
+	CVEID      string   `json:"cve_id"`
 	TTPs       []string `json:"ttps"`
-	Confidence string  `json:"confidence"`
-	Source     string  `json:"source"`
-	ProjectID  int64   `json:"project_id"` // 0 = global
-	Log        string  `json:"log"`
+	Confidence string   `json:"confidence"`
+	Source     string   `json:"source"`
+	ProjectID  int64    `json:"project_id"` // 0 = global
+	Log        string   `json:"log"`
 }
 
 // NotificationPort desacopla el worker de TTPs de cualquier detalle de transporte (WebSocket, SSE, etc.).

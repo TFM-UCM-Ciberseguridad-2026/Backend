@@ -31,9 +31,9 @@ func main() {
 		log.Fatalf("Primera consulta falló: %v", err)
 	}
 	firstDuration := time.Since(startFirst)
-	fmt.Printf("    CVEs: %d | duración: %s\n", len(first), firstDuration.Round(time.Millisecond))
+	fmt.Printf("    CVEs: %d | duración: %s\n", len(first.Vulnerabilities), firstDuration.Round(time.Millisecond))
 
-	if len(first) == 0 {
+	if len(first.Vulnerabilities) == 0 {
 		log.Fatalf("ASSERT FAIL: Tomcat 9.0.37 debería devolver CVEs")
 	}
 
@@ -44,10 +44,10 @@ func main() {
 		log.Fatalf("Segunda consulta falló: %v", err)
 	}
 	secondDuration := time.Since(startSecond)
-	fmt.Printf("    CVEs: %d | duración: %s\n", len(second), secondDuration.Round(time.Millisecond))
+	fmt.Printf("    CVEs: %d | duración: %s\n", len(second.Vulnerabilities), secondDuration.Round(time.Millisecond))
 
-	if len(second) != len(first) {
-		log.Fatalf("ASSERT FAIL: resultados distintos entre primera y segunda consulta: %d != %d", len(first), len(second))
+	if len(second.Vulnerabilities) != len(first.Vulnerabilities) {
+		log.Fatalf("ASSERT FAIL: resultados distintos entre primera y segunda consulta: %d != %d", len(first.Vulnerabilities), len(second.Vulnerabilities))
 	}
 
 	if secondDuration >= firstDuration {
