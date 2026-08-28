@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -20,17 +21,67 @@ func NewInfrastructureRepository(driver neo4j.DriverWithContext) ports.Infrastru
 	return &infrastructureRepo{driver: driver}
 }
 
+func parseGraphID(v any) string {
+	if v == nil {
+		return ""
+	}
+	switch val := v.(type) {
+	case string:
+		return val
+	case int64:
+		return strconv.FormatInt(val, 10)
+	case float64:
+		return strconv.FormatInt(int64(val), 10)
+	case int:
+		return strconv.Itoa(val)
+	default:
+		return fmt.Sprintf("%v", val)
+	}
+}
+
 // GetGraphData recupera todos los nodos y relaciones de la base de datos Neo4j en un formato estructurado.
-func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphData, error) {
+func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) (*domain.GraphData, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	// Consulta de lectura optimizada para obtener los nodos, relaciones y mapeos TTP de la infraestructura
+	params := map[string]any{
+		"projectID": projectID,
+	}
 
-	query := `
+	var matchClause string
+	if projectID > 0 {
+		matchClause = `
+			MATCH (proj:Project)
+			WHERE proj.id = $projectID OR toString(proj.id) = toString($projectID)
+			MATCH (proj)-[:HAS_ENDPOINT]->(e)
+			OPTIONAL MATCH (e)-[:CONNECTED_TO]->(net:Network)
+			OPTIONAL MATCH (e)-[:HAS_HARDWARE]->(hw:Hardware)
+			OPTIONAL MATCH (e)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+			OPTIONAL MATCH (si)-[:INSTANCE_OF]->(sw:Software)
+			OPTIONAL MATCH (si)-[:HAS_FINDING]->(f1:Finding)
+			OPTIONAL MATCH (f1)-[:OF_VULNERABILITY]->(v1:Vulnerability)
+			OPTIONAL MATCH (e)-[:HOSTS]->(c:Container)
+			OPTIONAL MATCH (c)-[:USES_IMAGE]->(ci:ContainerImage)
+			OPTIONAL MATCH (c)-[:HAS_INSTALLATION]->(csi:SoftwareInstallation)
+			OPTIONAL MATCH (csi)-[:INSTANCE_OF]->(csw:Software)
+			OPTIONAL MATCH (csi)-[:HAS_FINDING]->(cf1:Finding)
+			OPTIONAL MATCH (cf1)-[:OF_VULNERABILITY]->(cv1:Vulnerability)
+			OPTIONAL MATCH (c)-[:HAS_FINDING]->(cf2:Finding)
+			OPTIONAL MATCH (cf2)-[:OF_VULNERABILITY]->(cv2:Vulnerability)
+			OPTIONAL MATCH (ci)-[:HAS_VULNERABILITY]->(iv1:Vulnerability)
+			WITH DISTINCT proj, e, net, hw, si, sw, f1, v1, c, ci, csi, csw, cf1, cv1, cf2, cv2, iv1
+			UNWIND [proj, e, net, hw, si, sw, f1, v1, c, ci, csi, csw, cf1, cv1, cf2, cv2, iv1] AS nodeItem
+			WITH nodeItem AS n WHERE n IS NOT NULL
+			WITH DISTINCT n
+		`
+	} else {
+		matchClause = `
 			MATCH (n)
 			WHERE NOT (n:ThreatActor OR n:TTP OR n:IPAddress)
+		`
+	}
 
+	query := matchClause + `
 			OPTIONAL MATCH (n)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(t1:TTP)
 			WHERE "Vulnerability" IN labels(n)
 			WITH n, collect(DISTINCT t1) AS t1List
@@ -76,7 +127,7 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 				coalesce(rem.fixed_version, v.fixed_version, '') AS fixedVersion
 
 			WITH collect({
-					id: elementId(n),
+					id: coalesce(n.id, elementId(n)),
 					labels: labels(n),
 					properties: n {
 							.*,
@@ -101,9 +152,12 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 					},
 					hasVuln: COUNT { (n)-[:OF_VULNERABILITY]->(:Vulnerability) } > 0
 			}) AS nodes
+			WITH nodes, [nodeObj IN nodes | nodeObj.id] AS nodeIds
 
 			OPTIONAL MATCH (s)-[rel]->(t)
-			WHERE NOT (
+			WHERE (coalesce(s.id, elementId(s)) IN nodeIds OR elementId(s) IN nodeIds)
+			  AND (coalesce(t.id, elementId(t)) IN nodeIds OR elementId(t) IN nodeIds)
+			  AND NOT (
 					startNode(rel):ThreatActor OR
 					startNode(rel):TTP OR
 					startNode(rel):IPAddress OR
@@ -115,13 +169,14 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 			WITH nodes, collect({
 					id: elementId(rel),
 					type: type(rel),
-					source: elementId(startNode(rel)),
-					target: elementId(endNode(rel)),
+					source: coalesce(startNode(rel).id, elementId(startNode(rel))),
+					target: coalesce(endNode(rel).id, elementId(endNode(rel))),
 					properties: properties(rel)
 			}) AS cleanRels
 
+			WITH nodes, cleanRels, [nodeObj IN nodes | nodeObj.id] AS scopedIds
 			OPTIONAL MATCH (n)-[:HAS_IP]->(ip:IPAddress)
-			WHERE n:Endpoint OR n:Container
+			WHERE (n:Endpoint OR n:Container) AND (coalesce(n.id, elementId(n)) IN scopedIds OR elementId(n) IN scopedIds)
 
 			WITH nodes,
 				cleanRels,
@@ -129,7 +184,7 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 				CASE
 					WHEN n IS NULL OR ip IS NULL THEN null
 					ELSE {
-					node_id: elementId(n),
+					node_id: coalesce(n.id, elementId(n)),
 					ip: coalesce(ip.ip, ""),
 					vlan_id: coalesce(ip.vlan_id, 0)
 					}
@@ -143,7 +198,7 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 	`
 
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
-		result, err := tx.Run(ctx, query, nil)
+		result, err := tx.Run(ctx, query, params)
 		if err != nil {
 			return nil, err
 		}
@@ -171,7 +226,7 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 	if nodesRaw, ok := recordMap["nodes"].([]interface{}); ok {
 		for _, nodeRaw := range nodesRaw {
 			if nodeMap, ok := nodeRaw.(map[string]interface{}); ok {
-				id, _ := nodeMap["id"].(string)
+				id := parseGraphID(nodeMap["id"])
 				labelsRaw, _ := nodeMap["labels"].([]interface{})
 				labels := make([]string, len(labelsRaw))
 				for i, l := range labelsRaw {
@@ -243,7 +298,7 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 		endpointToIPs := make(map[string][]map[string]interface{})
 		for _, rawMap := range ipMapsRaw {
 			if m, ok := rawMap.(map[string]interface{}); ok {
-				endpointID, _ := m["node_id"].(string)
+				endpointID := parseGraphID(m["node_id"])
 				ip, _ := m["ip"].(string)
 				var vlanID int64
 				switch v := m["vlan_id"].(type) {
@@ -280,10 +335,10 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context) (*domain.GraphDat
 	if relsRaw, ok := recordMap["relationships"].([]interface{}); ok {
 		for _, relRaw := range relsRaw {
 			if relMap, ok := relRaw.(map[string]interface{}); ok {
-				id, _ := relMap["id"].(string)
+				id := parseGraphID(relMap["id"])
 				relType, _ := relMap["type"].(string)
-				source, _ := relMap["source"].(string)
-				target, _ := relMap["target"].(string)
+				source := parseGraphID(relMap["source"])
+				target := parseGraphID(relMap["target"])
 				props, _ := relMap["properties"].(map[string]interface{})
 
 				graphData.Relationships = append(graphData.Relationships, domain.GraphRelationship{
@@ -608,15 +663,22 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 	// 4. Privilegios (Root): Si la vuln de red tiene C:H, I:H, A:H, o si hay una vuln local (AV:L) con impacto alto.
 	query := `
 		MATCH path = (e1)-[:CONNECTED_TO|HOSTS*1..]-(eTarget)
-		WHERE (e1:Endpoint OR (e1:Container AND toLower(e1.state) = 'running')) AND e1.internet_exposed = true
-		  AND (eTarget:Endpoint OR (eTarget:Container AND toLower(eTarget.state) = 'running'))
+		WHERE ((e1:Endpoint AND NOT toLower(coalesce(e1.estado, e1.status, '')) IN ['decomisado', 'decommissioned']) OR (e1:Container AND toLower(e1.state) = 'running')) AND e1.internet_exposed = true
+		  AND ((eTarget:Endpoint AND NOT toLower(coalesce(eTarget.estado, eTarget.status, '')) IN ['decomisado', 'decommissioned']) OR (eTarget:Container AND toLower(eTarget.state) = 'running'))
 		  AND e1.id <> coalesce(eTarget.id, "0")
-		  AND ($projectID = 0 OR 
-		    EXISTS { MATCH (proj:Project {id: $projectID})-[:HAS_ENDPOINT]->(e1) } OR
-		    (e1:Container AND EXISTS { MATCH (proj:Project {id: $projectID})-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(e1) }))
+		  AND ($projectID = 0 OR toString($projectID) = "0" OR 
+		    EXISTS { MATCH (proj:Project)-[:HAS_ENDPOINT]->(e1) WHERE proj.id = $projectID OR toString(proj.id) = toString($projectID) OR proj.name = toString($projectID) } OR
+		    (e1:Container AND EXISTS { MATCH (proj:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(e1) WHERE proj.id = $projectID OR toString(proj.id) = toString($projectID) OR proj.name = toString($projectID) }))
+		  AND ($projectID = 0 OR toString($projectID) = "0" OR 
+		    EXISTS { MATCH (proj:Project)-[:HAS_ENDPOINT]->(eTarget) WHERE proj.id = $projectID OR toString(proj.id) = toString($projectID) OR proj.name = toString($projectID) } OR
+		    (eTarget:Container AND EXISTS { MATCH (proj:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(eTarget) WHERE proj.id = $projectID OR toString(proj.id) = toString($projectID) OR proj.name = toString($projectID) }))
 		  AND all(n IN nodes(path) WHERE 
 		    (n:Network) OR 
-		    (n:Endpoint AND (
+		    (($projectID = 0 OR toString($projectID) = "0" OR 
+		      EXISTS { MATCH (proj:Project)-[:HAS_ENDPOINT]->(n) WHERE proj.id = $projectID OR toString(proj.id) = toString($projectID) OR proj.name = toString($projectID) } OR
+		      (n:Container AND EXISTS { MATCH (proj:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(n) WHERE proj.id = $projectID OR toString(proj.id) = toString($projectID) OR proj.name = toString($projectID) }))
+		     AND
+		     ((n:Endpoint AND NOT toLower(coalesce(n.estado, n.status, '')) IN ['decomisado', 'decommissioned'] AND (
 			  EXISTS { MATCH (n)-[:HOSTS]-(c2:Container) WHERE c2 IN nodes(path) } OR
 			      EXISTS {
 			        MATCH (n)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->(fNative:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
@@ -653,7 +715,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		        }
 		      ))
 		    ))
-		  )
+		  )))
 		WITH path, e1, eTarget, [n IN nodes(path) WHERE n:Endpoint OR n:Container OR n:Network] AS asset_nodes
 		WHERE NOT any(i IN range(0, size(asset_nodes)-2) WHERE 
 		    asset_nodes[i]:Endpoint AND asset_nodes[i+1]:Container AND 
