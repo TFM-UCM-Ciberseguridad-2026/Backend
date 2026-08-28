@@ -20,7 +20,7 @@ var wsUpgrader = websocket.Upgrader{
 // wsClient representa una conexión WebSocket activa con su suscripción de proyecto.
 type wsClient struct {
 	conn      *websocket.Conn
-	projectID int64     // 0 = suscripción global (recibe todos los eventos)
+	projectID int64 // 0 = suscripción global (recibe todos los eventos)
 	send      chan []byte
 }
 
@@ -43,9 +43,10 @@ func NewWSHub() *WSHub {
 //   - c.projectID == N  → cliente de proyecto N, recibe SOLO eventos donde event.ProjectID == N
 //
 // Demostración de aislamiento:
-//   Cliente A: projectID=2, Cliente B: projectID=1
-//   Evento: ProjectID=1 → solo llega a Cliente B (y a cualquier suscriptor global).
-//   Cliente A: c.projectID(2) == 0? NO → c.projectID(2) == event.ProjectID(1)? NO → descartado.
+//
+//	Cliente A: projectID=2, Cliente B: projectID=1
+//	Evento: ProjectID=1 → solo llega a Cliente B (y a cualquier suscriptor global).
+//	Cliente A: c.projectID(2) == 0? NO → c.projectID(2) == event.ProjectID(1)? NO → descartado.
 func (h *WSHub) NotifyTTPMapped(_ context.Context, event ports.TTPMappedEvent) error {
 	data, err := json.Marshal(map[string]any{
 		"type":  "CVE_MAPPED",

@@ -69,6 +69,7 @@ type FindingPort interface {
 	// priority_score a cero: el finding sale de las agregaciones y conservaría si no la
 	// última puntuación calculada.
 	ApplyRemediationByInstallationAndCVE(ctx context.Context, installationID, cveID string, remediationFactor float64, status string) ([]int64, error)
+	ApplyRemediationByContainerAndCVE(ctx context.Context, containerID, cveID string, findingID int64, remediationFactor float64, status string) ([]int64, error)
 	GetVulnerabilitiesByFinding(ctx context.Context, findingID any) ([]domain.Vulnerability, error)
 }
 
@@ -78,6 +79,7 @@ type RemediationPort interface {
 	// ApplyByInstallationAndCVE sincroniza estado y fecha en las remediaciones del CVE en
 	// esa instalación, y devuelve cuántas cambió. appliedAt nulo limpia la fecha.
 	ApplyByInstallationAndCVE(ctx context.Context, installationID, cveID, status string, appliedAt *time.Time) (int, error)
+	ApplyByContainerAndCVE(ctx context.Context, containerID, cveID string, findingID int64, status string, appliedAt *time.Time) (int, error)
 
 	// GetFixedVersionByInstallationAndCVE devuelve la versión corregida que dejó el
 	// enriquecimiento desde OSV, o cadena vacía si no consta.
@@ -133,6 +135,7 @@ type PatchPort interface {
 
 	// GetApplicationsByInstallation devuelve el histórico, del más reciente al más antiguo.
 	GetApplicationsByInstallation(ctx context.Context, installationID string) ([]domain.AppliedPatch, error)
+	GetApplicationsByContainer(ctx context.Context, containerID string) ([]domain.AppliedPatch, error)
 }
 
 type ProjectPort interface {
@@ -343,6 +346,7 @@ type RiskPort interface {
 
 	// GetProjectIDByEndpoint devuelve el ID del proyecto al que pertenece un endpoint.
 	GetProjectIDByEndpoint(ctx context.Context, endpointID int64) (int64, error)
+	GetEndpointIDByContainer(ctx context.Context, containerID string) (int64, error)
 
 	// GetEndpointRiskSummariesByProject devuelve un resumen de riesgo de todos los endpoints asociados a un proyecto.
 	GetEndpointRiskSummariesByProject(ctx context.Context, projectID int64) ([]domain.EndpointRiskSummary, error)

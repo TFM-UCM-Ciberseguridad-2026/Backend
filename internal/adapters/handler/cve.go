@@ -796,6 +796,56 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 	}, http.StatusCreated)
 }
 
+// POST /api/containers/{id}/applied-patches
+func (h *OrchestratorHandler) DeclareContainerPatchApplied(w http.ResponseWriter, r *http.Request) {
+	containerID := r.PathValue("id")
+	var req struct {
+		CVEID            string     `json:"cve_id"`
+		PatchID          int64      `json:"patch_id"`
+		FindingID        int64      `json:"finding_id"`
+		RemediationLevel string     `json:"remediation_level"`
+		AppliedAt        *time.Time `json:"applied_at"`
+		AppliedBy        string     `json:"applied_by"`
+		Notes            string     `json:"notes"`
+	}
+	if containerID == "" {
+		sendError(w, "Invalid container ID", http.StatusBadRequest)
+		return
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendError(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	appliedAt := time.Time{}
+	if req.AppliedAt != nil {
+		appliedAt = *req.AppliedAt
+	}
+	level := domain.RemediationLevel(req.RemediationLevel)
+	application, affected, err := h.orchestrator.DeclarePatchAppliedToContainer(r.Context(), containerID, req.CVEID, req.FindingID, req.PatchID, level, appliedAt, req.AppliedBy, req.Notes)
+	auditID := fmt.Sprintf("%s:%s:%d", containerID, req.CVEID, req.FindingID)
+	changes := map[string]auditChange{
+		"asset_type": {Antes: nil, Despues: "CONTAINER"}, "asset_id": {Antes: nil, Despues: containerID},
+		"container_id": {Antes: nil, Despues: containerID}, "image_id": {Antes: nil, Despues: applicationImageID(application)},
+		"finding_id": {Antes: nil, Despues: req.FindingID}, "cve_id": {Antes: nil, Despues: req.CVEID},
+		"patch_id": {Antes: nil, Despues: req.PatchID}, "remediation_level": {Antes: nil, Despues: req.RemediationLevel},
+		"applied_by": {Antes: nil, Despues: req.AppliedBy}, "affected_findings": {Antes: nil, Despues: affected},
+	}
+	if err != nil {
+		emitAuditLog("CREACION", "AppliedPatch", auditID, req.CVEID, "", req.Notes, changes, "ERROR", err.Error())
+		sendError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	emitAuditLog("CREACION", "AppliedPatch", auditID, req.CVEID, "", req.Notes, changes, "SUCCESS", "")
+	sendJSON(w, map[string]any{"status": "parche declarado como aplicado", "application": application, "affected_findings": affected}, http.StatusCreated)
+}
+
+func applicationImageID(application *domain.AppliedPatch) string {
+	if application == nil {
+		return ""
+	}
+	return application.ImageID
+}
+
 // GET /api/patch-queue?project_id={id}&page={p}&limit={n}&search={s}&vendor_search={v}&...
 // Cola de parcheo: findings pendientes ordenados por prioridad/riesgo con filtrado avanzado y paginado.
 func (h *OrchestratorHandler) GetPatchQueue(w http.ResponseWriter, r *http.Request) {
@@ -870,6 +920,21 @@ func (h *OrchestratorHandler) GetAppliedPatchHistory(w http.ResponseWriter, r *h
 		"count":           len(history),
 		"applied_patches": history,
 	}, http.StatusOK)
+}
+
+// GET /api/containers/{id}/applied-patches
+func (h *OrchestratorHandler) GetContainerAppliedPatchHistory(w http.ResponseWriter, r *http.Request) {
+	containerID := r.PathValue("id")
+	if containerID == "" {
+		sendError(w, "Invalid container ID", http.StatusBadRequest)
+		return
+	}
+	history, err := h.orchestrator.GetAppliedPatchHistoryByContainer(r.Context(), containerID)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]any{"container_id": containerID, "count": len(history), "applied_patches": history}, http.StatusOK)
 }
 
 type createNetworkRequest struct {

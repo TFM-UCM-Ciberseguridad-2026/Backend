@@ -711,6 +711,11 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, query domain.PatchQueueQue
 				WHEN coalesce(f.priority_score, 0.0) >= 0.4 THEN 'MEDIUM'
 				ELSE 'LOW'
 			END AS priority_tier
+			,CASE WHEN f.context_type = 'CONTAINER_IMAGE' OR 'Container' IN labels(asset) THEN 'CONTAINER' ELSE 'SOFTWARE_INSTALLATION' END AS asset_type
+			,CASE WHEN f.context_type = 'CONTAINER_IMAGE' OR 'Container' IN labels(asset) THEN coalesce(c.id, asset.id) ELSE asset.id END AS asset_id
+			,CASE WHEN f.context_type = 'CONTAINER_IMAGE' OR 'Container' IN labels(asset) THEN coalesce(c.id, asset.id) ELSE null END AS container_id
+			,CASE WHEN f.context_type = 'CONTAINER_IMAGE' OR 'Container' IN labels(asset) THEN coalesce(f.image_id, c.image_id, asset.id) ELSE null END AS image_id
+			,CASE WHEN f.context_type = 'CONTAINER_IMAGE' OR 'Container' IN labels(asset) THEN null ELSE asset.id END AS installation_id
 		WHERE ($search = "" OR 
 		       toLower(coalesce(cve_id, "")) CONTAINS toLower($search) OR
 		       toLower(coalesce(software_name, "")) CONTAINS toLower($search) OR
@@ -740,9 +745,13 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, query domain.PatchQueueQue
 
 		WITH collect({
 			finding_id: finding_id,
+			asset_type: asset_type,
+			asset_id: asset_id,
+			container_id: container_id,
+			image_id: image_id,
 			status: status,
 			cve_id: cve_id,
-			installation_id: asset.id,
+			installation_id: installation_id,
 			software_name: software_name,
 			software_version: software_version,
 			software_vendor: software_vendor,
@@ -851,10 +860,14 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, query domain.PatchQueueQue
 			if m, ok := raw.(map[string]interface{}); ok {
 				response.Queue = append(response.Queue, domain.PatchQueueItem{
 					Position:         offset + len(response.Queue) + 1,
+					AssetType:        getString(m, "asset_type"),
+					AssetID:          getString(m, "asset_id"),
 					FindingID:        getInt64(m, "finding_id"),
 					CVEID:            getString(m, "cve_id"),
 					Status:           getString(m, "status"),
 					InstallationID:   getString(m, "installation_id"),
+					ContainerID:      getString(m, "container_id"),
+					ImageID:          getString(m, "image_id"),
 					SoftwareName:     getString(m, "software_name"),
 					SoftwareVersion:  getString(m, "software_version"),
 					SoftwareVendor:   getString(m, "software_vendor"),
@@ -1301,6 +1314,34 @@ func (r *riskRepo) GetProjectIDByEndpoint(ctx context.Context, endpointID int64)
 		return 0, err
 	}
 
+	return res.(int64), nil
+}
+
+func (r *riskRepo) GetEndpointIDByContainer(ctx context.Context, containerID string) (int64, error) {
+	query := `
+		MATCH (e:Endpoint)-[:HOSTS]->(c:Container {id: $container_id})
+		RETURN e.id AS endpoint_id
+		LIMIT 1
+	`
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"container_id": containerID})
+		if err != nil {
+			return int64(0), err
+		}
+		if result.Next(ctx) {
+			value, _ := result.Record().Get("endpoint_id")
+			return toInt64(value), result.Err()
+		}
+		return int64(0), result.Err()
+	})
+	if err != nil {
+		return 0, err
+	}
+	if res == nil {
+		return 0, nil
+	}
 	return res.(int64), nil
 }
 

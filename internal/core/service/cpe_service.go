@@ -11,7 +11,6 @@ import (
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/ports"
 )
 
-
 /*
 CPEService implementa el servicio de aplicación dedicado a la resolución,
 normalización y autocompletado de cadenas CPE (Common Platform Enumeration).
@@ -26,7 +25,6 @@ type CPEService struct {
 	cpeResolver ports.CPEResolverPort
 	cpeGuesser  ports.CPEGuesserPort
 }
-
 
 // NewCPEService inicializa el servicio de resolución de CPEs
 func NewCPEService(resolver ports.CPEResolverPort) *CPEService {
@@ -258,7 +256,6 @@ func (s *CPEService) ExecuteCPEPipeline(ctx context.Context, rawInput string) ([
 		})
 	}
 
-
 	return finalList, nil
 }
 
@@ -283,7 +280,6 @@ func buildVersionedCPEs(bCPE string, version string) []string {
 	}
 }
 
-
 func isVersionMatch(cpeVersion, inputVersion string) bool {
 	if strings.EqualFold(cpeVersion, inputVersion) {
 		return true
@@ -304,7 +300,3 @@ func parseVersionFromCPE(cpeStr string) string {
 	}
 	return "*"
 }
-
-
-
-

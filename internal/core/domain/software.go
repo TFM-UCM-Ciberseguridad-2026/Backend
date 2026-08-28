@@ -16,7 +16,7 @@ const (
 	CPEStatusVerifiedAuto        = "VERIFIED_AUTO"        // Coincidencia exacta o alias confirmado en base de datos
 	CPEStatusVerifiedManual      = "VERIFIED_MANUAL"      // Confirmado manualmente por el usuario
 	CPEStatusPendingConfirmation = "PENDING_CONFIRMATION" // Coincidencia difusa encontrada, pendiente de validación por el usuario
-	CPEStatusNotInNVD            = "NOT_IN_NVD"            // Software interno/propietario no catalogado en NIST NVD
+	CPEStatusNotInNVD            = "NOT_IN_NVD"           // Software interno/propietario no catalogado en NIST NVD
 )
 
 // Software representa la entidad de dominio de una aplicación, sistema operativo o componente catalogado (nodo Software en Neo4j).
@@ -32,6 +32,3 @@ type Software struct {
 	CPEStatus   string     `json:"cpe_status"`
 	URL         string     `json:"url,omitempty"`
 }
-
-
-

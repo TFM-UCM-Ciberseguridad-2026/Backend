@@ -26,7 +26,6 @@ type NVDProductItem struct {
 	URL          string    `json:"url,omitempty"`
 }
 
-
 // CPESuggestion representa una opción candidata de CPE oficial devuelta para autocompletar o sugerir al usuario.
 type CPESuggestion struct {
 	CPE                      string `json:"cpe"`
@@ -38,7 +37,6 @@ type CPESuggestion struct {
 	URL                      string `json:"url,omitempty"`
 }
 
-
 // CPEMatchResult es el resultado producido por la canalización de resolución de CPEs en el dominio.
 type CPEMatchResult struct {
 	CPE              string          `json:"cpe"`
@@ -48,7 +46,6 @@ type CPEMatchResult struct {
 	SuggestedCPE     string          `json:"suggested_cpe,omitempty"`
 	Suggestions      []CPESuggestion `json:"suggestions,omitempty"`
 }
-
 
 /*
 MapTypeToCPEPart se encarga de normalizar el tipo de activo a los formatos válidos de CPE v2.3:
@@ -278,6 +275,3 @@ func SanitizeAndTokenizeInput(rawInput string) ([]string, string) {
 
 	return tokens, extractedVersion
 }
-
-
-

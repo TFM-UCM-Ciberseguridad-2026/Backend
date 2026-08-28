@@ -132,6 +132,45 @@ func (r *remediationRepo) ApplyByInstallationAndCVE(ctx context.Context, install
 	return int(res.(int64)), nil
 }
 
+func (r *remediationRepo) ApplyByContainerAndCVE(ctx context.Context, containerID, cveID string, findingID int64, status string, appliedAt *time.Time) (int, error) {
+	query := `
+		MATCH (c:Container {id: $container_id})-[:USES_IMAGE]->(image:ContainerImage)
+		MATCH (c)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(:Vulnerability {cve_id: $cve_id})
+		WHERE f.container_id = c.id AND f.image_id = image.id AND f.id = $finding_id
+		MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
+		SET rem.status = $status, rem.applied_at = $applied_at
+		RETURN count(rem) AS updated
+	`
+	var appliedAtParam any
+	if appliedAt != nil {
+		appliedAtParam = appliedAt.UTC()
+	}
+	params := map[string]any{
+		"container_id": containerID, "cve_id": cveID, "finding_id": findingID,
+		"status": status, "applied_at": appliedAtParam,
+	}
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+	res, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, params)
+		if err != nil {
+			return nil, err
+		}
+		if result.Next(ctx) {
+			updated, _ := result.Record().Get("updated")
+			return toInt64(updated), result.Err()
+		}
+		return int64(0), result.Err()
+	})
+	if err != nil {
+		return 0, err
+	}
+	if res == nil {
+		return 0, nil
+	}
+	return int(res.(int64)), nil
+}
+
 // UpdateFixedVersionByCVE fija la versión corregida en el nodo Vulnerability y,
 // si existen, en todas las remediaciones asociadas a findings del CVE indicado.
 // Algunos findings creados por el autoscan aún no tienen nodo Remediation, así

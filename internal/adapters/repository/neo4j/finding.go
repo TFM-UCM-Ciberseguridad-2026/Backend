@@ -447,6 +447,47 @@ func (r *findingRepo) ApplyRemediationByInstallationAndCVE(ctx context.Context, 
 	return res.([]int64), nil
 }
 
+func (r *findingRepo) ApplyRemediationByContainerAndCVE(ctx context.Context, containerID, cveID string, findingID int64, remediationFactor float64, status string) ([]int64, error) {
+	query := `
+		MATCH (c:Container {id: $container_id})-[:USES_IMAGE]->(image:ContainerImage)
+		MATCH (c)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability {cve_id: $cve_id})
+		WHERE f.container_id = c.id AND f.image_id = image.id AND f.id = $finding_id
+		SET f.remediation_factor = $remediation_factor, f.status = $status, f.last_seen = $now
+		FOREACH (_ IN CASE WHEN $remediation_factor = 0.0 THEN [1] ELSE [] END |
+			SET f.risk_score = 0.0, f.priority_score = 0.0, f.resolved_at = $now
+		)
+		RETURN f.id AS finding_id
+	`
+	return r.applyRemediationFindingQuery(ctx, query, map[string]any{
+		"container_id": containerID, "cve_id": cveID, "finding_id": findingID,
+		"remediation_factor": remediationFactor, "status": status, "now": time.Now().UTC(),
+	})
+}
+
+func (r *findingRepo) applyRemediationFindingQuery(ctx context.Context, query string, params map[string]any) ([]int64, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+	res, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, params)
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]int64, 0)
+		for result.Next(ctx) {
+			id, _ := result.Record().Get("finding_id")
+			ids = append(ids, toInt64(id))
+		}
+		return ids, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []int64{}, nil
+	}
+	return res.([]int64), nil
+}
+
 func (r *findingRepo) GetVulnerabilitiesByFinding(ctx context.Context, findingID any) ([]domain.Vulnerability, error) {
 	query := `
 		MATCH (f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)

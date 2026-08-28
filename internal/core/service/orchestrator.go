@@ -1348,6 +1348,100 @@ func (o *Orchestrator) DeclarePatchApplied(
 	return application, affected, nil
 }
 
+// DeclarePatchAppliedToContainer declara la remediación únicamente sobre el finding
+// contextual seleccionado del contenedor. La imagen compartida no se modifica.
+func (o *Orchestrator) DeclarePatchAppliedToContainer(
+	ctx context.Context, containerID, cveID string, findingID, patchID int64,
+	level domain.RemediationLevel, appliedAt time.Time, appliedBy, notes string,
+) (*domain.AppliedPatch, []int64, error) {
+	if strings.TrimSpace(containerID) == "" {
+		return nil, nil, fmt.Errorf("container_id vacío")
+	}
+	if strings.TrimSpace(cveID) == "" {
+		return nil, nil, fmt.Errorf("cve_id vacío")
+	}
+	if findingID <= 0 {
+		return nil, nil, fmt.Errorf("finding_id debe ser positivo")
+	}
+	if !level.IsValid() {
+		return nil, nil, fmt.Errorf("nivel de remediación no reconocido: %q", level)
+	}
+	if appliedAt.IsZero() {
+		appliedAt = time.Now().UTC()
+	}
+	if patchID == 0 {
+		patches, err := o.patchPort.GetByVulnerability(ctx, cveID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("error recuperando parches de %s: %w", cveID, err)
+		}
+		if len(patches) == 0 {
+			return nil, nil, fmt.Errorf("no hay ningún parche registrado para %s", cveID)
+		}
+		if len(patches) > 1 {
+			return nil, nil, fmt.Errorf("hay %d parches registrados para %s: indica patch_id", len(patches), cveID)
+		}
+		patchID = patches[0].PatchID
+	}
+	factor := RemediationFactorForLevel(level)
+	status := "OPEN"
+	if level == domain.RemediationLevelOfficialFix {
+		status = "PATCHED"
+	}
+	if level == domain.RemediationLevelTemporaryFix || level == domain.RemediationLevelWorkaround {
+		status = "MITIGATED"
+	}
+	application := &domain.AppliedPatch{
+		PatchID: patchID, AssetType: "CONTAINER", AssetID: containerID, ContainerID: containerID,
+		FindingID: findingID, CVEID: cveID, AppliedAt: appliedAt.UTC(), AppliedBy: appliedBy,
+		RemediationLevel: level, RemediationFactor: factor, Notes: notes,
+		Verification: domain.PatchVerification{Reason: domain.VerificationNotApplicable},
+	}
+	if err := o.patchPort.SaveApplication(ctx, application); err != nil {
+		return nil, nil, fmt.Errorf("error declarando remediación del contenedor %s: %w", containerID, err)
+	}
+	affected, err := o.findingPort.ApplyRemediationByContainerAndCVE(ctx, containerID, cveID, findingID, factor, status)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error actualizando finding %d del contenedor %s: %w", findingID, containerID, err)
+	}
+	if len(affected) != 1 || affected[0] != findingID {
+		return nil, affected, fmt.Errorf("el finding %d no pertenece al contenedor %s y al CVE %s", findingID, containerID, cveID)
+	}
+	var remediationAt *time.Time
+	if level != domain.RemediationLevelUnavailable {
+		value := application.AppliedAt
+		remediationAt = &value
+	}
+	if _, err := o.remediationPort.ApplyByContainerAndCVE(ctx, containerID, cveID, findingID, level.RemediationStatus(), remediationAt); err != nil {
+		return nil, affected, fmt.Errorf("error sincronizando remediación contextual del finding %d: %w", findingID, err)
+	}
+	if o.riskPort == nil {
+		return application, affected, nil
+	}
+	if _, err := o.ComputeContainerRisk(ctx, containerID); err != nil {
+		return application, affected, fmt.Errorf("remediación guardada, pero falló el riesgo del contenedor %s: %w", containerID, err)
+	}
+	endpointID, err := o.riskPort.GetEndpointIDByContainer(ctx, containerID)
+	if err != nil {
+		return application, affected, fmt.Errorf("falló localización del endpoint del contenedor %s: %w", containerID, err)
+	}
+	if endpointID == 0 {
+		return application, affected, nil
+	}
+	if err := o.ComputeEndpointRisk(ctx, endpointID); err != nil {
+		return application, affected, fmt.Errorf("falló recálculo del endpoint %d: %w", endpointID, err)
+	}
+	projectID, err := o.riskPort.GetProjectIDByEndpoint(ctx, endpointID)
+	if err != nil {
+		return application, affected, fmt.Errorf("falló localización del proyecto del endpoint %d: %w", endpointID, err)
+	}
+	if projectID != 0 {
+		if err := o.AggregateProjectRiskFromCurrentEndpointScores(ctx, projectID); err != nil {
+			return application, affected, fmt.Errorf("falló recálculo del proyecto %d: %w", projectID, err)
+		}
+	}
+	return application, affected, nil
+}
+
 // verifyPatchApplication contrasta la declaración con la versión instalada. No devuelve
 // error: es informativa, así que los fallos se traducen a un motivo.
 func (o *Orchestrator) verifyPatchApplication(
@@ -1558,6 +1652,13 @@ func (o *Orchestrator) GetAppliedPatchHistory(ctx context.Context, installationI
 		return nil, fmt.Errorf("installation_id vacío")
 	}
 	return o.patchPort.GetApplicationsByInstallation(ctx, installationID)
+}
+
+func (o *Orchestrator) GetAppliedPatchHistoryByContainer(ctx context.Context, containerID string) ([]domain.AppliedPatch, error) {
+	if strings.TrimSpace(containerID) == "" {
+		return nil, fmt.Errorf("container_id vacío")
+	}
+	return o.patchPort.GetApplicationsByContainer(ctx, containerID)
 }
 
 // EnrichPatchesFromProvider consulta la fuente externa de parches para un CVE, registra
