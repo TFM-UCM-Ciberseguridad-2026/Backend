@@ -340,11 +340,11 @@ func (r *containerRepo) GetContainer(ctx context.Context, containerID string) (*
 				TechnicalDriverFindingID:    getInt(props["technical_driver_finding_id"]),
 				TechnicalDriverCVEID:        getString(props["technical_driver_cve_id"]),
 				TechnicalDriverRiskScore:    getFloat(props["technical_driver_risk_score"]),
-				PriorityDriverType:         getString(props["priority_driver_type"]),
-				PriorityDriverAssetID:      getString(props["priority_driver_asset_id"]),
-				PriorityDriverAssetName:    getString(props["priority_driver_asset_name"]),
-				PriorityDriverFindingID:    getInt(props["priority_driver_finding_id"]),
-				PriorityDriverCVEID:        getString(props["priority_driver_cve_id"]),
+				PriorityDriverType:          getString(props["priority_driver_type"]),
+				PriorityDriverAssetID:       getString(props["priority_driver_asset_id"]),
+				PriorityDriverAssetName:     getString(props["priority_driver_asset_name"]),
+				PriorityDriverFindingID:     getInt(props["priority_driver_finding_id"]),
+				PriorityDriverCVEID:         getString(props["priority_driver_cve_id"]),
 				PriorityDriverPriorityScore: getFloat(props["priority_driver_priority_score"]),
 				RiskyAssetCount:             int(getInt(props["risky_asset_count"])),
 				RiskComputedAt:              getTimePtr(props, "risk_computed_at"),
@@ -362,7 +362,7 @@ func (r *containerRepo) GetContainer(ctx context.Context, containerID string) (*
 		return nil, err
 	}
 	if res == nil {
-		return nil, fmt.Errorf("container not found")
+		return nil, domain.ErrNodeNotFound
 	}
 	return res.(*domain.Container), nil
 }

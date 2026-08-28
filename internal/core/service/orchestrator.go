@@ -464,14 +464,17 @@ func (o *Orchestrator) RegisterContainerSoftwareInstallation(ctx context.Context
 
 // GenerateFinding registra un hallazgo de vulnerabilidad (Finding) a una instalación específica.
 func (o *Orchestrator) GenerateFinding(ctx context.Context, installationID string, finding *domain.Finding) error {
-	if finding.FindingID == 0 {
-		id, err := o.nextNodeID(ctx, "Finding")
-		if err == nil {
-			finding.FindingID = id
-		}
+	if strings.TrimSpace(installationID) == "" {
+		return fmt.Errorf("installation_id vacío")
+	}
+	if finding == nil {
+		return fmt.Errorf("finding vacío")
 	}
 	if err := o.findingPort.Save(ctx, finding); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
+	}
+	if finding.FindingID <= 0 {
+		return fmt.Errorf("el repositorio no asignó un finding_id válido")
 	}
 	return o.relationshipPort.LinkInstallationToFinding(ctx, installationID, finding.FindingID)
 }
@@ -648,13 +651,9 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 
 		// Crear un Finding inicial solo si no existe ya para installation_id + cve_id
 		now := time.Now().UTC()
-		findingID, err := o.nextNodeID(ctx, "Finding")
-		if err != nil {
-			findingID = int64(rand.Int31n(1000000) + 1)
-		}
 
 		finding := &domain.Finding{
-			FindingID:         findingID,
+			FindingID:         0,
 			Status:            "OPEN",
 			FirstSeen:         now,
 			LastSeen:          &now,
@@ -1072,11 +1071,11 @@ func (o *Orchestrator) ComputeContainerRisk(ctx context.Context, containerID str
 		TechnicalDriverFindingID:    bestTechFindingID,
 		TechnicalDriverCVEID:        bestTechCVE,
 		TechnicalDriverRiskScore:    maxTechRisk,
-		PriorityDriverType:         bestPrioType,
-		PriorityDriverAssetID:      bestPrioAssetID,
-		PriorityDriverAssetName:    bestPrioAssetName,
-		PriorityDriverFindingID:    bestPrioFindingID,
-		PriorityDriverCVEID:        bestPrioCVE,
+		PriorityDriverType:          bestPrioType,
+		PriorityDriverAssetID:       bestPrioAssetID,
+		PriorityDriverAssetName:     bestPrioAssetName,
+		PriorityDriverFindingID:     bestPrioFindingID,
+		PriorityDriverCVEID:         bestPrioCVE,
 		PriorityDriverPriorityScore: maxPrioScore,
 		RiskyAssetCount:             len(directFindings) + len(swSummaries),
 	}
@@ -1681,43 +1680,186 @@ func (o *Orchestrator) SaveContainerImage(ctx context.Context, image *domain.Con
 // SaveContainer registra una instancia de contenedor en ejecución en Neo4j,
 // asociándolo al Endpoint host y a la imagen base si existe.
 func (o *Orchestrator) SaveContainer(ctx context.Context, container *domain.Container) error {
-	if err := o.containerPort.SaveContainer(ctx, container); err != nil {
-		return err
+	if container == nil {
+		return fmt.Errorf("contenedor vacío")
 	}
-	// Sincronización automática de findings si la imagen ya tiene vulnerabilidades conocidas
-	if container.ImageID != "" {
-		vulns, err := o.containerPort.GetVulnerabilitiesByContainerImage(ctx, container.ImageID)
-		if err == nil && len(vulns) > 0 {
-			_ = o.syncContainerFindingsForImage(ctx, container.ImageID, vulns)
+
+	containerID := strings.TrimSpace(container.ContainerID)
+	imageID := strings.TrimSpace(container.ImageID)
+	if containerID == "" {
+		return fmt.Errorf("container_id vacío")
+	}
+
+	existingContainer, err := o.containerPort.GetContainer(ctx, containerID)
+	if err != nil && !errors.Is(err, domain.ErrNodeNotFound) {
+		return fmt.Errorf(
+			"error recuperando container_id=%s antes de actualizar image_id: %w",
+			containerID,
+			err,
+		)
+	}
+
+	if existingContainer != nil {
+		oldImageID := strings.TrimSpace(existingContainer.ImageID)
+		if oldImageID != "" && oldImageID != imageID {
+			changedAt := time.Now().UTC()
+			if _, err := o.findingPort.SupersedeContainerImageFindings(
+				ctx,
+				containerID,
+				oldImageID,
+				changedAt,
+			); err != nil {
+				return fmt.Errorf(
+					"no se actualizó container_id=%s de image_id=%s a image_id=%s porque falló la invalidación de findings anteriores: %w",
+					containerID,
+					oldImageID,
+					imageID,
+					err,
+				)
+			}
 		}
 	}
+
+	if err := o.containerPort.SaveContainer(ctx, container); err != nil {
+		return fmt.Errorf(
+			"error guardando container_id=%s, image_id=%s: %w",
+			containerID,
+			imageID,
+			err,
+		)
+	}
+
+	// Sincronización automática de findings si la imagen ya tiene vulnerabilidades conocidas
+	if imageID != "" {
+		vulns, err := o.containerPort.GetVulnerabilitiesByContainerImage(
+			ctx,
+			imageID,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"contenedor guardado parcialmente: container_id=%s, image_id=%s; error recuperando vulnerabilidades: %w",
+				containerID,
+				imageID,
+				err,
+			)
+		}
+
+		if _, err := o.syncContainerFindingsForImage(
+			ctx,
+			imageID,
+			vulns,
+		); err != nil {
+			return fmt.Errorf(
+				"contenedor guardado parcialmente: container_id=%s, image_id=%s; error sincronizando findings: %w",
+				containerID,
+				imageID,
+				err,
+			)
+		}
+	}
+
 	return nil
 }
 
 // syncContainerFindingsForImage sincroniza/materializa los findings contextuales para todos los contenedores que usan la imagen.
-func (o *Orchestrator) syncContainerFindingsForImage(ctx context.Context, imageID string, vulns []domain.Vulnerability) error {
+func (o *Orchestrator) syncContainerFindingsForImage(
+	ctx context.Context,
+	imageID string,
+	vulns []domain.Vulnerability,
+) (domain.ContainerFindingSyncResult, error) {
+	syncResult := domain.ContainerFindingSyncResult{}
+
+	imageID = strings.TrimSpace(imageID)
+	if imageID == "" {
+		return syncResult, fmt.Errorf("image_id vacío")
+	}
+
+	if len(vulns) == 0 {
+		return syncResult, nil
+	}
+
 	containerIDs, err := o.containerPort.GetContainerIDsByImage(ctx, imageID)
-	if err != nil || len(containerIDs) == 0 {
-		return err
+	if err != nil {
+		return syncResult, fmt.Errorf(
+			"error obteniendo contenedores de la imagen %s: %w",
+			imageID,
+			err,
+		)
+	}
+
+	if len(containerIDs) == 0 {
+		return syncResult, nil
 	}
 
 	now := time.Now().UTC()
-	for _, cid := range containerIDs {
-		for _, v := range vulns {
+	seenCVEs := make(map[string]struct{}, len(vulns))
+
+	for _, vulnerability := range vulns {
+		cveID := strings.ToUpper(strings.TrimSpace(vulnerability.CVEID))
+		if cveID == "" {
+			return syncResult, fmt.Errorf(
+				"la imagen %s contiene una vulnerabilidad sin cve_id",
+				imageID,
+			)
+		}
+
+		if _, alreadyProcessed := seenCVEs[cveID]; alreadyProcessed {
+			continue
+		}
+		seenCVEs[cveID] = struct{}{}
+
+		for _, containerID := range containerIDs {
 			finding := &domain.Finding{
-				FindingID:         0, // Asignado atómicamente en Cypher solo en ON CREATE SET
+				FindingID:         0,
 				Status:            "OPEN",
 				FirstSeen:         now,
 				LastSeen:          &now,
-				ImpactScore:       v.BaseScore,
+				ImpactScore:       vulnerability.BaseScore,
 				Likelihood:        0.5,
 				RemediationFactor: 1.0,
-				RiskScore:         v.BaseScore * 0.5,
+				RiskScore:         vulnerability.BaseScore * 0.5,
 			}
-			_, _, _ = o.findingPort.EnsureForContainerImageContextAndCVE(ctx, cid, imageID, v.CVEID, finding)
+
+			_, created, err := o.findingPort.EnsureForContainerImageContextAndCVE(
+				ctx,
+				containerID,
+				imageID,
+				cveID,
+				finding,
+			)
+			if err != nil {
+				return syncResult, fmt.Errorf(
+					"error sincronizando finding para container_id=%s, image_id=%s y cve_id=%s: %w",
+					containerID,
+					imageID,
+					cveID,
+					err,
+				)
+			}
+
+			syncResult.Processed++
+
+			if created {
+				syncResult.Created++
+			} else {
+				syncResult.Existing++
+			}
 		}
 	}
-	return nil
+
+	return syncResult, nil
+}
+
+func partialContainerScanResult(
+	result *domain.VulnerabilityScanResult,
+	err error,
+) (*domain.VulnerabilityScanResult, error) {
+	if result != nil {
+		result.Partial = true
+		result.Error = err.Error()
+	}
+
+	return result, err
 }
 
 // ScanAndSaveContainerImage escanea una imagen de contenedor usando el ScoutAdapter
@@ -1749,12 +1891,45 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 			result.ProviderPagesFetched = image.VulnScanPagesFetched
 			scanCompletedAt := time.Now().UTC()
 			result.ScanCompletedAt = &scanCompletedAt
-			_ = o.updateContainerImageScanMetadata(ctx, imageID, result, scanStartedAt)
-
 			// Sincronizar findings contextuales para contenedores existentes en caso de cache hit
-			if vulns, err := o.containerPort.GetVulnerabilitiesByContainerImage(ctx, imageID); err == nil && len(vulns) > 0 {
-				_ = o.syncContainerFindingsForImage(ctx, imageID, vulns)
+			vulns, err := o.containerPort.GetVulnerabilitiesByContainerImage(
+				ctx,
+				imageID,
+			)
+			if err != nil {
+				scanErr := fmt.Errorf(
+					"error recuperando vulnerabilidades cacheadas de la imagen %s: %w",
+					imageID,
+					err,
+				)
+				return partialContainerScanResult(result, scanErr)
 			}
+
+			syncResult, err := o.syncContainerFindingsForImage(
+				ctx,
+				imageID,
+				vulns,
+			)
+			result.FindingsCreated += syncResult.Created
+			result.FindingsExisting += syncResult.Existing
+			if err != nil {
+				scanErr := fmt.Errorf(
+					"scan parcial para image_id=%s usando caché: %w",
+					imageID,
+					err,
+				)
+				return partialContainerScanResult(result, scanErr)
+			}
+
+			if err := o.markContainerImageCacheHit(ctx, imageID); err != nil {
+				scanErr := fmt.Errorf(
+					"scan parcial para image_id=%s: error actualizando metadata de caché: %w",
+					imageID,
+					err,
+				)
+				return partialContainerScanResult(result, scanErr)
+			}
+
 			return result, nil
 		}
 	}
@@ -1770,7 +1945,28 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 	// 2. Guardar inteligencia compartida (HAS_VULNERABILITY) y sincronizar findings por contenedor
 	var vulnsToEnrich []domain.Vulnerability
 	for _, v := range vulns {
-		if existingVuln, err := o.vulnPort.GetByID(ctx, v.CVEID); err == nil && existingVuln != nil {
+		cveID := strings.ToUpper(strings.TrimSpace(v.CVEID))
+		if cveID == "" {
+			scanErr := fmt.Errorf(
+				"scan parcial para image_id=%s: Docker Scout devolvió una vulnerabilidad sin cve_id",
+				imageID,
+			)
+			return partialContainerScanResult(result, scanErr)
+		}
+		v.CVEID = cveID
+
+		existingVuln, err := o.vulnPort.GetByID(ctx, v.CVEID)
+		if err != nil {
+			scanErr := fmt.Errorf(
+				"scan parcial para image_id=%s, cve_id=%s: error recuperando vulnerabilidad existente: %w",
+				imageID,
+				cveID,
+				err,
+			)
+			return partialContainerScanResult(result, scanErr)
+		}
+
+		if existingVuln != nil {
 			v.NVDEnriched = existingVuln.NVDEnriched
 			v.NVDEnrichedAt = existingVuln.NVDEnrichedAt
 			if len(v.CWE) == 0 {
@@ -1790,8 +1986,25 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 			}
 		}
 
-		_ = o.saveVulnerabilityWithTTPs(ctx, &v)
-		_ = o.containerPort.LinkVulnerabilityToImage(ctx, imageID, v.CVEID)
+		if err := o.saveVulnerabilityWithTTPs(ctx, &v); err != nil {
+			scanErr := fmt.Errorf(
+				"scan parcial para image_id=%s, cve_id=%s: error persistiendo vulnerabilidad: %w",
+				imageID,
+				cveID,
+				err,
+			)
+			return partialContainerScanResult(result, scanErr)
+		}
+
+		if err := o.containerPort.LinkVulnerabilityToImage(ctx, imageID, cveID); err != nil {
+			scanErr := fmt.Errorf(
+				"scan parcial para image_id=%s, cve_id=%s: error enlazando vulnerabilidad con imagen: %w",
+				imageID,
+				cveID,
+				err,
+			)
+			return partialContainerScanResult(result, scanErr)
+		}
 
 		result.Processed++
 		if !isNVDEnrichmentFresh(v) {
@@ -1801,8 +2014,20 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 	}
 
 	// Materializar/Sincronizar los findings contextuales en todos los contenedores que usan la imagen
-	if len(vulns) > 0 {
-		_ = o.syncContainerFindingsForImage(ctx, imageID, vulns)
+	syncResult, err := o.syncContainerFindingsForImage(
+		ctx,
+		imageID,
+		vulns,
+	)
+	result.FindingsCreated += syncResult.Created
+	result.FindingsExisting += syncResult.Existing
+	if err != nil {
+		scanErr := fmt.Errorf(
+			"scan parcial para image_id=%s: la inteligencia compartida fue guardada, pero falló la materialización contextual: %w",
+			imageID,
+			err,
+		)
+		return partialContainerScanResult(result, scanErr)
 	}
 
 	// Ordenar por BaseScore descendente (CRITICAL -> HIGH -> MEDIUM -> LOW) para enriquecer primero las más severas
@@ -1828,7 +2053,9 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 				v := vulnsToEnrich[i]
 				enrichedData, err := o.vulnScannerPort.FetchByCVE(ctx, v.CVEID)
 				<-o.nvdSyncSem // liberar slot inmediatamente tras la llamada
-				if err == nil && enrichedData != nil {
+				if err != nil {
+					fmt.Printf("[Scout Sync] Error enriqueciendo cve_id=%s: %v\n", v.CVEID, err)
+				} else if enrichedData != nil {
 					v.CWE = enrichedData.CWE
 					v.Exploit = enrichedData.Exploit
 					v.KEV = enrichedData.KEV
@@ -1847,7 +2074,15 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 					enrichedAt := time.Now().UTC()
 					v.NVDEnriched = true
 					v.NVDEnrichedAt = &enrichedAt
-					_ = o.vulnPort.Save(ctx, &v)
+					if err := o.vulnPort.Save(ctx, &v); err != nil {
+						scanErr := fmt.Errorf(
+							"scan parcial para image_id=%s, cve_id=%s: error guardando enriquecimiento NVD: %w",
+							imageID,
+							v.CVEID,
+							err,
+						)
+						return partialContainerScanResult(result, scanErr)
+					}
 					descSnippet := v.Description
 					if len(descSnippet) > 40 {
 						descSnippet = descSnippet[:40]
@@ -1899,7 +2134,14 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 					v.NVDEnriched = true
 					v.NVDEnrichedAt = &enrichedAt
 					// Actualizar la vulnerabilidad en la base de datos
-					_ = repo.Save(bgCtx, &v)
+					if err := repo.Save(bgCtx, &v); err != nil {
+						fmt.Printf(
+							"[Scout Sync Async] Error guardando enriquecimiento de cve_id=%s: %v\n",
+							v.CVEID,
+							err,
+						)
+						continue
+					}
 				} else {
 					fmt.Printf("[Scout Sync Async] Error enriqueciendo %s: %v\n", v.CVEID, err)
 				}
@@ -1915,10 +2157,30 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 	result.ProviderPagesFetched = 1
 
 	if err := o.updateContainerImageScanMetadata(ctx, imageID, result, scanStartedAt); err != nil {
-		return nil, fmt.Errorf("error guardando metadata de escaneo de imagen %s: %w", imageID, err)
+		scanErr := fmt.Errorf(
+			"scan parcial para image_id=%s: vulnerabilidades y findings persistidos, pero falló la metadata final: %w",
+			imageID,
+			err,
+		)
+		return partialContainerScanResult(result, scanErr)
 	}
 
 	return result, nil
+}
+
+func (o *Orchestrator) markContainerImageCacheHit(ctx context.Context, imageID string) error {
+	if o.dbHelper == nil {
+		return nil
+	}
+
+	query := `
+		MATCH (ci:ContainerImage {id: $image_id})
+		SET ci.vuln_scan_cache_hit = true
+	`
+
+	return o.dbHelper.ExecuteWrite(ctx, query, map[string]any{
+		"image_id": imageID,
+	})
 }
 
 func (o *Orchestrator) updateContainerImageScanMetadata(ctx context.Context, imageID string, result *domain.VulnerabilityScanResult, startedAt time.Time) error {
@@ -1996,7 +2258,7 @@ func (o *Orchestrator) AddContainerToEndpoint(ctx context.Context, hostID int64,
 	}
 	container.HostID = hostID
 
-	if err := o.containerPort.SaveContainer(ctx, container); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+	if err := o.SaveContainer(ctx, container); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
 
@@ -2015,7 +2277,7 @@ func (o *Orchestrator) AddContainerToEndpoint(ctx context.Context, hostID int64,
 
 // UpdateContainer actualiza los datos de un contenedor y sus IPs.
 func (o *Orchestrator) UpdateContainer(ctx context.Context, container *domain.Container) error {
-	if err := o.containerPort.SaveContainer(ctx, container); err != nil {
+	if err := o.SaveContainer(ctx, container); err != nil {
 		return err
 	}
 

@@ -62,6 +62,7 @@ type FindingPort interface {
 
 	EnsureForInstallationAndCVE(ctx context.Context, installationID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
 	EnsureForContainerImageContextAndCVE(ctx context.Context, containerID string, imageID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
+	SupersedeContainerImageFindings(ctx context.Context, containerID string, oldImageID string, changedAt time.Time) (int, error)
 
 	// ApplyRemediationByInstallationAndCVE fija factor y estado en los findings del CVE
 	// en esa instalación, y devuelve sus IDs. Con factor 0 pone también risk_score y

@@ -295,6 +295,16 @@ func (h *OrchestratorHandler) ScanContainerImageVulnerabilities(w http.ResponseW
 	)
 	if err != nil {
 		fmt.Printf("[ScanContainerImage] Error escaneando %s: %v\n", imageName, err)
+		if result != nil {
+			result.Partial = true
+			if result.Error == "" {
+				result.Error = err.Error()
+			}
+
+			sendJSON(w, result, http.StatusMultiStatus)
+			return
+		}
+
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

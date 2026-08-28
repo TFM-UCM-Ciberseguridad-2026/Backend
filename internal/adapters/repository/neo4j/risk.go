@@ -27,7 +27,7 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 		WHERE NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
 		MATCH (e)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
 		MATCH (si)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-		WHERE NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+		WHERE NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED']
 		  AND coalesce(f.remediation_factor, 1.0) > 0.0
 		RETURN
 		    f.id                    AS finding_id,
@@ -65,7 +65,7 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 		WHERE NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
 		MATCH (c)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
 		MATCH (si)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-		WHERE NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+		WHERE NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED']
 		  AND coalesce(f.remediation_factor, 1.0) > 0.0
 		RETURN
 		    f.id                    AS finding_id,
@@ -104,7 +104,7 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 		MATCH (c)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE f.context_type = 'CONTAINER_IMAGE'
 		  AND f.image_id = ci.id
-		  AND NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+		  AND NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED']
 		  AND coalesce(f.remediation_factor, 1.0) > 0.0
 		RETURN
 		    f.id                    AS finding_id,
@@ -353,7 +353,7 @@ func toBool(v any) bool {
 func (r *riskRepo) GetFindingScoresByInstallation(ctx context.Context, installationID string) ([]domain.FindingRiskSummary, error) {
 	query := `
         MATCH (si:SoftwareInstallation {id: $installation_id})-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-        WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+        WHERE NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED']
           // El endpoint se comprueba con EXISTS y no en el patrón principal: la instalación
           // puede colgar de un contenedor, y meter el endpoint en el MATCH dejaba fuera ese
           // caso además de multiplicar filas.
@@ -563,7 +563,7 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, query domain.PatchQueueQue
 		MATCH path = (e)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)
 		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset) OR 'Container' IN labels(asset))
 		MATCH (asset)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+		WHERE NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED']
 		  AND ($project_id IS NULL OR EXISTS { (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e) })
 		OPTIONAL MATCH (asset)-[:INSTANCE_OF]->(s:Software)
 		OPTIONAL MATCH (c:Container)-[:HAS_INSTALLATION|USES_IMAGE]->(asset)
@@ -1159,7 +1159,7 @@ func (r *riskRepo) GetOpenFindingCVEsByProject(ctx context.Context, projectID in
 		MATCH path = (e)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)
 		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset))
 		MATCH (asset)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-		WHERE NOT coalesce(f.status, 'OPEN') IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+		WHERE NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED']
 		RETURN DISTINCT v.cve_id AS cve_id
 		ORDER BY cve_id ASC
 	`
@@ -1230,7 +1230,7 @@ func (r *riskRepo) GetDirectFindingScoresByContainer(ctx context.Context, contai
 	query := `
 		MATCH (c:Container {id: $container_id})-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE f.context_type = 'CONTAINER_IMAGE'
-		  AND NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED']
+		  AND NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED']
 		  AND coalesce(f.remediation_factor, 1.0) > 0.0
 		RETURN f.id AS finding_id,
 		       v.cve_id AS cve_id,
@@ -1370,25 +1370,25 @@ func (r *riskRepo) UpdateContainerRiskAndPriority(ctx context.Context, summary d
 		    c.risky_asset_count = $risky_asset_count
 	`
 	params := map[string]any{
-		"container_id":                    summary.ContainerID,
-		"risk_score":                      summary.RiskScore,
-		"risk_tier":                       summary.RiskTier,
-		"priority_score":                  summary.PriorityScore,
-		"priority_tier":                   summary.PriorityTier,
-		"technical_driver_type":           summary.TechnicalDriverType,
-		"technical_driver_asset_id":       summary.TechnicalDriverAssetID,
-		"technical_driver_asset_name":     summary.TechnicalDriverAssetName,
-		"technical_driver_finding_id":     summary.TechnicalDriverFindingID,
-		"technical_driver_cve_id":         summary.TechnicalDriverCVEID,
-		"technical_driver_risk_score":     summary.TechnicalDriverRiskScore,
-		"priority_driver_type":            summary.PriorityDriverType,
-		"priority_driver_asset_id":        summary.PriorityDriverAssetID,
-		"priority_driver_asset_name":      summary.PriorityDriverAssetName,
-		"priority_driver_finding_id":      summary.PriorityDriverFindingID,
-		"priority_driver_cve_id":          summary.PriorityDriverCVEID,
-		"priority_driver_priority_score":  summary.PriorityDriverPriorityScore,
-		"risky_asset_count":               summary.RiskyAssetCount,
-		"now":                             time.Now().UTC(),
+		"container_id":                   summary.ContainerID,
+		"risk_score":                     summary.RiskScore,
+		"risk_tier":                      summary.RiskTier,
+		"priority_score":                 summary.PriorityScore,
+		"priority_tier":                  summary.PriorityTier,
+		"technical_driver_type":          summary.TechnicalDriverType,
+		"technical_driver_asset_id":      summary.TechnicalDriverAssetID,
+		"technical_driver_asset_name":    summary.TechnicalDriverAssetName,
+		"technical_driver_finding_id":    summary.TechnicalDriverFindingID,
+		"technical_driver_cve_id":        summary.TechnicalDriverCVEID,
+		"technical_driver_risk_score":    summary.TechnicalDriverRiskScore,
+		"priority_driver_type":           summary.PriorityDriverType,
+		"priority_driver_asset_id":       summary.PriorityDriverAssetID,
+		"priority_driver_asset_name":     summary.PriorityDriverAssetName,
+		"priority_driver_finding_id":     summary.PriorityDriverFindingID,
+		"priority_driver_cve_id":         summary.PriorityDriverCVEID,
+		"priority_driver_priority_score": summary.PriorityDriverPriorityScore,
+		"risky_asset_count":              summary.RiskyAssetCount,
+		"now":                            time.Now().UTC(),
 	}
 	return executeWriteHelper(ctx, r.driver, query, params)
 }
