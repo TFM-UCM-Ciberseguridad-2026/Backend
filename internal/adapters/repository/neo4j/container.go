@@ -193,12 +193,18 @@ func (r *containerRepo) SaveContainer(ctx context.Context, container *domain.Con
 
 	query := `
 		MERGE (c:Container {id: $id})
+		ON CREATE SET c.risk_score = 0.0,
+		              c.risk_tier = 'LOW',
+		              c.priority_score = 0.0,
+		              c.priority_tier = 'LOW',
+		              c.risky_asset_count = 0,
+		              c.direct_finding_count = 0,
+		              c.risky_installation_count = 0
 		SET c.name = $name,
 		    c.state = $state,
 		    c.image_id = $image_id,
 		    c.internet_exposed = $internet_exposed,
-		    c.privileged = $privileged,
-		    c.risk_score = $risk_score
+		    c.privileged = $privileged
 		
 		WITH c
 		// Asociar al host (obligatorio)
@@ -217,7 +223,6 @@ func (r *containerRepo) SaveContainer(ctx context.Context, container *domain.Con
 		"internet_exposed": container.InternetExposed,
 		"privileged":       container.Privileged,
 		"host_id":          container.HostID,
-		"risk_score":       container.RiskScore,
 	}
 
 	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {

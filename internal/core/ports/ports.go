@@ -330,6 +330,10 @@ type RiskPort interface {
 
 	// GetSoftwareRiskSummariesByEndpoint devuelve un resumen de riesgo de software para todas las instalaciones asociadas a un endpoint.
 	GetSoftwareRiskSummariesByEndpoint(ctx context.Context, endpointID int64) ([]domain.SoftwareRiskSummary, error)
+	GetNativeInstallationIDsByEndpoint(ctx context.Context, endpointID string) ([]string, error)
+	GetNativeSoftwareRiskSummariesByEndpoint(ctx context.Context, endpointID string) ([]domain.SoftwareRiskSummary, error)
+	GetContainerRiskSummariesByEndpoint(ctx context.Context, endpointID string) ([]domain.ContainerRiskSummary, error)
+	UpdateEndpointRiskAndPrioritySummary(ctx context.Context, summary domain.EndpointRiskSummary) error
 
 	// UpdateEndpointRiskAndPriority actualiza el riesgo y la prioridad de un endpoint, incluyendo los drivers técnicos y de prioridad.
 	UpdateEndpointRiskAndPriority(ctx context.Context, endpointID int64, riskScore float64, riskTier string, priorityScore float64, priorityTier string, technicalDriverInstallationID string, technicalDriverSoftwareName string, technicalDriverRiskScore float64, technicalDriverCVEID string, priorityDriverInstallationID string, priorityDriverSoftwareName string, priorityDriverPriorityScore float64, priorityDriverCVEID string, riskySoftwareCount int) error
@@ -351,6 +355,7 @@ type RiskPort interface {
 
 	// Métodos para agregación de riesgo y hallazgos en contenedores
 	GetContainerIDsByEndpoint(ctx context.Context, endpointID int64) ([]string, error)
+	GetInstallationIDsByContainer(ctx context.Context, containerID string) ([]string, error)
 	GetDirectFindingScoresByContainer(ctx context.Context, containerID string) ([]domain.FindingRiskSummary, error)
 	GetSoftwareRiskSummariesByContainer(ctx context.Context, containerID string) ([]domain.SoftwareRiskSummary, error)
 	UpdateContainerRiskAndPriority(ctx context.Context, summary domain.ContainerRiskSummary) error

@@ -3,6 +3,7 @@ package neo4j
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -432,8 +433,7 @@ func (r *riskRepo) UpdateSoftwareInstallationRisk(ctx context.Context, installat
 // GetInstallationIDsByEndpoint devuelve los IDs de todas las instalaciones de software asociadas a un endpoint activo.
 func (r *riskRepo) GetInstallationIDsByEndpoint(ctx context.Context, endpointID int64) ([]string, error) {
 	query := `
-        // Recorre también las instalaciones que cuelgan de un contenedor del endpoint.
-        MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
+		MATCH (e:Endpoint {id: $endpoint_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
         WHERE NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
         RETURN DISTINCT si.id AS installation_id
         ORDER BY installation_id
@@ -465,6 +465,116 @@ func (r *riskRepo) GetInstallationIDsByEndpoint(ctx context.Context, endpointID 
 		return []string{}, nil
 	}
 	return res.([]string), nil
+}
+
+// GetNativeInstallationIDsByEndpoint devuelve exclusivamente instalaciones
+// colgadas directamente del endpoint, sin atravesar contenedores.
+func (r *riskRepo) GetNativeInstallationIDsByEndpoint(ctx context.Context, endpointID string) ([]string, error) {
+	query := `
+		MATCH (e:Endpoint)
+		WHERE toString(e.id) = toString($endpoint_id)
+		MATCH (e)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+		RETURN collect(DISTINCT coalesce(si.installation_id, si.id)) AS installation_ids
+	`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"endpoint_id": endpointID})
+		if err != nil {
+			return nil, err
+		}
+		if !result.Next(ctx) {
+			return []string{}, result.Err()
+		}
+		value, _ := result.Record().Get("installation_ids")
+		ids := make([]string, 0)
+		switch values := value.(type) {
+		case []any:
+			for _, item := range values {
+				if id, ok := item.(string); ok && id != "" {
+					ids = append(ids, id)
+				}
+			}
+		case []string:
+			ids = append(ids, values...)
+		}
+		return ids, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res.([]string), nil
+}
+
+// GetNativeSoftwareRiskSummariesByEndpoint devuelve solo el resumen de las
+// instalaciones conectadas directamente al endpoint.
+func (r *riskRepo) GetNativeSoftwareRiskSummariesByEndpoint(ctx context.Context, endpointID string) ([]domain.SoftwareRiskSummary, error) {
+	id, err := strconv.ParseInt(strings.TrimSpace(endpointID), 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("endpoint_id inválido %q: %w", endpointID, err)
+	}
+	return r.GetSoftwareRiskSummariesByEndpoint(ctx, id)
+}
+
+// GetContainerRiskSummariesByEndpoint devuelve los resúmenes ya persistidos
+// de los contenedores alojados en un endpoint.
+func (r *riskRepo) GetContainerRiskSummariesByEndpoint(ctx context.Context, endpointID string) ([]domain.ContainerRiskSummary, error) {
+	query := `
+		MATCH (e:Endpoint)-[:HOSTS]->(c:Container)
+		WHERE toString(e.id) = toString($endpoint_id)
+		RETURN c.id AS container_id,
+		       coalesce(c.name, c.id) AS container_name,
+		       coalesce(c.state, '') AS state,
+		       coalesce(c.risk_score, 0.0) AS risk_score,
+		       coalesce(c.risk_tier, 'LOW') AS risk_tier,
+		       coalesce(c.priority_score, 0.0) AS priority_score,
+		       coalesce(c.priority_tier, 'LOW') AS priority_tier,
+		       coalesce(c.technical_driver_type, '') AS technical_driver_type,
+		       coalesce(c.technical_driver_asset_id, '') AS technical_driver_asset_id,
+		       coalesce(c.technical_driver_asset_name, '') AS technical_driver_asset_name,
+		       coalesce(c.technical_driver_finding_id, 0) AS technical_driver_finding_id,
+		       coalesce(c.technical_driver_cve_id, '') AS technical_driver_cve_id,
+		       coalesce(c.technical_driver_risk_score, 0.0) AS technical_driver_risk_score,
+		       coalesce(c.priority_driver_type, '') AS priority_driver_type,
+		       coalesce(c.priority_driver_asset_id, '') AS priority_driver_asset_id,
+		       coalesce(c.priority_driver_asset_name, '') AS priority_driver_asset_name,
+		       coalesce(c.priority_driver_finding_id, 0) AS priority_driver_finding_id,
+		       coalesce(c.priority_driver_cve_id, '') AS priority_driver_cve_id,
+		       coalesce(c.priority_driver_priority_score, 0.0) AS priority_driver_priority_score,
+		       coalesce(c.risky_asset_count, 0) AS risky_asset_count,
+		       coalesce(c.direct_finding_count, 0) AS direct_finding_count,
+		       coalesce(c.risky_installation_count, 0) AS risky_installation_count
+		ORDER BY priority_score DESC
+	`
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"endpoint_id": endpointID})
+		if err != nil {
+			return nil, err
+		}
+		summaries := make([]domain.ContainerRiskSummary, 0)
+		for result.Next(ctx) {
+			record := result.Record()
+			get := func(key string) any { value, _ := record.Get(key); return value }
+			summaries = append(summaries, domain.ContainerRiskSummary{
+				ContainerID: toStr(get("container_id")), ContainerName: toStr(get("container_name")), State: toStr(get("state")),
+				RiskScore: toFloat64(get("risk_score")), RiskTier: toStr(get("risk_tier")),
+				PriorityScore: toFloat64(get("priority_score")), PriorityTier: toStr(get("priority_tier")),
+				TechnicalDriverType: toStr(get("technical_driver_type")), TechnicalDriverAssetID: toStr(get("technical_driver_asset_id")), TechnicalDriverAssetName: toStr(get("technical_driver_asset_name")),
+				TechnicalDriverFindingID: toInt64(get("technical_driver_finding_id")), TechnicalDriverCVEID: toStr(get("technical_driver_cve_id")), TechnicalDriverRiskScore: toFloat64(get("technical_driver_risk_score")),
+				PriorityDriverType: toStr(get("priority_driver_type")), PriorityDriverAssetID: toStr(get("priority_driver_asset_id")), PriorityDriverAssetName: toStr(get("priority_driver_asset_name")),
+				PriorityDriverFindingID: toInt64(get("priority_driver_finding_id")), PriorityDriverCVEID: toStr(get("priority_driver_cve_id")), PriorityDriverPriorityScore: toFloat64(get("priority_driver_priority_score")),
+				RiskyAssetCount: int(toInt64(get("risky_asset_count"))), DirectFindingCount: int(toInt64(get("direct_finding_count"))), RiskyInstallationCount: int(toInt64(get("risky_installation_count"))),
+			})
+		}
+		return summaries, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res.([]domain.ContainerRiskSummary), nil
 }
 
 // UpdateSoftwareInstallationPriority actualiza el score de prioridad y el tier en el nodo SoftwareInstallation.
@@ -918,6 +1028,48 @@ func (r *riskRepo) UpdateEndpointRiskAndPriority(ctx context.Context, endpointID
 	return executeWriteHelper(ctx, r.driver, query, params)
 }
 
+// UpdateEndpointRiskAndPrioritySummary persiste los drivers genéricos de una
+// instalación nativa o de un contenedor, manteniendo también los campos legacy.
+func (r *riskRepo) UpdateEndpointRiskAndPrioritySummary(ctx context.Context, summary domain.EndpointRiskSummary) error {
+	query := `
+		MATCH (e:Endpoint {id: $endpoint_id})
+		SET e.risk_score = $risk_score,
+		    e.risk_tier = $risk_tier,
+		    e.risk_computed_at = $now,
+		    e.priority_score = $priority_score,
+		    e.priority_tier = $priority_tier,
+		    e.priority_computed_at = $now,
+		    e.technical_driver_type = $technical_driver_type,
+		    e.technical_driver_asset_id = $technical_driver_asset_id,
+		    e.technical_driver_asset_name = $technical_driver_asset_name,
+		    e.priority_driver_type = $priority_driver_type,
+		    e.priority_driver_asset_id = $priority_driver_asset_id,
+		    e.priority_driver_asset_name = $priority_driver_asset_name,
+		    e.technical_driver_installation_id = $technical_driver_installation_id,
+		    e.technical_driver_software_name = $technical_driver_software_name,
+		    e.technical_driver_risk_score = $technical_driver_risk_score,
+		    e.technical_driver_cve_id = $technical_driver_cve_id,
+		    e.priority_driver_installation_id = $priority_driver_installation_id,
+		    e.priority_driver_software_name = $priority_driver_software_name,
+		    e.priority_driver_priority_score = $priority_driver_priority_score,
+		    e.priority_driver_cve_id = $priority_driver_cve_id,
+		    e.risky_software_count = $risky_asset_count
+	`
+	params := map[string]any{
+		"endpoint_id": summary.EndpointID, "risk_score": summary.RiskScore, "risk_tier": summary.RiskTier,
+		"priority_score": summary.PriorityScore, "priority_tier": summary.PriorityTier,
+		"technical_driver_type": summary.TechnicalDriverType, "technical_driver_asset_id": summary.TechnicalDriverAssetID,
+		"technical_driver_asset_name": summary.TechnicalDriverAssetName, "priority_driver_type": summary.PriorityDriverType,
+		"priority_driver_asset_id": summary.PriorityDriverAssetID, "priority_driver_asset_name": summary.PriorityDriverAssetName,
+		"technical_driver_installation_id": summary.TechnicalDriverInstallationID, "technical_driver_software_name": summary.TechnicalDriverSoftwareName,
+		"technical_driver_risk_score": summary.TechnicalDriverRiskScore, "technical_driver_cve_id": summary.TechnicalDriverCVEID,
+		"priority_driver_installation_id": summary.PriorityDriverInstallationID, "priority_driver_software_name": summary.PriorityDriverSoftwareName,
+		"priority_driver_priority_score": summary.PriorityDriverPriorityScore, "priority_driver_cve_id": summary.PriorityDriverCVEID,
+		"risky_asset_count": summary.RiskySoftwareCount, "now": time.Now().UTC(),
+	}
+	return executeWriteHelper(ctx, r.driver, query, params)
+}
+
 // GetEndpointIDsByProject devuelve los IDs de todos los endpoints activos asociados a un proyecto.
 func (r *riskRepo) GetEndpointIDsByProject(ctx context.Context, projectID int64) ([]int64, error) {
 	query := `
@@ -1228,10 +1380,13 @@ func (r *riskRepo) GetContainerIDsByEndpoint(ctx context.Context, endpointID int
 // GetDirectFindingScoresByContainer devuelve los scores de findings contextuales directos de la imagen del contenedor.
 func (r *riskRepo) GetDirectFindingScoresByContainer(ctx context.Context, containerID string) ([]domain.FindingRiskSummary, error) {
 	query := `
-		MATCH (c:Container {id: $container_id})-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-		WHERE f.context_type = 'CONTAINER_IMAGE'
+		MATCH (c:Container {id: $container_id})-[:USES_IMAGE]->(image:ContainerImage)
+		MATCH (c)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE f.container_id = c.id
+		  AND f.image_id = image.id
 		  AND NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED']
 		  AND coalesce(f.remediation_factor, 1.0) > 0.0
+		  AND coalesce(f.risk_score, 0.0) > 0.0
 		RETURN f.id AS finding_id,
 		       v.cve_id AS cve_id,
 		       coalesce(f.risk_score, 0.0) AS risk_score,
@@ -1272,6 +1427,54 @@ func (r *riskRepo) GetDirectFindingScoresByContainer(ctx context.Context, contai
 		return []domain.FindingRiskSummary{}, nil
 	}
 	return res.([]domain.FindingRiskSummary), nil
+}
+
+// GetInstallationIDsByContainer devuelve las instalaciones de software internas
+// de un contenedor para recalcularlas antes de agregar su riesgo.
+func (r *riskRepo) GetInstallationIDsByContainer(ctx context.Context, containerID string) ([]string, error) {
+	query := `
+		MATCH (c:Container {id: $container_id})-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+		RETURN collect(DISTINCT coalesce(si.installation_id, si.id)) AS installation_ids
+	`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"container_id": containerID})
+		if err != nil {
+			return nil, err
+		}
+		if !result.Next(ctx) {
+			return []string{}, result.Err()
+		}
+		values, ok := result.Record().Get("installation_ids")
+		if !ok || values == nil {
+			return []string{}, result.Err()
+		}
+		ids := make([]string, 0)
+		switch items := values.(type) {
+		case []any:
+			for _, item := range items {
+				if value, ok := item.(string); ok && value != "" {
+					ids = append(ids, value)
+				}
+			}
+		case []string:
+			ids = append(ids, items...)
+		default:
+			return []string{}, result.Err()
+		}
+		return ids, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if res == nil {
+		return []string{}, nil
+	}
+	return res.([]string), nil
 }
 
 // GetSoftwareRiskSummariesByContainer devuelve el resumen de riesgo de software instalado dentro de un contenedor.
@@ -1367,7 +1570,9 @@ func (r *riskRepo) UpdateContainerRiskAndPriority(ctx context.Context, summary d
 		    c.priority_driver_finding_id = $priority_driver_finding_id,
 		    c.priority_driver_cve_id = $priority_driver_cve_id,
 		    c.priority_driver_priority_score = $priority_driver_priority_score,
-		    c.risky_asset_count = $risky_asset_count
+		    c.risky_asset_count = $risky_asset_count,
+		    c.direct_finding_count = $direct_finding_count,
+		    c.risky_installation_count = $risky_installation_count
 	`
 	params := map[string]any{
 		"container_id":                   summary.ContainerID,
@@ -1388,6 +1593,8 @@ func (r *riskRepo) UpdateContainerRiskAndPriority(ctx context.Context, summary d
 		"priority_driver_cve_id":         summary.PriorityDriverCVEID,
 		"priority_driver_priority_score": summary.PriorityDriverPriorityScore,
 		"risky_asset_count":              summary.RiskyAssetCount,
+		"direct_finding_count":           summary.DirectFindingCount,
+		"risky_installation_count":       summary.RiskyInstallationCount,
 		"now":                            time.Now().UTC(),
 	}
 	return executeWriteHelper(ctx, r.driver, query, params)

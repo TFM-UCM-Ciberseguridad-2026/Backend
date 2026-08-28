@@ -53,7 +53,9 @@ type ContainerRiskSummary struct {
 	PriorityDriverCVEID         string
 	PriorityDriverPriorityScore float64
 
-	RiskyAssetCount int
+	RiskyAssetCount        int
+	DirectFindingCount     int
+	RiskyInstallationCount int
 }
 
 // EndpointRiskSummary representa el resumen mínimo necesario para agregar riesgo
@@ -80,4 +82,25 @@ type EndpointRiskSummary struct {
 	PriorityDriverCVEID          string
 
 	RiskySoftwareCount int
+
+	TechnicalDriverType      string
+	TechnicalDriverAssetID   string
+	TechnicalDriverAssetName string
+	PriorityDriverType       string
+	PriorityDriverAssetID    string
+	PriorityDriverAssetName  string
+}
+
+// AssetRiskSummary representa una fuente homogénea de riesgo de un endpoint.
+// Puede ser una instalación nativa o un contenedor ya agregado.
+type AssetRiskSummary struct {
+	AssetType           string
+	AssetID             string
+	AssetName           string
+	RiskScore           float64
+	PriorityScore       float64
+	DriverFindingID     int64
+	DriverCVEID         string
+	DriverRiskScore     float64
+	DriverPriorityScore float64
 }
