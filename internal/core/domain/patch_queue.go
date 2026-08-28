@@ -41,12 +41,31 @@ type PatchQueueItem struct {
 	RemediationKind string `json:"remediation_kind"`
 }
 
+// PatchQueueQuery representa los parámetros de búsqueda, filtrado avanzado, ordenación y paginación para la cola de parcheo.
+type PatchQueueQuery struct {
+	ProjectID       *int64 `json:"project_id,omitempty"`
+	Page            int    `json:"page"`
+	Limit           int    `json:"limit"`
+	Search          string `json:"search"`
+	VendorSearch    string `json:"vendor_search"`
+	HostnameSearch  string `json:"hostname_search"`
+	Environment     string `json:"environment"`      // "ALL", "PROD", "STAGING", "DEV", etc.
+	InternetExposed string `json:"internet_exposed"` // "ALL", "TRUE", "FALSE"
+	InContainer     string `json:"in_container"`     // "ALL", "TRUE", "FALSE"
+	PriorityTier    string `json:"priority_tier"`    // "ALL", "CRITICAL", "HIGH", "MEDIUM", "LOW"
+	PatchAvailable  string `json:"patch_available"`  // "ALL", "TRUE", "FALSE"
+	RemediationKind string `json:"remediation_kind"` // "ALL", "OFFICIAL_FIX", "WORKAROUND", "UNAVAILABLE"
+	SortField       string `json:"sort_field"`
+	SortDirection   string `json:"sort_direction"`
+}
+
 type PatchQueueResponse struct {
-	Queue      []PatchQueueItem `json:"queue"`
-	Total      int              `json:"total"`
-	Page       int              `json:"page"`
-	Limit      int              `json:"limit"`
-	TotalPages int              `json:"total_pages"`
+	Queue              []PatchQueueItem `json:"queue"`
+	Total              int              `json:"total"`
+	Page               int              `json:"page"`
+	Limit              int              `json:"limit"`
+	TotalPages         int              `json:"total_pages"`
+	PriorityTierCounts map[string]int64 `json:"priority_tier_counts,omitempty"`
 }
 
 type ProjectPatchRefreshItem struct {
