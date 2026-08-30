@@ -54,6 +54,7 @@ func main() {
 	riskRepo := neo4j.NewRiskRepository(driver)
 	ttpRepo := neo4j.NewTTPRepository(driver)
 	actorRepo := neo4j.NewThreatActorRepository(driver)
+	govRepo := neo4j.NewGovernanceRepository(driver)
 
 	// 4. Inicialización del Servicio/Orquestador (Core)
 	nistAPIAdapter := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey, cfg.NVD.TimeoutSeconds)
@@ -205,7 +206,14 @@ func main() {
 
 	// 5. Inicialización de los Controladores HTTP (Adaptadores Inbound)
 	h := handler.NewOrchestratorHandler(orchestrator)
-	router := handler.NewRouter(h, wsHub)
+	
+	govService := service.NewGovernanceService(govRepo)
+	if err := govService.Seed(context.Background()); err != nil {
+		log.Printf("[Governance] Error seeding inicial: %v", err)
+	}
+	govHandler := handler.NewGovernanceHandler(govService)
+
+	router := handler.NewRouter(h, wsHub, govHandler)
 
 	// Middleware CORS para evitar bloqueos del navegador en desarrollo
 	corsHandler := middleware.CORS(router)

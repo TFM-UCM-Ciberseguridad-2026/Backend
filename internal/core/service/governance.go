@@ -1,0 +1,197 @@
+package service
+
+import (
+	"context"
+	"sort"
+	"time"
+
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/ports"
+)
+
+type governanceService struct {
+	repo ports.GovernanceRepository
+}
+
+func NewGovernanceService(repo ports.GovernanceRepository) ports.GovernanceService {
+	return &governanceService{repo: repo}
+}
+
+func (s *governanceService) Seed(ctx context.Context) error {
+	seeded, err := s.repo.IsSeeded(ctx)
+	if err != nil {
+		return err
+	}
+	if seeded {
+		return nil // Already seeded
+	}
+
+	// 1. Seed Roles
+	roles := []domain.Role{
+		{ID: "role-1", Name: "CISO", Contact: "ciso@company.local"},
+		{ID: "role-2", Name: "Equipo SOC", Contact: "soc@company.local"},
+		{ID: "role-3", Name: "Equipo Infraestructura", Contact: "infra@company.local"},
+		{ID: "role-4", Name: "Dueño del Activo", Contact: "TBD"},
+	}
+	for _, r := range roles {
+		if err := s.repo.SaveRole(ctx, &r); err != nil {
+			return err
+		}
+	}
+
+	// 2. Seed RACI Activities
+	activities := []domain.RACIActivity{
+		{ID: "act-1", Name: "Detección de CVE", Order: 1, Roles: map[string]string{"role-1": "I", "role-2": "A", "role-3": "C", "role-4": "I"}},
+		{ID: "act-2", Name: "Priorización (risk-based)", Order: 2, Roles: map[string]string{"role-1": "A", "role-2": "R", "role-3": "C", "role-4": "I"}},
+		{ID: "act-3", Name: "Aprobación de parcheo", Order: 3, Roles: map[string]string{"role-1": "I", "role-2": "C", "role-3": "A", "role-4": "R"}},
+		{ID: "act-4", Name: "Pruebas en entorno controlado", Order: 4, Roles: map[string]string{"role-1": "I", "role-2": "C", "role-3": "A", "role-4": "R"}},
+		{ID: "act-5", Name: "Ejecución de parcheo", Order: 5, Roles: map[string]string{"role-1": "I", "role-2": "C", "role-3": "R", "role-4": "A"}},
+		{ID: "act-6", Name: "Verificación post-parcheo", Order: 6, Roles: map[string]string{"role-1": "I", "role-2": "R", "role-3": "C", "role-4": "A"}},
+		{ID: "act-7", Name: "Gestión de excepciones", Order: 7, Roles: map[string]string{"role-1": "A", "role-2": "C", "role-3": "C", "role-4": "R"}},
+		{ID: "act-8", Name: "Reporting a dirección", Order: 8, Roles: map[string]string{"role-1": "A", "role-2": "R", "role-3": "I", "role-4": "I"}},
+	}
+	for _, a := range activities {
+		if err := s.repo.SaveRACIActivity(ctx, &a); err != nil {
+			return err
+		}
+	}
+
+	// 3. Seed Policies
+	policies := []domain.PolicyDocument{
+		{ID: "pol-1", Name: "Política de Gestión de Vulnerabilidades", Version: "v3.2", Owner: "CISO", NextReviewDate: "2027-06-15", UnderReview: false},
+		{ID: "pol-2", Name: "Política de Parcheo en Producción", Version: "v1.5", Owner: "Equipo Infraestructura", NextReviewDate: "2027-03-02", UnderReview: false},
+		{ID: "pol-3", Name: "Procedimiento de Excepciones", Version: "v2.0", Owner: "Equipo Infraestructura", NextReviewDate: "2024-01-01", UnderReview: true},
+		{ID: "pol-4", Name: "Acuerdo de Nivel de Servicio (SLA) de Parcheo", Version: "v1.1", Owner: "CISO", NextReviewDate: "2027-08-10", UnderReview: false},
+		{ID: "pol-5", Name: "Política de Hardening de Servidores", Version: "v2.3", Owner: "Equipo SOC", NextReviewDate: "2027-07-05", UnderReview: false},
+		{ID: "pol-6", Name: "Política de Criptografía y Certificados", Version: "v1.0", Owner: "Equipo Infraestructura", NextReviewDate: "2023-12-10", UnderReview: false},
+	}
+	for _, p := range policies {
+		if err := s.repo.SavePolicy(ctx, &p); err != nil {
+			return err
+		}
+	}
+
+	// 4. Seed Procedures
+	procedures := []domain.Procedure{
+		{ID: "PROC-01", Name: "Escaneo y Detección de CVE", Meta: "4 pasos · actualizado 12/07/2026", Steps: []string{"Ejecutar escaneo automático sobre el inventario de activos", "Correlacionar hallazgos con bases de datos CVE / NVD", "Enriquecer con EPSS y catálogo CISA KEV", "Registrar hallazgo en el grafo con first_detected_at"}},
+		{ID: "PROC-02", Name: "Priorización basada en riesgo", Meta: "3 pasos · actualizado 02/03/2026", Steps: []string{"Calcular severidad efectiva (CVSS + exposición del activo)", "Asignar SLA de remediación según severidad", "Notificar al Dueño del Activo y al Equipo de Infraestructura"}},
+		{ID: "PROC-03", Name: "Pruebas y validación de parches", Meta: "4 pasos · actualizado 18/05/2026", Steps: []string{"Desplegar el parche en entorno de pruebas aislado", "Ejecutar batería de regresión funcional", "Validar que no rompe dependencias críticas", "Aprobación formal de Infra antes del despliegue"}},
+		{ID: "PROC-04", Name: "Despliegue por anillos", Meta: "3 pasos · actualizado 18/05/2026", Steps: []string{"Anillo piloto: subconjunto reducido y no crítico", "Anillo producción: resto de activos estándar", "Anillo crítico: solo tras verificación en anillos previos"}},
+		{ID: "PROC-05", Name: "Gestión de excepciones", Meta: "3 pasos · actualizado 10/08/2026", Steps: []string{"Solicitud formal con justificación técnica del Dueño del Activo", "Definición de controles compensatorios obligatorios", "Revisión y renovación cada 30 días, nunca indefinida"}},
+		{ID: "PROC-06", Name: "Escalado por incumplimiento", Meta: "4 pasos · actualizado 05/07/2026", Steps: []string{"Aviso automático al 80% del plazo consumido", "Escalado N1 a Responsable de Infraestructura al vencer", "Escalado N2 al CISO a los 15 días de vencido", "Aceptación formal del riesgo o priorización forzada"}},
+	}
+	for _, p := range procedures {
+		if err := s.repo.SaveProcedure(ctx, &p); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// Policies
+func (s *governanceService) SavePolicy(ctx context.Context, policy *domain.PolicyDocument) error {
+	return s.repo.SavePolicy(ctx, policy)
+}
+func (s *governanceService) GetPolicies(ctx context.Context) ([]domain.PolicyDocument, error) {
+	policies, err := s.repo.GetPolicies(ctx)
+	if err != nil {
+		return nil, err
+	}
+	
+	now := time.Now()
+	for i := range policies {
+		policies[i].CalculateStatus(now)
+	}
+	return policies, nil
+}
+func (s *governanceService) DeletePolicy(ctx context.Context, id string) error {
+	return s.repo.DeletePolicy(ctx, id)
+}
+
+// Procedures
+func (s *governanceService) SaveProcedure(ctx context.Context, procedure *domain.Procedure) error {
+	return s.repo.SaveProcedure(ctx, procedure)
+}
+func (s *governanceService) GetProcedures(ctx context.Context) ([]domain.Procedure, error) {
+	return s.repo.GetProcedures(ctx)
+}
+func (s *governanceService) DeleteProcedure(ctx context.Context, id string) error {
+	return s.repo.DeleteProcedure(ctx, id)
+}
+
+// Roles
+func (s *governanceService) SaveRole(ctx context.Context, role *domain.Role) error {
+	return s.repo.SaveRole(ctx, role)
+}
+func (s *governanceService) GetRoles(ctx context.Context) ([]domain.Role, error) {
+	return s.repo.GetRoles(ctx)
+}
+func (s *governanceService) DeleteRole(ctx context.Context, id string) error {
+	return s.repo.DeleteRole(ctx, id)
+}
+
+// RACI Activities
+func (s *governanceService) SaveRACIActivity(ctx context.Context, activity *domain.RACIActivity) error {
+	return s.repo.SaveRACIActivity(ctx, activity)
+}
+func (s *governanceService) GetRACIActivities(ctx context.Context) ([]domain.RACIActivity, error) {
+	return s.repo.GetRACIActivities(ctx)
+}
+func (s *governanceService) DeleteRACIActivity(ctx context.Context, id string) error {
+	return s.repo.DeleteRACIActivity(ctx, id)
+}
+
+func (s *governanceService) GetSLAConfigs(ctx context.Context) ([]domain.SLAConfig, error) {
+	return s.repo.GetSLAConfigs(ctx)
+}
+
+func (s *governanceService) SaveSLAConfigs(ctx context.Context, configs []domain.SLAConfig) error {
+	return s.repo.SaveSLAConfigs(ctx, configs)
+}
+
+func (s *governanceService) GetSLABreaches(ctx context.Context) ([]domain.SLABreach, error) {
+	breaches, err := s.repo.GetSLABreaches(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	configs, err := s.repo.GetSLAConfigs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	configMap := make(map[string]int)
+	for _, c := range configs {
+		configMap[c.Severity] = c.Days
+	}
+
+	now := time.Now()
+	nowUnix := now.UnixMilli()
+
+	var finalBreaches []domain.SLABreach
+	for _, b := range breaches {
+		b.Severity = domain.ScoreToSeverity(b.BaseScore)
+
+		// Excluir vulnerabilidades con CVSS 0.0 (severidad "None").
+		// Un CVSS 0.0 no representa riesgo real y no debe forzarse a un SLA de remediación.
+		if b.Severity == "None" {
+			continue
+		}
+
+		b.SLADays = configMap[b.Severity]
+		
+		limitTimeUnix := b.FirstDetectedAt + int64(b.SLADays*24*60*60*1000)
+		daysRemaining := int((limitTimeUnix - nowUnix) / (1000 * 60 * 60 * 24))
+		b.DaysRemaining = daysRemaining
+		finalBreaches = append(finalBreaches, b)
+	}
+
+	// Order: breached first (DaysRemaining < 0) ascending by DaysRemaining (most negative first)
+	// then non-breached ascending by DaysRemaining (closest to zero first)
+	sort.Slice(finalBreaches, func(i, j int) bool {
+		return finalBreaches[i].DaysRemaining < finalBreaches[j].DaysRemaining
+	})
+
+	return finalBreaches, nil
+}

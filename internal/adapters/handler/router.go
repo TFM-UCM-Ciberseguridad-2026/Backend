@@ -15,10 +15,16 @@ Propósito arquitectónico y teórico:
 //va a haber una api que se sea /fetch/vuln/endpoint?endpoint=nombreendpoint
 
 // NewRouter crea y configura el multiplexor HTTP con las rutas de la aplicación.
-func NewRouter(h *OrchestratorHandler, hub *WSHub) *http.ServeMux {
+func NewRouter(h *OrchestratorHandler, hub *WSHub, govHandler *GovernanceHandler) *http.ServeMux {
 	mux := http.NewServeMux()
 
+	if govHandler != nil {
+		govHandler.RegisterRoutes(mux)
+	}
+
 	// Definición de las rutas RESTful.
+	// Aprovecha el nuevo patrón de enrutamiento introducido en Go 1.22+
+
 	// Aprovecha el nuevo patrón de enrutamiento introducido en Go 1.22+
 
 	/* POST /api/projects: Crea y registra un nuevo proyecto de auditoría. */
