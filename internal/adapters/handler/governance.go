@@ -2,7 +2,9 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/ports"
@@ -38,9 +40,22 @@ func (h *GovernanceHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/governance/sla/breaches", h.GetSLABreaches)
 }
 
+func getProjectID(r *http.Request) (int64, error) {
+	pidStr := r.URL.Query().Get("project_id")
+	if pidStr == "" {
+		return 0, fmt.Errorf("project_id query parameter is required")
+	}
+	return strconv.ParseInt(pidStr, 10, 64)
+}
+
 // -- Policies --
 func (h *GovernanceHandler) GetPolicies(w http.ResponseWriter, r *http.Request) {
-	policies, err := h.service.GetPolicies(r.Context())
+	pid, err := getProjectID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	policies, err := h.service.GetPolicies(r.Context(), pid)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -49,12 +64,17 @@ func (h *GovernanceHandler) GetPolicies(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *GovernanceHandler) SavePolicy(w http.ResponseWriter, r *http.Request) {
+	pid, err := getProjectID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	var policy domain.PolicyDocument
 	if err := json.NewDecoder(r.Body).Decode(&policy); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := h.service.SavePolicy(r.Context(), &policy); err != nil {
+	if err := h.service.SavePolicy(r.Context(), pid, &policy); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -62,8 +82,13 @@ func (h *GovernanceHandler) SavePolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *GovernanceHandler) DeletePolicy(w http.ResponseWriter, r *http.Request) {
+	pid, err := getProjectID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	id := r.PathValue("id")
-	if err := h.service.DeletePolicy(r.Context(), id); err != nil {
+	if err := h.service.DeletePolicy(r.Context(), pid, id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -72,7 +97,12 @@ func (h *GovernanceHandler) DeletePolicy(w http.ResponseWriter, r *http.Request)
 
 // -- Procedures --
 func (h *GovernanceHandler) GetProcedures(w http.ResponseWriter, r *http.Request) {
-	procedures, err := h.service.GetProcedures(r.Context())
+	pid, err := getProjectID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	procedures, err := h.service.GetProcedures(r.Context(), pid)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -81,12 +111,17 @@ func (h *GovernanceHandler) GetProcedures(w http.ResponseWriter, r *http.Request
 }
 
 func (h *GovernanceHandler) SaveProcedure(w http.ResponseWriter, r *http.Request) {
+	pid, err := getProjectID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	var procedure domain.Procedure
 	if err := json.NewDecoder(r.Body).Decode(&procedure); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := h.service.SaveProcedure(r.Context(), &procedure); err != nil {
+	if err := h.service.SaveProcedure(r.Context(), pid, &procedure); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -94,8 +129,13 @@ func (h *GovernanceHandler) SaveProcedure(w http.ResponseWriter, r *http.Request
 }
 
 func (h *GovernanceHandler) DeleteProcedure(w http.ResponseWriter, r *http.Request) {
+	pid, err := getProjectID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	id := r.PathValue("id")
-	if err := h.service.DeleteProcedure(r.Context(), id); err != nil {
+	if err := h.service.DeleteProcedure(r.Context(), pid, id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -104,7 +144,12 @@ func (h *GovernanceHandler) DeleteProcedure(w http.ResponseWriter, r *http.Reque
 
 // -- Roles --
 func (h *GovernanceHandler) GetRoles(w http.ResponseWriter, r *http.Request) {
-	roles, err := h.service.GetRoles(r.Context())
+	pid, err := getProjectID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	roles, err := h.service.GetRoles(r.Context(), pid)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -113,12 +158,17 @@ func (h *GovernanceHandler) GetRoles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *GovernanceHandler) SaveRole(w http.ResponseWriter, r *http.Request) {
+	pid, err := getProjectID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	var role domain.Role
 	if err := json.NewDecoder(r.Body).Decode(&role); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := h.service.SaveRole(r.Context(), &role); err != nil {
+	if err := h.service.SaveRole(r.Context(), pid, &role); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -126,8 +176,13 @@ func (h *GovernanceHandler) SaveRole(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *GovernanceHandler) DeleteRole(w http.ResponseWriter, r *http.Request) {
+	pid, err := getProjectID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	id := r.PathValue("id")
-	if err := h.service.DeleteRole(r.Context(), id); err != nil {
+	if err := h.service.DeleteRole(r.Context(), pid, id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -136,7 +191,12 @@ func (h *GovernanceHandler) DeleteRole(w http.ResponseWriter, r *http.Request) {
 
 // -- RACI Activities --
 func (h *GovernanceHandler) GetRACIActivities(w http.ResponseWriter, r *http.Request) {
-	activities, err := h.service.GetRACIActivities(r.Context())
+	pid, err := getProjectID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	activities, err := h.service.GetRACIActivities(r.Context(), pid)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -145,12 +205,17 @@ func (h *GovernanceHandler) GetRACIActivities(w http.ResponseWriter, r *http.Req
 }
 
 func (h *GovernanceHandler) SaveRACIActivity(w http.ResponseWriter, r *http.Request) {
+	pid, err := getProjectID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	var activity domain.RACIActivity
 	if err := json.NewDecoder(r.Body).Decode(&activity); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := h.service.SaveRACIActivity(r.Context(), &activity); err != nil {
+	if err := h.service.SaveRACIActivity(r.Context(), pid, &activity); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -158,8 +223,13 @@ func (h *GovernanceHandler) SaveRACIActivity(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *GovernanceHandler) DeleteRACIActivity(w http.ResponseWriter, r *http.Request) {
+	pid, err := getProjectID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	id := r.PathValue("id")
-	if err := h.service.DeleteRACIActivity(r.Context(), id); err != nil {
+	if err := h.service.DeleteRACIActivity(r.Context(), pid, id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -167,7 +237,12 @@ func (h *GovernanceHandler) DeleteRACIActivity(w http.ResponseWriter, r *http.Re
 }
 
 func (h *GovernanceHandler) GetSLAConfigs(w http.ResponseWriter, r *http.Request) {
-	configs, err := h.service.GetSLAConfigs(r.Context())
+	pid, err := getProjectID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	configs, err := h.service.GetSLAConfigs(r.Context(), pid)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -177,6 +252,11 @@ func (h *GovernanceHandler) GetSLAConfigs(w http.ResponseWriter, r *http.Request
 }
 
 func (h *GovernanceHandler) SaveSLAConfigs(w http.ResponseWriter, r *http.Request) {
+	pid, err := getProjectID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	var configs []domain.SLAConfig
 	if err := json.NewDecoder(r.Body).Decode(&configs); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -190,7 +270,7 @@ func (h *GovernanceHandler) SaveSLAConfigs(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	if err := h.service.SaveSLAConfigs(r.Context(), configs); err != nil {
+	if err := h.service.SaveSLAConfigs(r.Context(), pid, configs); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -198,7 +278,12 @@ func (h *GovernanceHandler) SaveSLAConfigs(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *GovernanceHandler) GetSLABreaches(w http.ResponseWriter, r *http.Request) {
-	breaches, err := h.service.GetSLABreaches(r.Context())
+	pid, err := getProjectID(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	breaches, err := h.service.GetSLABreaches(r.Context(), pid)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

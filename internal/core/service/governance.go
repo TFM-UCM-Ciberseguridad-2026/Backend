@@ -17,8 +17,8 @@ func NewGovernanceService(repo ports.GovernanceRepository) ports.GovernanceServi
 	return &governanceService{repo: repo}
 }
 
-func (s *governanceService) Seed(ctx context.Context) error {
-	seeded, err := s.repo.IsSeeded(ctx)
+func (s *governanceService) Seed(ctx context.Context, projectID int64) error {
+	seeded, err := s.repo.IsSeeded(ctx, projectID)
 	if err != nil {
 		return err
 	}
@@ -34,7 +34,7 @@ func (s *governanceService) Seed(ctx context.Context) error {
 		{ID: "role-4", Name: "Dueño del Activo", Contact: "TBD"},
 	}
 	for _, r := range roles {
-		if err := s.repo.SaveRole(ctx, &r); err != nil {
+		if err := s.repo.SaveRole(ctx, projectID, &r); err != nil {
 			return err
 		}
 	}
@@ -51,7 +51,7 @@ func (s *governanceService) Seed(ctx context.Context) error {
 		{ID: "act-8", Name: "Reporting a dirección", Order: 8, Roles: map[string]string{"role-1": "A", "role-2": "R", "role-3": "I", "role-4": "I"}},
 	}
 	for _, a := range activities {
-		if err := s.repo.SaveRACIActivity(ctx, &a); err != nil {
+		if err := s.repo.SaveRACIActivity(ctx, projectID, &a); err != nil {
 			return err
 		}
 	}
@@ -66,7 +66,7 @@ func (s *governanceService) Seed(ctx context.Context) error {
 		{ID: "pol-6", Name: "Política de Criptografía y Certificados", Version: "v1.0", Owner: "Equipo Infraestructura", NextReviewDate: "2023-12-10", UnderReview: false},
 	}
 	for _, p := range policies {
-		if err := s.repo.SavePolicy(ctx, &p); err != nil {
+		if err := s.repo.SavePolicy(ctx, projectID, &p); err != nil {
 			return err
 		}
 	}
@@ -81,7 +81,7 @@ func (s *governanceService) Seed(ctx context.Context) error {
 		{ID: "PROC-06", Name: "Escalado por incumplimiento", Meta: "4 pasos · actualizado 05/07/2026", Steps: []string{"Aviso automático al 80% del plazo consumido", "Escalado N1 a Responsable de Infraestructura al vencer", "Escalado N2 al CISO a los 15 días de vencido", "Aceptación formal del riesgo o priorización forzada"}},
 	}
 	for _, p := range procedures {
-		if err := s.repo.SaveProcedure(ctx, &p); err != nil {
+		if err := s.repo.SaveProcedure(ctx, projectID, &p); err != nil {
 			return err
 		}
 	}
@@ -90,11 +90,11 @@ func (s *governanceService) Seed(ctx context.Context) error {
 }
 
 // Policies
-func (s *governanceService) SavePolicy(ctx context.Context, policy *domain.PolicyDocument) error {
-	return s.repo.SavePolicy(ctx, policy)
+func (s *governanceService) SavePolicy(ctx context.Context, projectID int64, policy *domain.PolicyDocument) error {
+	return s.repo.SavePolicy(ctx, projectID, policy)
 }
-func (s *governanceService) GetPolicies(ctx context.Context) ([]domain.PolicyDocument, error) {
-	policies, err := s.repo.GetPolicies(ctx)
+func (s *governanceService) GetPolicies(ctx context.Context, projectID int64) ([]domain.PolicyDocument, error) {
+	policies, err := s.repo.GetPolicies(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -105,58 +105,58 @@ func (s *governanceService) GetPolicies(ctx context.Context) ([]domain.PolicyDoc
 	}
 	return policies, nil
 }
-func (s *governanceService) DeletePolicy(ctx context.Context, id string) error {
-	return s.repo.DeletePolicy(ctx, id)
+func (s *governanceService) DeletePolicy(ctx context.Context, projectID int64, id string) error {
+	return s.repo.DeletePolicy(ctx, projectID, id)
 }
 
 // Procedures
-func (s *governanceService) SaveProcedure(ctx context.Context, procedure *domain.Procedure) error {
-	return s.repo.SaveProcedure(ctx, procedure)
+func (s *governanceService) SaveProcedure(ctx context.Context, projectID int64, procedure *domain.Procedure) error {
+	return s.repo.SaveProcedure(ctx, projectID, procedure)
 }
-func (s *governanceService) GetProcedures(ctx context.Context) ([]domain.Procedure, error) {
-	return s.repo.GetProcedures(ctx)
+func (s *governanceService) GetProcedures(ctx context.Context, projectID int64) ([]domain.Procedure, error) {
+	return s.repo.GetProcedures(ctx, projectID)
 }
-func (s *governanceService) DeleteProcedure(ctx context.Context, id string) error {
-	return s.repo.DeleteProcedure(ctx, id)
+func (s *governanceService) DeleteProcedure(ctx context.Context, projectID int64, id string) error {
+	return s.repo.DeleteProcedure(ctx, projectID, id)
 }
 
 // Roles
-func (s *governanceService) SaveRole(ctx context.Context, role *domain.Role) error {
-	return s.repo.SaveRole(ctx, role)
+func (s *governanceService) SaveRole(ctx context.Context, projectID int64, role *domain.Role) error {
+	return s.repo.SaveRole(ctx, projectID, role)
 }
-func (s *governanceService) GetRoles(ctx context.Context) ([]domain.Role, error) {
-	return s.repo.GetRoles(ctx)
+func (s *governanceService) GetRoles(ctx context.Context, projectID int64) ([]domain.Role, error) {
+	return s.repo.GetRoles(ctx, projectID)
 }
-func (s *governanceService) DeleteRole(ctx context.Context, id string) error {
-	return s.repo.DeleteRole(ctx, id)
+func (s *governanceService) DeleteRole(ctx context.Context, projectID int64, id string) error {
+	return s.repo.DeleteRole(ctx, projectID, id)
 }
 
 // RACI Activities
-func (s *governanceService) SaveRACIActivity(ctx context.Context, activity *domain.RACIActivity) error {
-	return s.repo.SaveRACIActivity(ctx, activity)
+func (s *governanceService) SaveRACIActivity(ctx context.Context, projectID int64, activity *domain.RACIActivity) error {
+	return s.repo.SaveRACIActivity(ctx, projectID, activity)
 }
-func (s *governanceService) GetRACIActivities(ctx context.Context) ([]domain.RACIActivity, error) {
-	return s.repo.GetRACIActivities(ctx)
+func (s *governanceService) GetRACIActivities(ctx context.Context, projectID int64) ([]domain.RACIActivity, error) {
+	return s.repo.GetRACIActivities(ctx, projectID)
 }
-func (s *governanceService) DeleteRACIActivity(ctx context.Context, id string) error {
-	return s.repo.DeleteRACIActivity(ctx, id)
-}
-
-func (s *governanceService) GetSLAConfigs(ctx context.Context) ([]domain.SLAConfig, error) {
-	return s.repo.GetSLAConfigs(ctx)
+func (s *governanceService) DeleteRACIActivity(ctx context.Context, projectID int64, id string) error {
+	return s.repo.DeleteRACIActivity(ctx, projectID, id)
 }
 
-func (s *governanceService) SaveSLAConfigs(ctx context.Context, configs []domain.SLAConfig) error {
-	return s.repo.SaveSLAConfigs(ctx, configs)
+func (s *governanceService) GetSLAConfigs(ctx context.Context, projectID int64) ([]domain.SLAConfig, error) {
+	return s.repo.GetSLAConfigs(ctx, projectID)
 }
 
-func (s *governanceService) GetSLABreaches(ctx context.Context) ([]domain.SLABreach, error) {
-	breaches, err := s.repo.GetSLABreaches(ctx)
+func (s *governanceService) SaveSLAConfigs(ctx context.Context, projectID int64, configs []domain.SLAConfig) error {
+	return s.repo.SaveSLAConfigs(ctx, projectID, configs)
+}
+
+func (s *governanceService) GetSLABreaches(ctx context.Context, projectID int64) ([]domain.SLABreach, error) {
+	breaches, err := s.repo.GetSLABreaches(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
 
-	configs, err := s.repo.GetSLAConfigs(ctx)
+	configs, err := s.repo.GetSLAConfigs(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}

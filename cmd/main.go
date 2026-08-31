@@ -208,7 +208,7 @@ func main() {
 	h := handler.NewOrchestratorHandler(orchestrator)
 	
 	govService := service.NewGovernanceService(govRepo)
-	if err := govService.Seed(context.Background()); err != nil {
+	if err := govService.Seed(context.Background(), 10001); err != nil {
 		log.Printf("[Governance] Error seeding inicial: %v", err)
 	}
 	govHandler := handler.NewGovernanceHandler(govService)

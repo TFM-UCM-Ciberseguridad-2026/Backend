@@ -16,16 +16,16 @@ func NewGovernanceRepository(driver neo4j.DriverWithContext) ports.GovernanceRep
 	return &governanceRepository{driver: driver}
 }
 
-func (r *governanceRepository) IsSeeded(ctx context.Context) (bool, error) {
+func (r *governanceRepository) IsSeeded(ctx context.Context, projectID int64) (bool, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
 	query := `
-		MATCH (n) 
+		MATCH (n)-[:BELONGS_TO]->(:Project {id: $projectID}) 
 		WHERE n:PolicyDocument OR n:Procedure OR n:Role OR n:RACIActivity
 		RETURN count(n) AS cnt
 	`
-	res, err := session.Run(ctx, query, nil)
+	res, err := session.Run(ctx, query, map[string]interface{}{"projectID": projectID})
 	if err != nil {
 		return false, err
 	}
@@ -38,12 +38,14 @@ func (r *governanceRepository) IsSeeded(ctx context.Context) (bool, error) {
 }
 
 // Policies
-func (r *governanceRepository) SavePolicy(ctx context.Context, policy *domain.PolicyDocument) error {
+func (r *governanceRepository) SavePolicy(ctx context.Context, projectID int64, policy *domain.PolicyDocument) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
 	query := `
+		MATCH (proj:Project {id: $projectID})
 		MERGE (p:PolicyDocument {id: $id})
+		MERGE (p)-[:BELONGS_TO]->(proj)
 		SET p.name = $name,
 		    p.version = $version,
 		    p.status = $status,
@@ -63,18 +65,19 @@ func (r *governanceRepository) SavePolicy(ctx context.Context, policy *domain.Po
 		"next_review_date": policy.NextReviewDate,
 		"document_url":     policy.DocumentURL,
 		"under_review":     policy.UnderReview,
+		"projectID":        projectID,
 	}
 
 	_, err := session.Run(ctx, query, params)
 	return err
 }
 
-func (r *governanceRepository) GetPolicies(ctx context.Context) ([]domain.PolicyDocument, error) {
+func (r *governanceRepository) GetPolicies(ctx context.Context, projectID int64) ([]domain.PolicyDocument, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	query := `MATCH (p:PolicyDocument) RETURN p`
-	res, err := session.Run(ctx, query, nil)
+	query := `MATCH (p:PolicyDocument)-[:BELONGS_TO]->(:Project {id: $projectID}) RETURN p`
+	res, err := session.Run(ctx, query, map[string]interface{}{"projectID": projectID})
 	if err != nil {
 		return nil, err
 	}
@@ -114,43 +117,46 @@ func (r *governanceRepository) GetPolicies(ctx context.Context) ([]domain.Policy
 	return policies, nil
 }
 
-func (r *governanceRepository) DeletePolicy(ctx context.Context, id string) error {
+func (r *governanceRepository) DeletePolicy(ctx context.Context, projectID int64, id string) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
-	query := `MATCH (p:PolicyDocument {id: $id}) DETACH DELETE p`
-	_, err := session.Run(ctx, query, map[string]interface{}{"id": id})
+	query := `MATCH (p:PolicyDocument {id: $id})-[:BELONGS_TO]->(:Project {id: $projectID}) DETACH DELETE p`
+	_, err := session.Run(ctx, query, map[string]interface{}{"id": id, "projectID": projectID})
 	return err
 }
 
 // Procedures
-func (r *governanceRepository) SaveProcedure(ctx context.Context, procedure *domain.Procedure) error {
+func (r *governanceRepository) SaveProcedure(ctx context.Context, projectID int64, procedure *domain.Procedure) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
 	query := `
+		MATCH (proj:Project {id: $projectID})
 		MERGE (p:Procedure {id: $id})
+		MERGE (p)-[:BELONGS_TO]->(proj)
 		SET p.name = $name,
 		    p.meta = $meta,
 		    p.steps = $steps
 	`
 	params := map[string]interface{}{
-		"id":    procedure.ID,
-		"name":  procedure.Name,
-		"meta":  procedure.Meta,
-		"steps": procedure.Steps,
+		"id":        procedure.ID,
+		"name":      procedure.Name,
+		"meta":      procedure.Meta,
+		"steps":     procedure.Steps,
+		"projectID": projectID,
 	}
 
 	_, err := session.Run(ctx, query, params)
 	return err
 }
 
-func (r *governanceRepository) GetProcedures(ctx context.Context) ([]domain.Procedure, error) {
+func (r *governanceRepository) GetProcedures(ctx context.Context, projectID int64) ([]domain.Procedure, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	query := `MATCH (p:Procedure) RETURN p ORDER BY p.id ASC`
-	res, err := session.Run(ctx, query, nil)
+	query := `MATCH (p:Procedure)-[:BELONGS_TO]->(:Project {id: $projectID}) RETURN p ORDER BY p.id ASC`
+	res, err := session.Run(ctx, query, map[string]interface{}{"projectID": projectID})
 	if err != nil {
 		return nil, err
 	}
@@ -177,39 +183,42 @@ func (r *governanceRepository) GetProcedures(ctx context.Context) ([]domain.Proc
 	return procedures, nil
 }
 
-func (r *governanceRepository) DeleteProcedure(ctx context.Context, id string) error {
+func (r *governanceRepository) DeleteProcedure(ctx context.Context, projectID int64, id string) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
-	query := `MATCH (p:Procedure {id: $id}) DETACH DELETE p`
-	_, err := session.Run(ctx, query, map[string]interface{}{"id": id})
+	query := `MATCH (p:Procedure {id: $id})-[:BELONGS_TO]->(:Project {id: $projectID}) DETACH DELETE p`
+	_, err := session.Run(ctx, query, map[string]interface{}{"id": id, "projectID": projectID})
 	return err
 }
 
 // Roles
-func (r *governanceRepository) SaveRole(ctx context.Context, role *domain.Role) error {
+func (r *governanceRepository) SaveRole(ctx context.Context, projectID int64, role *domain.Role) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
 	query := `
+		MATCH (proj:Project {id: $projectID})
 		MERGE (role:Role {id: $id})
+		MERGE (role)-[:BELONGS_TO]->(proj)
 		SET role.name = $name,
 		    role.contact = $contact
 	`
 	_, err := session.Run(ctx, query, map[string]interface{}{
-		"id":      role.ID,
-		"name":    role.Name,
-		"contact": role.Contact,
+		"id":        role.ID,
+		"name":      role.Name,
+		"contact":   role.Contact,
+		"projectID": projectID,
 	})
 	return err
 }
 
-func (r *governanceRepository) GetRoles(ctx context.Context) ([]domain.Role, error) {
+func (r *governanceRepository) GetRoles(ctx context.Context, projectID int64) ([]domain.Role, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	query := `MATCH (role:Role) RETURN role ORDER BY role.id ASC`
-	res, err := session.Run(ctx, query, nil)
+	query := `MATCH (role:Role)-[:BELONGS_TO]->(:Project {id: $projectID}) RETURN role ORDER BY role.id ASC`
+	res, err := session.Run(ctx, query, map[string]interface{}{"projectID": projectID})
 	if err != nil {
 		return nil, err
 	}
@@ -233,17 +242,17 @@ func (r *governanceRepository) GetRoles(ctx context.Context) ([]domain.Role, err
 	return roles, nil
 }
 
-func (r *governanceRepository) DeleteRole(ctx context.Context, id string) error {
+func (r *governanceRepository) DeleteRole(ctx context.Context, projectID int64, id string) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
-	query := `MATCH (role:Role {id: $id}) DETACH DELETE role`
-	_, err := session.Run(ctx, query, map[string]interface{}{"id": id})
+	query := `MATCH (role:Role {id: $id})-[:BELONGS_TO]->(:Project {id: $projectID}) DETACH DELETE role`
+	_, err := session.Run(ctx, query, map[string]interface{}{"id": id, "projectID": projectID})
 	return err
 }
 
 // RACI Activities
-func (r *governanceRepository) SaveRACIActivity(ctx context.Context, activity *domain.RACIActivity) error {
+func (r *governanceRepository) SaveRACIActivity(ctx context.Context, projectID int64, activity *domain.RACIActivity) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
@@ -273,13 +282,16 @@ func (r *governanceRepository) SaveRACIActivity(ctx context.Context, activity *d
 	
 	// If the node doesn't exist yet, we must create it first
 	createIfNeededQuery := `
+		MATCH (proj:Project {id: $projectID})
 		MERGE (a:RACIActivity {id: $id})
+		MERGE (a)-[:BELONGS_TO]->(proj)
 		SET a.name = $name, a.order = $order
 	`
 	_, err := session.Run(ctx, createIfNeededQuery, map[string]interface{}{
-		"id":    activity.ID,
-		"name":  activity.Name,
-		"order": activity.Order,
+		"id":        activity.ID,
+		"name":      activity.Name,
+		"order":     activity.Order,
+		"projectID": projectID,
 	})
 	if err != nil {
 		return err
@@ -296,17 +308,17 @@ func (r *governanceRepository) SaveRACIActivity(ctx context.Context, activity *d
 	return err
 }
 
-func (r *governanceRepository) GetRACIActivities(ctx context.Context) ([]domain.RACIActivity, error) {
+func (r *governanceRepository) GetRACIActivities(ctx context.Context, projectID int64) ([]domain.RACIActivity, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
 	query := `
-		MATCH (a:RACIActivity)
+		MATCH (a:RACIActivity)-[:BELONGS_TO]->(:Project {id: $projectID})
 		OPTIONAL MATCH (a)-[r:INVOLVES]->(role:Role)
 		RETURN a, collect({role_id: role.id, role_type: r.role_type}) AS roles
 		ORDER BY a.order ASC
 	`
-	res, err := session.Run(ctx, query, nil)
+	res, err := session.Run(ctx, query, map[string]interface{}{"projectID": projectID})
 	if err != nil {
 		return nil, err
 	}
@@ -338,21 +350,21 @@ func (r *governanceRepository) GetRACIActivities(ctx context.Context) ([]domain.
 	return activities, nil
 }
 
-func (r *governanceRepository) DeleteRACIActivity(ctx context.Context, id string) error {
+func (r *governanceRepository) DeleteRACIActivity(ctx context.Context, projectID int64, id string) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
-	query := `MATCH (a:RACIActivity {id: $id}) DETACH DELETE a`
-	_, err := session.Run(ctx, query, map[string]interface{}{"id": id})
+	query := `MATCH (a:RACIActivity {id: $id})-[:BELONGS_TO]->(:Project {id: $projectID}) DETACH DELETE a`
+	_, err := session.Run(ctx, query, map[string]interface{}{"id": id, "projectID": projectID})
 	return err
 }
 
-func (r *governanceRepository) GetSLAConfigs(ctx context.Context) ([]domain.SLAConfig, error) {
+func (r *governanceRepository) GetSLAConfigs(ctx context.Context, projectID int64) ([]domain.SLAConfig, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	query := `MATCH (s:SLAConfig) RETURN s`
-	res, err := session.Run(ctx, query, nil)
+	query := `MATCH (s:SLAConfig)-[:BELONGS_TO]->(:Project {id: $projectID}) RETURN s`
+	res, err := session.Run(ctx, query, map[string]interface{}{"projectID": projectID})
 	if err != nil {
 		return nil, err
 	}
@@ -379,19 +391,21 @@ func (r *governanceRepository) GetSLAConfigs(ctx context.Context) ([]domain.SLAC
 	return configs, nil
 }
 
-func (r *governanceRepository) SaveSLAConfigs(ctx context.Context, configs []domain.SLAConfig) error {
+func (r *governanceRepository) SaveSLAConfigs(ctx context.Context, projectID int64, configs []domain.SLAConfig) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
 	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
 		for _, conf := range configs {
 			query := `
-				MERGE (s:SLAConfig {severity: $severity})
+				MATCH (proj:Project {id: $projectID})
+				MERGE (s:SLAConfig {severity: $severity})-[:BELONGS_TO]->(proj)
 				SET s.days = $days
 			`
 			_, err := tx.Run(ctx, query, map[string]interface{}{
-				"severity": conf.Severity,
-				"days":     conf.Days,
+				"severity":  conf.Severity,
+				"days":      conf.Days,
+				"projectID": projectID,
 			})
 			if err != nil {
 				return nil, err
@@ -402,16 +416,16 @@ func (r *governanceRepository) SaveSLAConfigs(ctx context.Context, configs []dom
 	return err
 }
 
-func (r *governanceRepository) GetSLABreaches(ctx context.Context) ([]domain.SLABreach, error) {
+func (r *governanceRepository) GetSLABreaches(ctx context.Context, projectID int64) ([]domain.SLABreach, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	// Obtener vulnerabilidades activas (asociadas a hallazgos OPEN)
+	// Obtener vulnerabilidades activas (asociadas a hallazgos OPEN de este proyecto en concreto)
 	query := `
-		MATCH (f:Finding {status: 'OPEN'})-[:OF_VULNERABILITY]->(v:Vulnerability)
+		MATCH (:Project {id: $projectID})-[:HAS_ENDPOINT]->(e:Endpoint)<-[:AFFECTS]-(f:Finding {status: 'OPEN'})-[:OF_VULNERABILITY]->(v:Vulnerability)
 		RETURN DISTINCT v.cve_id, v.base_score, coalesce(v.first_detected_at, timestamp())
 	`
-	res, err := session.Run(ctx, query, nil)
+	res, err := session.Run(ctx, query, map[string]interface{}{"projectID": projectID})
 	if err != nil {
 		return nil, err
 	}
