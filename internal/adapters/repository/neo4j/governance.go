@@ -422,7 +422,7 @@ func (r *governanceRepository) GetSLABreaches(ctx context.Context, projectID int
 
 	// Obtener vulnerabilidades activas (asociadas a hallazgos OPEN de este proyecto en concreto)
 	query := `
-		MATCH (:Project {id: $projectID})-[:HAS_ENDPOINT]->(e:Endpoint)<-[:AFFECTS]-(f:Finding {status: 'OPEN'})-[:OF_VULNERABILITY]->(v:Vulnerability)
+		MATCH (:Project {id: $projectID})-[:HAS_ENDPOINT]->(e:Endpoint)-[:HAS_INSTALLATION]->(s:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding {status: 'OPEN'})-[:OF_VULNERABILITY]->(v:Vulnerability)
 		RETURN DISTINCT v.cve_id, v.base_score, coalesce(v.first_detected_at, timestamp())
 	`
 	res, err := session.Run(ctx, query, map[string]interface{}{"projectID": projectID})
