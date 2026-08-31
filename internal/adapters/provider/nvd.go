@@ -39,6 +39,7 @@ type NistVulnerabilityDTO struct {
 
 type NistCveDTO struct {
 	ID             string               `json:"id"`
+	VulnStatus     string               `json:"vulnStatus"`
 	Descriptions   []NistDescriptionDTO `json:"descriptions"`
 	Metrics        NistMetricsDTO       `json:"metrics"`
 	Weaknesses     []NistWeaknessDTO    `json:"weaknesses"`
@@ -711,6 +712,13 @@ func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 		}
 		if d.Lang == "es" {
 			finalDesc = d.Value
+		}
+	}
+	if strings.EqualFold(cve.VulnStatus, "REJECTED") && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(finalDesc)), "rejected reason:") {
+		if finalDesc == "" {
+			finalDesc = "Rejected reason: This CVE has been rejected by NVD."
+		} else {
+			finalDesc = "Rejected reason: " + finalDesc
 		}
 	}
 

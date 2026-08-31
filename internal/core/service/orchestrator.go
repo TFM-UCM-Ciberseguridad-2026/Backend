@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -566,6 +565,10 @@ software (aplicación, sistema operativo, etc.) y la guarda en la base de datos 
     cuántos findings se crearon y cuántos ya existían.
 */
 func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, installationID string, softwareID int64, opts ...domain.VulnerabilityScanOptions) (*domain.VulnerabilityScanResult, error) {
+	// Desacoplar el contexto de la desconexión HTTP del cliente con un timeout amplio de 15 minutos
+	scanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Minute)
+	defer cancel()
+
 	scanStartedAt := time.Now().UTC()
 	scanOpts := domain.VulnerabilityScanOptions{}
 	if len(opts) > 0 {
@@ -573,7 +576,7 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 	}
 
 	// 1. Obtener la entidad de software
-	sw, err := o.softwarePort.GetByID(ctx, softwareID)
+	sw, err := o.softwarePort.GetByID(scanCtx, softwareID)
 	if err != nil {
 		return nil, fmt.Errorf("no se pudo recuperar el software: %w", err)
 	}
@@ -596,7 +599,7 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 		cpe = domain.GenerateCPE23(sw.Type, sw.Vendor, sw.Name, sw.Version)
 		sw.CPE = cpe
 
-		if err := o.softwarePort.Save(ctx, sw); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
+		if err := o.softwarePort.Save(scanCtx, sw); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 			return nil, fmt.Errorf("error guardando software con CPE generado: %w", err)
 		}
 	}
@@ -617,7 +620,7 @@ func (o *Orchestrator) AutoScanAndRegisterVulnerabilities(ctx context.Context, i
 	}
 
 	// 4. Buscar vulnerabilidades a través del puerto de escaneo
-	fetchResult, err := o.vulnScannerPort.FetchByCPE(ctx, cpe, domain.VulnerabilityFetchOptions{
+	fetchResult, err := o.vulnScannerPort.FetchByCPE(scanCtx, cpe, domain.VulnerabilityFetchOptions{
 		ForceRefresh: scanOpts.ForceRefresh,
 	})
 	if err != nil {
@@ -2037,6 +2040,11 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		return nil, errors.New("scoutPort is not initialized")
 	}
 
+	// Desacoplar el contexto de la desconexión HTTP del cliente, manteniendo un timeout de seguridad amplio (15 min)
+	// para garantizar que la ingesta de vulnerabilidades y findings en Neo4j se complete de forma atómica.
+	scanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Minute)
+	defer cancel()
+
 	scanStartedAt := time.Now().UTC()
 	scanOpts := domain.VulnerabilityScanOptions{}
 	if len(opts) > 0 {
@@ -2050,7 +2058,7 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 	}
 
 	if !scanOpts.ForceRefresh {
-		image, err := o.containerPort.GetContainerImage(ctx, imageID)
+		image, err := o.containerPort.GetContainerImage(scanCtx, imageID)
 		if err == nil && image != nil && image.VulnScanCompletedAt != nil && time.Since(*image.VulnScanCompletedAt) <= nvdEnrichmentTTL {
 			result.VulnerabilitiesFound = image.VulnScanProcessed
 			result.TotalAvailable = image.VulnScanTotalAvailable
@@ -2061,7 +2069,7 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 			result.ScanCompletedAt = &scanCompletedAt
 			// Sincronizar findings contextuales para contenedores existentes en caso de cache hit
 			vulns, err := o.containerPort.GetVulnerabilitiesByContainerImage(
-				ctx,
+				scanCtx,
 				imageID,
 			)
 			if err != nil {
@@ -2074,7 +2082,7 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 			}
 
 			syncResult, err := o.syncContainerFindingsForImage(
-				ctx,
+				scanCtx,
 				imageID,
 				vulns,
 			)
@@ -2089,7 +2097,7 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 				return partialContainerScanResult(result, scanErr)
 			}
 
-			if err := o.markContainerImageCacheHit(ctx, imageID); err != nil {
+			if err := o.markContainerImageCacheHit(scanCtx, imageID); err != nil {
 				scanErr := fmt.Errorf(
 					"scan parcial para image_id=%s: error actualizando metadata de caché: %w",
 					imageID,
@@ -2103,27 +2111,24 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 	}
 
 	// 1. Llamar a Docker Scout
-	vulns, err := o.scoutPort.ScanImage(ctx, imageName)
+	vulns, err := o.scoutPort.ScanImage(scanCtx, imageName)
 	if err != nil {
 		return nil, fmt.Errorf("error escaneando imagen %s: %w", imageName, err)
 	}
 	result.VulnerabilitiesFound = len(vulns)
 	result.TotalAvailable = len(vulns)
 
-	// 2. Guardar inteligencia compartida (HAS_VULNERABILITY) y sincronizar findings por contenedor
-	var vulnsToEnrich []domain.Vulnerability
+	// 2. Validar y enriquecer vulnerabilidades con NVD (Gatekeeper), guardando solo las válidas
+	var validVulns []domain.Vulnerability
 	for _, v := range vulns {
 		cveID := strings.ToUpper(strings.TrimSpace(v.CVEID))
-		if cveID == "" {
-			scanErr := fmt.Errorf(
-				"scan parcial para image_id=%s: Docker Scout devolvió una vulnerabilidad sin cve_id",
-				imageID,
-			)
-			return partialContainerScanResult(result, scanErr)
+		if cveID == "" || strings.EqualFold(cveID, "UNSPECIFIED") || strings.EqualFold(cveID, "UNKNOWN") {
+			fmt.Printf("[Scout Gatekeeper] Omitiendo vulnerabilidad sin cve_id válido para image_id=%s\n", imageID)
+			continue
 		}
 		v.CVEID = cveID
 
-		existingVuln, err := o.vulnPort.GetByID(ctx, v.CVEID)
+		existingVuln, err := o.vulnPort.GetByID(scanCtx, v.CVEID)
 		if err != nil {
 			scanErr := fmt.Errorf(
 				"scan parcial para image_id=%s, cve_id=%s: error recuperando vulnerabilidad existente: %w",
@@ -2134,27 +2139,87 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 			return partialContainerScanResult(result, scanErr)
 		}
 
-		if existingVuln != nil {
-			v.NVDEnriched = existingVuln.NVDEnriched
-			v.NVDEnrichedAt = existingVuln.NVDEnrichedAt
-			if len(v.CWE) == 0 {
-				v.CWE = existingVuln.CWE
+		isValid := false
+
+		if v.IsRejected() {
+			fmt.Printf("[Scout Gatekeeper] CVE %s descartado por estar marcado como REJECTED\n", cveID)
+			isValid = false
+		} else if existingVuln != nil && existingVuln.NVDEnriched {
+			if existingVuln.IsRejected() {
+				fmt.Printf("[Scout Gatekeeper] CVE %s descartado por estar marcado como REJECTED en BD\n", cveID)
+				isValid = false
+			} else {
+				v.NVDEnriched = existingVuln.NVDEnriched
+				v.NVDEnrichedAt = existingVuln.NVDEnrichedAt
+				if len(v.CWE) == 0 {
+					v.CWE = existingVuln.CWE
+				}
+				if !v.Exploit {
+					v.Exploit = existingVuln.Exploit
+				}
+				if !v.KEV {
+					v.KEV = existingVuln.KEV
+				}
+				if v.CVSSVector == "" {
+					v.CVSSVector = existingVuln.CVSSVector
+				}
+				if v.NVDVector == "" {
+					v.NVDVector = existingVuln.NVDVector
+				}
+				if existingVuln.BaseScore > 0 {
+					v.BaseScore = existingVuln.BaseScore
+				}
+				if existingVuln.Description != "" {
+					v.Description = existingVuln.Description
+				}
+				isValid = true
 			}
-			if !v.Exploit {
-				v.Exploit = existingVuln.Exploit
+		} else if o.vulnScannerPort != nil {
+			enrichedData, err := o.vulnScannerPort.FetchByCVE(scanCtx, v.CVEID)
+			if err == nil && enrichedData != nil {
+				if enrichedData.IsRejected() {
+					fmt.Printf("[Scout Gatekeeper] CVE %s descartado por NVD (vulnerabilidad REJECTED/retirada por la autoridad)\n", cveID)
+					isValid = false
+				} else {
+					v.CWE = enrichedData.CWE
+					v.Exploit = enrichedData.Exploit
+					v.KEV = enrichedData.KEV
+					if enrichedData.CVSSVector != "" {
+						v.CVSSVector = enrichedData.CVSSVector
+					}
+					if enrichedData.NVDVector != "" {
+						v.NVDVector = enrichedData.NVDVector
+					}
+					if enrichedData.BaseScore > 0 {
+						v.BaseScore = enrichedData.BaseScore
+					}
+					if enrichedData.Description != "" {
+						v.Description = enrichedData.Description
+					}
+					enrichedAt := time.Now().UTC()
+					v.NVDEnriched = true
+					v.NVDEnrichedAt = &enrichedAt
+					isValid = true
+				}
+			} else if err == nil && enrichedData == nil {
+				// NVD retornó 404 (La vulnerabilidad no existe en la base de datos oficial)
+				fmt.Printf("[Scout Gatekeeper] CVE %s descartado por NVD (no existe registro oficial en NVD)\n", cveID)
+				isValid = false
+			} else {
+				// Error de comunicación con NVD: fallback si el ID tiene formato CVE/GHSA y BaseScore > 0 y no rechazada
+				isValid = !v.IsRejected() && v.BaseScore > 0 && (strings.HasPrefix(cveID, "CVE-") || strings.HasPrefix(cveID, "GHSA-"))
 			}
-			if !v.KEV {
-				v.KEV = existingVuln.KEV
-			}
-			if v.CVSSVector == "" {
-				v.CVSSVector = existingVuln.CVSSVector
-			}
-			if v.NVDVector == "" {
-				v.NVDVector = existingVuln.NVDVector
-			}
+		} else {
+			// Entornos de prueba sin proveedor NVD: validar formato y BaseScore > 0 y no rechazada
+			isValid = !v.IsRejected() && v.BaseScore > 0 && (strings.HasPrefix(cveID, "CVE-") || strings.HasPrefix(cveID, "GHSA-"))
 		}
 
-		if err := o.saveVulnerabilityWithTTPs(ctx, &v); err != nil {
+		if !isValid {
+			fmt.Printf("[Scout Gatekeeper] Vulnerabilidad %s descartada por no ser válida\n", cveID)
+			continue
+		}
+
+		if err := o.saveVulnerabilityWithTTPs(scanCtx, &v); err != nil {
 			scanErr := fmt.Errorf(
 				"scan parcial para image_id=%s, cve_id=%s: error persistiendo vulnerabilidad: %w",
 				imageID,
@@ -2164,7 +2229,7 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 			return partialContainerScanResult(result, scanErr)
 		}
 
-		if err := o.containerPort.LinkVulnerabilityToImage(ctx, imageID, cveID); err != nil {
+		if err := o.containerPort.LinkVulnerabilityToImage(scanCtx, imageID, cveID); err != nil {
 			scanErr := fmt.Errorf(
 				"scan parcial para image_id=%s, cve_id=%s: error enlazando vulnerabilidad con imagen: %w",
 				imageID,
@@ -2175,17 +2240,18 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		}
 
 		result.Processed++
-		if !isNVDEnrichmentFresh(v) {
-			vulnsToEnrich = append(vulnsToEnrich, v)
-		}
+		validVulns = append(validVulns, v)
 		o.EnqueueCVE(v.CVEID, 0)
 	}
 
-	// Materializar/Sincronizar los findings contextuales en todos los contenedores que usan la imagen
+	// Purgar cualquier vulnerabilidad o finding rechazado previamente en Neo4j
+	_ = o.PurgeRejectedVulnerabilities(scanCtx)
+
+	// Materializar/Sincronizar los findings contextuales únicamente para las vulnerabilidades validadas
 	syncResult, err := o.syncContainerFindingsForImage(
-		ctx,
+		scanCtx,
 		imageID,
-		vulns,
+		validVulns,
 	)
 	result.FindingsCreated += syncResult.Created
 	result.FindingsExisting += syncResult.Existing
@@ -2198,133 +2264,11 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		return partialContainerScanResult(result, scanErr)
 	}
 
-	// Ordenar por BaseScore descendente (CRITICAL -> HIGH -> MEDIUM -> LOW) para enriquecer primero las más severas
-	sort.Slice(vulnsToEnrich, func(i, j int) bool {
-		return vulnsToEnrich[i].BaseScore > vulnsToEnrich[j].BaseScore
-	})
-
-	// 3. Enriquecer síncronamente hasta 2 CVEs más críticos, limitado globalmente con semáforo
-	// para que múltiples escaneos simultáneos no saturen NVD (límite global: 2 slots en total).
-	if o.vulnScannerPort != nil && len(vulnsToEnrich) > 0 {
-		topSyncCount := 2
-		if len(vulnsToEnrich) < topSyncCount {
-			topSyncCount = len(vulnsToEnrich)
-		}
-
-		enriched := 0
-		fmt.Printf("[Scout Sync] Intentando enriquecer TOP %d CVEs síncronamente (sem global)...\n", topSyncCount)
-		for i := 0; i < len(vulnsToEnrich) && enriched < topSyncCount; i++ {
-			// Intentar adquirir slot del semáforo sin bloquear (non-blocking)
-			select {
-			case o.nvdSyncSem <- struct{}{}:
-				// Slot adquirido: ejecutar enriquecimiento y liberar
-				v := vulnsToEnrich[i]
-				enrichedData, err := o.vulnScannerPort.FetchByCVE(ctx, v.CVEID)
-				<-o.nvdSyncSem // liberar slot inmediatamente tras la llamada
-				if err != nil {
-					fmt.Printf("[Scout Sync] Error enriqueciendo cve_id=%s: %v\n", v.CVEID, err)
-				} else if enrichedData != nil {
-					v.CWE = enrichedData.CWE
-					v.Exploit = enrichedData.Exploit
-					v.KEV = enrichedData.KEV
-					if v.CVSSVector == "" {
-						v.CVSSVector = enrichedData.CVSSVector
-					}
-					if v.NVDVector == "" {
-						v.NVDVector = enrichedData.NVDVector
-					}
-					if v.BaseScore == 0 {
-						v.BaseScore = enrichedData.BaseScore
-					}
-					if enrichedData.Description != "" {
-						v.Description = enrichedData.Description
-					}
-					enrichedAt := time.Now().UTC()
-					v.NVDEnriched = true
-					v.NVDEnrichedAt = &enrichedAt
-					if err := o.vulnPort.Save(ctx, &v); err != nil {
-						scanErr := fmt.Errorf(
-							"scan parcial para image_id=%s, cve_id=%s: error guardando enriquecimiento NVD: %w",
-							imageID,
-							v.CVEID,
-							err,
-						)
-						return partialContainerScanResult(result, scanErr)
-					}
-					descSnippet := v.Description
-					if len(descSnippet) > 40 {
-						descSnippet = descSnippet[:40]
-					}
-					fmt.Printf("[Scout Sync] CVE %s enriquecido: %s...\n", v.CVEID, descSnippet)
-				}
-				vulnsToEnrich[i] = v
-				enriched++
-				if enriched < topSyncCount {
-					time.Sleep(1 * time.Second)
-				}
-			default:
-				// Semáforo lleno: otro escaneo ya tiene 2 slots. Mover este CVE a background.
-				fmt.Printf("[Scout Sync] Semáforo NVD lleno, CVE %s irá a background\n", vulnsToEnrich[i].CVEID)
-			}
-		}
-
-		vulnsToEnrich = vulnsToEnrich[topSyncCount:]
-	}
-
-	// 4. Procesamiento en Background (Goroutine) para el resto de vulnerabilidades
-	if o.vulnScannerPort != nil && len(vulnsToEnrich) > 0 {
-		atomic.AddInt64(&o.activeBgEnrichments, 1)
-		go func(vulns []domain.Vulnerability, port ports.VulnerabilityAPIscanner, repo ports.VulnerabilityPort) {
-			defer atomic.AddInt64(&o.activeBgEnrichments, -1)
-			bgCtx := context.Background() // Contexto separado porque el de la request puede expirar
-			fmt.Printf("[Scout Sync Async] Iniciando enriquecimiento NVD de %d CVEs restantes en background...\n", len(vulns))
-			for _, v := range vulns {
-				enriched, err := port.FetchByCVE(bgCtx, v.CVEID)
-				if err == nil {
-					if enriched != nil {
-						v.CWE = enriched.CWE
-						v.Exploit = enriched.Exploit
-						v.KEV = enriched.KEV
-						if v.CVSSVector == "" {
-							v.CVSSVector = enriched.CVSSVector
-						}
-						if v.NVDVector == "" {
-							v.NVDVector = enriched.NVDVector
-						}
-						if v.BaseScore == 0 {
-							v.BaseScore = enriched.BaseScore
-						}
-						if enriched.Description != "" {
-							v.Description = enriched.Description
-						}
-					}
-					enrichedAt := time.Now().UTC()
-					v.NVDEnriched = true
-					v.NVDEnrichedAt = &enrichedAt
-					// Actualizar la vulnerabilidad en la base de datos
-					if err := repo.Save(bgCtx, &v); err != nil {
-						fmt.Printf(
-							"[Scout Sync Async] Error guardando enriquecimiento de cve_id=%s: %v\n",
-							v.CVEID,
-							err,
-						)
-						continue
-					}
-				} else {
-					fmt.Printf("[Scout Sync Async] Error enriqueciendo %s: %v\n", v.CVEID, err)
-				}
-				// Evitar saturar el NVD (Límite sin API Key es 5 peticiones cada 30s -> ~1 cada 6s)
-				time.Sleep(7 * time.Second)
-			}
-			fmt.Println("[Scout Sync Async] Enriquecimiento NVD finalizado.")
-		}(vulnsToEnrich, o.vulnScannerPort, o.vulnPort)
-	}
-
 	scanCompletedAt := time.Now().UTC()
 	result.ScanCompletedAt = &scanCompletedAt
 	result.ProviderPagesFetched = 1
 
-	if err := o.updateContainerImageScanMetadata(ctx, imageID, result, scanStartedAt); err != nil {
+	if err := o.updateContainerImageScanMetadata(scanCtx, imageID, result, scanStartedAt); err != nil {
 		scanErr := fmt.Errorf(
 			"scan parcial para image_id=%s: vulnerabilidades y findings persistidos, pero falló la metadata final: %w",
 			imageID,
@@ -3145,6 +3089,31 @@ func (o *Orchestrator) GetContainerByID(ctx context.Context, id string) (*domain
 
 func (o *Orchestrator) GetProjectByID(ctx context.Context, id int64) (*domain.Project, error) {
 	return o.projectPort.GetByID(ctx, id)
+}
+
+// PurgeRejectedVulnerabilities elimina de Neo4j todas las vulnerabilidades marcadas como REJECTED por NVD/MITRE,
+// así como sus findings contextuales y relaciones asociadas.
+func (o *Orchestrator) PurgeRejectedVulnerabilities(ctx context.Context) error {
+	if o.dbHelper == nil {
+		return nil
+	}
+	query := `
+		MATCH (v:Vulnerability)
+		WHERE toLower(v.description) STARTS WITH 'rejected reason:'
+		   OR toLower(v.description) CONTAINS 'rejected reason:'
+		   OR v.description CONTAINS '** REJECTED **'
+		   OR toLower(v.description) STARTS WITH 'rejected:'
+		   OR toLower(v.description) CONTAINS 'this cve id has been rejected'
+		OPTIONAL MATCH (f:Finding)-[:OF_VULNERABILITY]->(v)
+		DETACH DELETE f, v
+	`
+	err := o.dbHelper.ExecuteWrite(ctx, query, nil)
+	if err != nil {
+		fmt.Printf("[Purge] Error eliminando vulnerabilidades rechazadas: %v\n", err)
+		return err
+	}
+	fmt.Println("[Purge] Vulnerabilidades rechazadas y sus findings fueron purgados exitosamente de Neo4j.")
+	return nil
 }
 
 // GetPaginatedInventory consulta el inventario paginado (50 elementos por página por defecto).
