@@ -734,7 +734,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			  AND NOT (toUpper(coalesce(f.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
 			  AND coalesce(f.remediation_factor, 1.0) > 0.0
 			  AND coalesce(f.risk_score, 0.0) > 0.0
-			RETURN si, null AS ci, f, elementId(f) AS f_id, v, false AS is_container, null AS container, 1 AS priority
+			RETURN si, null AS ci, f, toString(coalesce(f.id, elementId(f))) AS f_id, v, false AS is_container, null AS container, 1 AS priority
 			UNION
 			// Caso 2: ep es Endpoint, con vuln en software de un contenedor hosteado
 			WITH ep
@@ -743,7 +743,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			  AND NOT (toUpper(coalesce(f.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
 			  AND coalesce(f.remediation_factor, 1.0) > 0.0
 			  AND coalesce(f.risk_score, 0.0) > 0.0
-			RETURN si, null AS ci, f, elementId(f) AS f_id, v, true AS is_container, c AS container, 2 AS priority
+			RETURN si, null AS ci, f, toString(coalesce(f.id, elementId(f))) AS f_id, v, true AS is_container, c AS container, 2 AS priority
 			UNION
 			// Caso 3a: ep es Endpoint, con vuln en imagen de un contenedor hosteado (con nodo Finding)
 			WITH ep
@@ -752,7 +752,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			  AND NOT (toUpper(coalesce(f.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
 			  AND coalesce(f.remediation_factor, 1.0) > 0.0
 			  AND coalesce(f.risk_score, 0.0) > 0.0
-			RETURN null AS si, ci, f, elementId(f) AS f_id, v, true AS is_container, c AS container, 3 AS priority
+			RETURN null AS si, ci, f, toString(coalesce(f.id, elementId(f))) AS f_id, v, true AS is_container, c AS container, 3 AS priority
 			UNION
 			// Caso 3b: ep es Endpoint, con vuln directa en imagen de contenedor hosteado sin finding
 			WITH ep
@@ -767,7 +767,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			  AND NOT (toUpper(coalesce(f.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
 			  AND coalesce(f.remediation_factor, 1.0) > 0.0
 			  AND coalesce(f.risk_score, 0.0) > 0.0
-			RETURN si, null AS ci, f, elementId(f) AS f_id, v, true AS is_container, ep AS container, 1 AS priority
+			RETURN si, null AS ci, f, toString(coalesce(f.id, elementId(f))) AS f_id, v, true AS is_container, ep AS container, 1 AS priority
 			UNION
 			// Caso 5a: ep es Container directamente enrutado, con vuln en imagen (con nodo Finding)
 			WITH ep
@@ -776,7 +776,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			  AND NOT (toUpper(coalesce(f.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
 			  AND coalesce(f.remediation_factor, 1.0) > 0.0
 			  AND coalesce(f.risk_score, 0.0) > 0.0
-			RETURN null AS si, ci, f, elementId(f) AS f_id, v, true AS is_container, ep AS container, 1 AS priority
+			RETURN null AS si, ci, f, toString(coalesce(f.id, elementId(f))) AS f_id, v, true AS is_container, ep AS container, 1 AS priority
 			UNION
 			// Caso 5b: ep es Container, con vuln directa sin nodo Finding
 			WITH ep
@@ -1032,7 +1032,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			activePaths := []activePathState{
 				{
 					Path:         ep,
-					PrevEndpoint: e1Name,
+					PrevEndpoint: "Acceso Perimetral",
 					Offset:       0,
 				},
 			}
@@ -1050,6 +1050,13 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 
 				index := getIntLocal(stepMap["index"])
 				endpointProps := getNodeProps(stepMap["endpoint"])
+				endpointType := getStringLocal(endpointProps["primaryLabel"])
+
+				// Si el nodo actual del paso es un nodo de red puro (Network), omitirlo como paso independiente
+				// para que no tape las vulnerabilidades reales de los endpoints expuestos
+				if endpointType == "Network" {
+					continue
+				}
 
 				var nextActivePaths []activePathState
 
@@ -1058,10 +1065,10 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 					targetName := hostname
 					targetID := getIntLocal(endpointProps["id"])
 
-					// Determinar si es contenedor basado en el primer allNets (todos comparten el endpoint)
+					// Determinar si es contenedor basado en el primer allNets
 					firstNetMap := getMap(allNetsRaw[0])
 					isContainer := getBoolLocal(firstNetMap["is_container"])
-					containerIsSource := false // el contenedor mismo es el punto de entrada (e1 es Container)
+					containerIsSource := false
 					if isContainer {
 						containerProps := getNodeProps(firstNetMap["container"])
 						contName := getStringLocal(containerProps["name"])
@@ -1069,14 +1076,14 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 							targetName = contName
 							targetID = 0
 						} else if contName != "" && contName == state.PrevEndpoint {
-							// El contenedor es el origen: la vuln lo permite escapar, pero no hay un "target" endpoint específico
-							// (el escape es a la red del host). targetName = "" para que el frontend lo renderice sin destino.
+							// El contenedor es el origen: el paso es un escape de contenedor a la red host
 							containerIsSource = true
-							targetName = "" // sin destino: es un paso de "container image escape"
+							targetName = "Escape de Contenedor (Host)"
 							targetID = 0
 						}
 					}
-					if targetName == "" || (!isContainer && targetName == state.PrevEndpoint) {
+
+					if !containerIsSource && (targetName == "" || (!isContainer && targetName == state.PrevEndpoint)) {
 						targetName = getStringLocal(endpointProps["name"])
 						if targetName == "" || targetName == state.PrevEndpoint {
 							targetName = getStringLocal(endpointProps["nombre"])
