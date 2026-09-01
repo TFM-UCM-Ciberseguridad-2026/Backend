@@ -127,7 +127,7 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 				coalesce(rem.fixed_version, v.fixed_version, '') AS fixedVersion
 
 			WITH collect({
-					id: coalesce(n.id, elementId(n)),
+					id: elementId(n),
 					labels: labels(n),
 					properties: n {
 							.*,
@@ -155,8 +155,8 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 			WITH nodes, [nodeObj IN nodes | nodeObj.id] AS nodeIds
 
 			OPTIONAL MATCH (s)-[rel]->(t)
-			WHERE (coalesce(s.id, elementId(s)) IN nodeIds OR elementId(s) IN nodeIds)
-			  AND (coalesce(t.id, elementId(t)) IN nodeIds OR elementId(t) IN nodeIds)
+			WHERE elementId(s) IN nodeIds
+			  AND elementId(t) IN nodeIds
 			  AND NOT (
 					startNode(rel):ThreatActor OR
 					startNode(rel):TTP OR
@@ -169,14 +169,14 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 			WITH nodes, collect({
 					id: elementId(rel),
 					type: type(rel),
-					source: coalesce(startNode(rel).id, elementId(startNode(rel))),
-					target: coalesce(endNode(rel).id, elementId(endNode(rel))),
+					source: elementId(startNode(rel)),
+					target: elementId(endNode(rel)),
 					properties: properties(rel)
 			}) AS cleanRels
 
 			WITH nodes, cleanRels, [nodeObj IN nodes | nodeObj.id] AS scopedIds
 			OPTIONAL MATCH (n)-[:HAS_IP]->(ip:IPAddress)
-			WHERE (n:Endpoint OR n:Container) AND (coalesce(n.id, elementId(n)) IN scopedIds OR elementId(n) IN scopedIds)
+			WHERE (n:Endpoint OR n:Container) AND elementId(n) IN scopedIds
 
 			WITH nodes,
 				cleanRels,
@@ -184,7 +184,7 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 				CASE
 					WHEN n IS NULL OR ip IS NULL THEN null
 					ELSE {
-					node_id: coalesce(n.id, elementId(n)),
+					node_id: elementId(n),
 					ip: coalesce(ip.ip, ""),
 					vlan_id: coalesce(ip.vlan_id, 0)
 					}
