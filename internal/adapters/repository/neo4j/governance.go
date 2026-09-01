@@ -433,9 +433,18 @@ func (r *governanceRepository) GetSLABreaches(ctx context.Context, projectID int
 	var breaches []domain.SLABreach
 	for res.Next(ctx) {
 		rec := res.Record()
+		
+		var baseScore float64
+		switch v := rec.Values[1].(type) {
+		case float64:
+			baseScore = v
+		case int64:
+			baseScore = float64(v)
+		}
+
 		breaches = append(breaches, domain.SLABreach{
 			CVEID:           rec.Values[0].(string),
-			BaseScore:       rec.Values[1].(float64),
+			BaseScore:       baseScore,
 			FirstDetectedAt: rec.Values[2].(int64),
 		})
 	}
