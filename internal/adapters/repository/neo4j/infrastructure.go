@@ -663,7 +663,16 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 	// 4. Privilegios (Root): Si la vuln de red tiene C:H, I:H, A:H, o si hay una vuln local (AV:L) con impacto alto.
 	query := `
 		MATCH path = (e1)-[:CONNECTED_TO|HOSTS*1..]-(eTarget)
-		WHERE ((e1:Endpoint AND NOT toLower(coalesce(e1.estado, e1.status, '')) IN ['decomisado', 'decommissioned']) OR (e1:Container AND toLower(e1.state) = 'running')) AND e1.internet_exposed = true
+		WHERE ((e1:Endpoint AND NOT toLower(coalesce(e1.estado, e1.status, '')) IN ['decomisado', 'decommissioned'] AND (
+		        EXISTS {
+		          MATCH (e1)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->(fE1:Finding)-[:OF_VULNERABILITY]->(vE1:Vulnerability)
+		          WHERE (vE1.cvss_vector CONTAINS 'AV:N' OR vE1.nvd_vector CONTAINS 'AV:N' OR vE1.cvss_vector CONTAINS 'AV:A' OR coalesce(vE1.base_score, 0.0) >= 4.0)
+		            AND NOT (toUpper(coalesce(fE1.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+		        } OR EXISTS {
+		          MATCH (e1)-[:HOSTS]->(cE1:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->(fHostE1:Finding)-[:OF_VULNERABILITY]->(vHostE1:Vulnerability)
+		          WHERE toLower(cE1.state) = 'running'
+		        }
+		      )) OR (e1:Container AND toLower(e1.state) = 'running')) AND e1.internet_exposed = true
 		  AND ((eTarget:Endpoint AND NOT toLower(coalesce(eTarget.estado, eTarget.status, '')) IN ['decomisado', 'decommissioned']) OR (eTarget:Container AND toLower(eTarget.state) = 'running'))
 		  AND e1.id <> coalesce(eTarget.id, "0")
 		  AND ($projectID = 0 OR toString($projectID) = "0" OR 
@@ -679,22 +688,21 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		      (n:Container AND EXISTS { MATCH (proj:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(n) WHERE proj.id = $projectID OR toString(proj.id) = toString($projectID) OR proj.name = toString($projectID) }))
 		     AND
 		     ((n:Endpoint AND NOT toLower(coalesce(n.estado, n.status, '')) IN ['decomisado', 'decommissioned'] AND (
-			  EXISTS { MATCH (n)-[:HOSTS]-(c2:Container) WHERE c2 IN nodes(path) } OR
 			      EXISTS {
 			        MATCH (n)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->(fNative:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-			        WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269']))
+			        WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A' OR coalesce(v.base_score, 0.0) >= 4.0)
 			          AND NOT (toUpper(coalesce(fNative.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
 			          AND coalesce(fNative.remediation_factor, 1.0) > 0.0
 			          AND coalesce(fNative.risk_score, 0.0) > 0.0
 			      } OR EXISTS {
 			        MATCH (n)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->(fHosted:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-			        WHERE toLower(c.state) = 'running' AND ((v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(cwe IN coalesce(v.cwe, []) WHERE cwe IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269'])))
+			        WHERE toLower(c.state) = 'running' AND (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A' OR coalesce(v.base_score, 0.0) >= 4.0)
 			          AND NOT (toUpper(coalesce(fHosted.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
 			          AND coalesce(fHosted.remediation_factor, 1.0) > 0.0
 			          AND coalesce(fHosted.risk_score, 0.0) > 0.0
 		      } OR EXISTS {
 		        MATCH (n)-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(v:Vulnerability)
-		        WHERE toLower(c.state) = 'running' AND ((v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269'])))
+		        WHERE toLower(c.state) = 'running' AND (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A' OR coalesce(v.base_score, 0.0) >= 4.0)
 		      }
 		    )) OR
 		    (n:Container AND toLower(n.state) = 'running' AND (
@@ -705,13 +713,13 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		      (EXISTS { MATCH (n)-[:CONNECTED_TO]->(:Network) } AND (
 			        EXISTS {
 			          MATCH (n)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->(fDirect:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-			          WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269']))
+			          WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A' OR coalesce(v.base_score, 0.0) >= 4.0)
 			            AND NOT (toUpper(coalesce(fDirect.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
 			            AND coalesce(fDirect.remediation_factor, 1.0) > 0.0
 			            AND coalesce(fDirect.risk_score, 0.0) > 0.0
 		        } OR EXISTS {
 		          MATCH (n)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(v:Vulnerability)
-		          WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(c IN coalesce(v.cwe, []) WHERE c IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269']))
+		          WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A' OR coalesce(v.base_score, 0.0) >= 4.0)
 		        }
 		      ))
 		    ))
@@ -848,16 +856,14 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			      AND NOT (toUpper(coalesce(fDirectImageLocal.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
 			      AND coalesce(fDirectImageLocal.remediation_factor, 1.0) > 0.0
 			      AND coalesce(fDirectImageLocal.risk_score, 0.0) > 0.0
-		  } AS hasDirectImageContLPE
+		  } AS hasDirectImageContLPE,
+		  EXISTS { MATCH (ep)-[:CONNECTED_TO]->(:Network) } AS epHasNet,
+		  EXISTS { MATCH (ep)-[:HOSTS]->(cNet:Container)-[:CONNECTED_TO]->(:Network) } AS hostedContHasNet
 		
 		WITH path, e1, indexed, ie, ep, allNets, 
 		  CASE 
-		    WHEN ep:Container THEN
-		      CASE 
-		        WHEN ie.index + 1 < size(indexed) AND "Network" IN labels(indexed[ie.index + 1].asset) THEN false
-		        ELSE (ep.privileged = true OR hasDirectContLPE OR hasDirectImageContLPE)
-		      END
-		    WHEN size(allNets) > 0 AND allNets[0].is_container THEN (allNets[0].container.privileged = true OR hasContLPE OR hasImageContLPE)
+		    WHEN ep:Container THEN (epHasNet OR ep.privileged = true OR hasDirectContLPE OR hasDirectImageContLPE)
+		    WHEN size(allNets) > 0 AND allNets[0].is_container THEN (hostedContHasNet OR allNets[0].container.privileged = true OR hasContLPE OR hasImageContLPE)
 		    ELSE (hasHostLPE OR hasContLPE OR hasImageContLPE)
 		  END AS hasLPE
 		ORDER BY ie.index ASC
@@ -990,20 +996,20 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 				continue
 			}
 
-			// Usar el nodo e1 directamente para obtener el nombre correcto (containers tienen 'name', endpoints tienen 'hostname')
+			// Usar el nodo e1 directamente para obtener el nombre correcto
 			e1RawForName, _ := record.Get("e1_node")
 			e1NodeProps := getNodeProps(e1RawForName)
-			initialEndpointName := getStringLocal(e1NodeProps["hostname"])
+			initialEndpointName := getStringLocal(e1NodeProps["name"])
 			if initialEndpointName == "" {
-				initialEndpointName = getStringLocal(e1NodeProps["name"])
+				initialEndpointName = getStringLocal(e1NodeProps["hostname"])
 			}
 			if initialEndpointName == "" {
 				// Fallback: usar el primer step
 				firstStepMap := getMap(stepsList[0])
 				firstEndpointProps := getNodeProps(firstStepMap["endpoint"])
-				initialEndpointName = getStringLocal(firstEndpointProps["hostname"])
+				initialEndpointName = getStringLocal(firstEndpointProps["name"])
 				if initialEndpointName == "" {
-					initialEndpointName = getStringLocal(firstEndpointProps["name"])
+					initialEndpointName = getStringLocal(firstEndpointProps["hostname"])
 				}
 			}
 			if initialEndpointName == "" {
@@ -1022,11 +1028,6 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 				Path         domain.ExploitationPath
 				PrevEndpoint string
 				Offset       int
-			}
-			e1Raw, _ := record.Get("e1_node")
-			e1Name := getStringLocal(getNodeProps(e1Raw)["hostname"])
-			if e1Name == "" {
-				e1Name = getStringLocal(getNodeProps(e1Raw)["name"])
 			}
 
 			activePaths := []activePathState{
@@ -1076,10 +1077,18 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 							targetName = contName
 							targetID = 0
 						} else if contName != "" && contName == state.PrevEndpoint {
-							// El contenedor es el origen: el paso es un escape de contenedor a la red host
 							containerIsSource = true
-							targetName = "Escape de Contenedor (Host)"
-							targetID = 0
+							hostEndpointName := getStringLocal(endpointProps["hostname"])
+							if hostEndpointName == "" {
+								hostEndpointName = getStringLocal(endpointProps["name"])
+							}
+							if hostEndpointName != "" && hostEndpointName != contName {
+								targetName = hostEndpointName
+							} else if hostname != "" && hostname != contName {
+								targetName = hostname
+							} else {
+								targetName = "Escape de Contenedor (Host)"
+							}
 						}
 					}
 
@@ -1234,8 +1243,18 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 				if len(state.Path.Steps) == 0 {
 					continue
 				}
-				lastStep := state.Path.Steps[len(state.Path.Steps)-1]
 				firstStep := state.Path.Steps[0]
+				lastStep := state.Path.Steps[len(state.Path.Steps)-1]
+
+				// Ajustar InitialEndpoint si el primer paso inicia en un contenedor
+				if firstStep.IsContainer && firstStep.ContainerName != "" {
+					state.Path.InitialEndpoint = firstStep.ContainerName
+				}
+
+				// Descartar rutas circulares, autosaltos o pseudo-escapes sin avance lateral real
+				if lastStep.TargetEndpoint == "Escape de Contenedor (Host)" || lastStep.TargetEndpoint == state.Path.InitialEndpoint || lastStep.TargetEndpoint == "" {
+					continue
+				}
 
 				vectorType := "Endpoint"
 				if lastStep.IsContainer {
