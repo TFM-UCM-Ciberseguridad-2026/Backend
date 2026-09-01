@@ -20,9 +20,22 @@ func main() {
 	defer session.Close(ctx)
 
 	session.ExecuteRead(ctx, func(tx driver.ManagedTransaction) (interface{}, error) {
-		res, _ := tx.Run(ctx, "MATCH (p:Project)-[r]-(n) RETURN labels(p), p.id, type(r), labels(n), n.name, n.hostname, n.id", nil)
+		query := `
+			MATCH (ep:Endpoint {hostname: 'validation-dmz-web'})-[:HOSTS]-(c2:Container {name: 'Contenedor CI/CD'})
+			OPTIONAL MATCH (c2)-[:HAS_INSTALLATION|USES_IMAGE*1..2]-()-[:HAS_FINDING]-(fLPE:Finding)-[:OF_VULNERABILITY]-(vLPE:Vulnerability)
+			WHERE (toLower(vLPE.description) CONTAINS 'container escape' OR toLower(vLPE.description) CONTAINS 'sandbox escape' OR toLower(vLPE.description) CONTAINS 'escape container' OR toLower(vLPE.description) CONTAINS 'runc escape' OR toLower(vLPE.description) CONTAINS 'docker escape' OR toLower(vLPE.description) CONTAINS 'privilege escalation' OR toLower(vLPE.description) CONTAINS 'privilege' OR toLower(vLPE.description) CONTAINS 'overflow' OR any(cweItem IN coalesce(vLPE.cwe, []) WHERE cweItem IN ['CWE-269', 'CWE-250', 'CWE-270', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-190', 'CWE-125']))
+			  AND NOT (toUpper(coalesce(fLPE.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED'])
+			  AND coalesce(fLPE.remediation_factor, 1.0) > 0.0
+			  AND coalesce(fLPE.risk_score, 0.0) > 0.0
+			RETURN fLPE, vLPE
+		`
+		res, err := tx.Run(ctx, query, nil)
+		if err != nil {
+			log.Fatal(err)
+		}
 		for res.Next(ctx) {
-			fmt.Println("Project relationship:", res.Record().Values)
+			rec := res.Record()
+			fmt.Printf("Finding: %v | Vuln: %v\n", rec.Values[0], rec.Values[1])
 		}
 		return nil, nil
 	})
