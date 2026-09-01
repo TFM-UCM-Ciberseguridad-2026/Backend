@@ -477,7 +477,6 @@ func (h *OrchestratorHandler) GetExploitationPaths(w http.ResponseWriter, r *htt
 		projectID, err = strconv.ParseInt(projectIDStr, 10, 64)
 		if err != nil {
 			sendError(w, "Invalid project_id", http.StatusBadRequest)
-			return
 		}
 	}
 	paths, err := h.orchestrator.GenerateExploitationPaths(r.Context(), projectID)
