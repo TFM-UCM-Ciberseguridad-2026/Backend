@@ -227,7 +227,7 @@ type ThreatActorPort interface {
 }
 
 type InfrastructurePort interface {
-	GetGraphData(ctx context.Context) (*domain.GraphData, error)
+	GetGraphData(ctx context.Context, projectID int64) (*domain.GraphData, error)
 	GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int, projectID int64) ([]domain.APTThreatResult, error)
 	GetTTPMatrix(ctx context.Context, projectID *int64) ([]domain.TTPMatrixItem, error)
 	GetTotalMitreTTPs(ctx context.Context) (int, error)
