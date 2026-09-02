@@ -1,13 +1,13 @@
 package domain
 
-// FindingRiskSummary representa el resumen mínimo necesario para agregar riesgo
-// de findings en una instalación de software.
+// FindingRiskSummary representa el resumen de riesgo y versión de un finding.
 type FindingRiskSummary struct {
-	FindingID     int64
-	CVEID         string
-	RiskScore     float64
-	PriorityScore float64
-	Status        string
+	FindingID     int64   `json:"finding_id"`
+	CVEID         string  `json:"cve_id"`
+	RiskScore     float64 `json:"risk_score"`
+	PriorityScore float64 `json:"priority_score"`
+	Status        string  `json:"status"`
+	FixedVersion  string  `json:"fixed_version,omitempty"`
 }
 
 // SoftwareRiskSummary representa el resumen mínimo necesario para agregar riesgo

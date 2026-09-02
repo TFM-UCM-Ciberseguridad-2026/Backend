@@ -5,20 +5,13 @@ import (
 	"time"
 )
 
-// Declaración de un parche aplicado sobre una instalación concreta.
-//
-// (Patch)-[:FIXES]->(Vulnerability) dice que el parche existe para un CVE;
-// (Patch)-[:APPLIED_TO]->(SoftwareInstallation) dice que además se ha aplicado aquí.
-
-// RemediationLevel expresa hasta qué punto una declaración corrige la vulnerabilidad.
-// Los nombres siguen la métrica Remediation Level de CVSS 3.1.
 type RemediationLevel string
 
 const (
-	RemediationLevelOfficialFix  RemediationLevel = "OFFICIAL_FIX"  // parche del fabricante
-	RemediationLevelTemporaryFix RemediationLevel = "TEMPORARY_FIX" // hotfix o backport
-	RemediationLevelWorkaround   RemediationLevel = "WORKAROUND"    // mitigación de configuración
-	RemediationLevelUnavailable  RemediationLevel = "UNAVAILABLE"   // sin remediación, revierte una previa
+	RemediationLevelOfficialFix  RemediationLevel = "OFFICIAL_FIX"  // Parche del fabricante
+	RemediationLevelTemporaryFix RemediationLevel = "TEMPORARY_FIX" // Hotfix o backport
+	RemediationLevelWorkaround   RemediationLevel = "WORKAROUND"    // Mitigación de configuración
+	RemediationLevelUnavailable  RemediationLevel = "UNAVAILABLE"   // Sin remediación
 )
 
 func (r RemediationLevel) IsValid() bool {
@@ -31,21 +24,16 @@ func (r RemediationLevel) IsValid() bool {
 	}
 }
 
-// FullyRemediates: solo el parche oficial elimina la vulnerabilidad; el resto son
-// mitigaciones que dejan riesgo residual.
 func (r RemediationLevel) FullyRemediates() bool {
 	return r == RemediationLevelOfficialFix
 }
 
-// Estados del nodo Remediation.
 const (
 	RemediationStatusOpen    = "OPEN"
 	RemediationStatusPartial = "PARTIAL"
 	RemediationStatusApplied = "APPLIED"
 )
 
-// RemediationStatus traduce el nivel al estado del nodo Remediation. UNAVAILABLE vuelve
-// a OPEN porque sirve para revertir una declaración previa.
 func (r RemediationLevel) RemediationStatus() string {
 	switch r {
 	case RemediationLevelOfficialFix:
@@ -57,31 +45,53 @@ func (r RemediationLevel) RemediationStatus() string {
 	}
 }
 
-// AppliedPatch es la relación (Patch)-[:APPLIED_TO]->(SoftwareInstallation) y sus
-// propiedades. CVEID y RemediationFactor se guardan en la arista para reconstruir el
-// histórico sin recorrer el grafo ni recalcular nada.
 type AppliedPatch struct {
-	PatchID        int64  `json:"patch_id"`
-	InstallationID string `json:"installation_id"`
-	CVEID          string `json:"cve_id"`
-
-	AppliedAt time.Time `json:"applied_at"`
-	AppliedBy string    `json:"applied_by"` // texto libre: no hay modelo de usuarios
-
-	RemediationLevel  RemediationLevel `json:"remediation_level"`
-	RemediationFactor float64          `json:"remediation_factor"`
-	Notes             string           `json:"notes"`
-
-	Verification PatchVerification `json:"verification"`
-
-	// Se rellenan al leer el histórico, para no consultar el nodo Patch aparte.
-	PatchURL         string `json:"patch_url,omitempty"`
-	PatchDescription string `json:"patch_description,omitempty"`
+	PatchID           int64             `json:"patch_id"`
+	InstallationID    string            `json:"installation_id"`
+	CVEID             string            `json:"cve_id"`
+	AppliedAt         time.Time         `json:"applied_at"`
+	AppliedBy         string            `json:"applied_by"`
+	RemediationLevel  RemediationLevel  `json:"remediation_level"`
+	RemediationFactor float64           `json:"remediation_factor"`
+	Notes             string            `json:"notes"`
+	Verification      PatchVerification `json:"verification"`
+	PatchURL          string            `json:"patch_url,omitempty"`
+	PatchDescription  string            `json:"patch_description,omitempty"`
 }
 
-// ParseFixedVersions reconstruye las versiones corregidas desde la cadena
-// "paquete@versión, ..." que persiste Remediation.fixed_version. Las entradas sin "@"
-// se toman como versión suelta.
+// ResolvedFindingInfo modela el detalle de un hallazgo concreto resuelto por un parche.
+type ResolvedFindingInfo struct {
+	FindingID          int64     `json:"finding_id"`
+	CVEID              string    `json:"cve_id"`
+	Status             string    `json:"status"`
+	PatchID            int64     `json:"patch_id"`
+	PatchDescription   string    `json:"patch_description"`
+	PatchURL           string    `json:"patch_url"`
+	RemediationLevel   string    `json:"remediation_level"`
+	AppliedAt          time.Time `json:"applied_at"`
+	AppliedBy          string    `json:"applied_by"`
+	Notes              string    `json:"notes,omitempty"`
+	VerificationReason string    `json:"verification_reason,omitempty"`
+	ExpectedVersion    string    `json:"expected_version,omitempty"`
+}
+
+// SoftwarePatchHistoryGroup agrupa los parches y findings resueltos de un software instalado en el endpoint.
+type SoftwarePatchHistoryGroup struct {
+	InstallationID   string                `json:"installation_id"`
+	SoftwareID       int64                 `json:"software_id"`
+	SoftwareName     string                `json:"software_name"`
+	CurrentVersion   string                `json:"current_version"`
+	ResolvedFindings []ResolvedFindingInfo `json:"resolved_findings"`
+	AppliedPatches   []AppliedPatch        `json:"applied_patches"`
+}
+
+// EndpointPatchHistory representa el histórico del endpoint agrupado por software.
+type EndpointPatchHistory struct {
+	EndpointID     int64                       `json:"endpoint_id"`
+	Hostname       string                      `json:"hostname"`
+	SoftwareGroups []SoftwarePatchHistoryGroup `json:"software_groups"`
+}
+
 func ParseFixedVersions(raw string) []FixedVersion {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
