@@ -408,7 +408,14 @@ func (h *OrchestratorHandler) GetFindingVulnerabilities(w http.ResponseWriter, r
 
 // GET /api/infrastructure
 func (h *OrchestratorHandler) GetInfrastructure(w http.ResponseWriter, r *http.Request) {
-	graph, err := h.orchestrator.GetInfrastructure(r.Context())
+	projectIDStr := r.URL.Query().Get("project_id")
+	var projectID int64
+	if projectIDStr != "" {
+		if id, err := strconv.ParseInt(projectIDStr, 10, 64); err == nil {
+			projectID = id
+		}
+	}
+	graph, err := h.orchestrator.GetInfrastructure(r.Context(), projectID)
 	if err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -470,7 +477,6 @@ func (h *OrchestratorHandler) GetExploitationPaths(w http.ResponseWriter, r *htt
 		projectID, err = strconv.ParseInt(projectIDStr, 10, 64)
 		if err != nil {
 			sendError(w, "Invalid project_id", http.StatusBadRequest)
-			return
 		}
 	}
 	paths, err := h.orchestrator.GenerateExploitationPaths(r.Context(), projectID)
