@@ -89,6 +89,7 @@ type Orchestrator struct {
 	ttpQueueHigh        chan ttpTask
 	ttpQueueLow         chan ttpTask
 	CapecReady          chan struct{}
+	nodeIDMutex         sync.Mutex
 }
 
 func NewOrchestrator(
@@ -208,6 +209,9 @@ func (o *Orchestrator) WithNotifier(n ports.NotificationPort) *Orchestrator {
 // concurrentes reales, esto debería migrarse a una secuencia dedicada de
 // Neo4j o a UUIDs.
 func (o *Orchestrator) nextNodeID(ctx context.Context, label string) (int64, error) {
+	o.nodeIDMutex.Lock()
+	defer o.nodeIDMutex.Unlock()
+
 	query := fmt.Sprintf("MATCH (n:%s) RETURN coalesce(max(n.id), 0) AS maxId", label)
 	res, err := o.dbHelper.ExecuteRead(ctx, query, nil)
 	if err != nil {
@@ -502,8 +506,8 @@ func (o *Orchestrator) AssociateVulnerabilitiesAndRemediations(ctx context.Conte
 
 // GetInfrastructure recupera el grafo actual de infraestructura del usuario.
 // Si la base de datos está vacía (0 nodos), automáticamente la inicializa con el escenario de prueba.
-func (o *Orchestrator) GetInfrastructure(ctx context.Context) (*domain.GraphData, error) {
-	graph, err := o.infraPort.GetGraphData(ctx)
+func (o *Orchestrator) GetInfrastructure(ctx context.Context, projectID int64) (*domain.GraphData, error) {
+	graph, err := o.infraPort.GetGraphData(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}

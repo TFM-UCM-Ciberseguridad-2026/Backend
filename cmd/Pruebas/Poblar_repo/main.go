@@ -57,9 +57,11 @@ func main() {
 
 		// 4. Componentes de Hardware
 		CREATE (h1:Hardware {id: 200, name: "Intel Xeon Platinum", brand: "Intel", model: "vCPU 8-Core", serial_number: "VCPU-INTEL-001"})
-		CREATE (h2:Hardware {id: 201, name: "AMD EPYC Epyc", brand: "AMD", model: "vCPU 16-Core", serial_number: "VCPU-AMD-002"})
-		CREATE (h3:Hardware {id: 202, name: "Fortinet FortiGate 100F", brand: "Fortinet", model: "FG-100F", serial_number: "FG100F-SN-987"})
-		CREATE (h4:Hardware {id: 203, name: "Cisco Catalyst 9300", brand: "Cisco", model: "C9300-24T", serial_number: "CISCO-CAT93-004"})
+		CREATE (h2:Hardware {id: 201, name: "AMD EPYC 7763", brand: "AMD", model: "vCPU 16-Core", serial_number: "VCPU-AMD-002"})
+		CREATE (h3:Hardware {id: 204, name: "Dell PowerEdge R750", brand: "Dell", model: "PER750", serial_number: "DELL-PE-750-003"})
+		CREATE (h4:Hardware {id: 205, name: "HPE ProLiant DL380", brand: "HPE", model: "DL380-Gen10", serial_number: "HPE-DL380-004"})
+		CREATE (h5:Hardware {id: 202, name: "Fortinet FortiGate 100F", brand: "Fortinet", model: "FG-100F", serial_number: "FG100F-SN-987"})
+		CREATE (h6:Hardware {id: 203, name: "Cisco Catalyst 9300", brand: "Cisco", model: "C9300-24T", serial_number: "CISCO-CAT93-004"})
 
 		// 5. Definiciones de Software (clasificación CPE: 'a' app, 'o' sistema operativo, 'h' hardware)
 		CREATE (s_nginx:Software {id: 300, name: "Nginx HTTP Server", version: "1.18.0", vendor: "Nginx", type: "a"})
@@ -155,11 +157,11 @@ func main() {
 
 		// Asignación de Hardware
 		CREATE (e_gateway)-[:HAS_HARDWARE]->(h1)
-		CREATE (e_app)-[:HAS_HARDWARE]->(h1)
-		CREATE (e_db)-[:HAS_HARDWARE]->(h2)
-		CREATE (e_dc)-[:HAS_HARDWARE]->(h2)
-		CREATE (e_fw)-[:HAS_HARDWARE]->(h3)
-		CREATE (e_router)-[:HAS_HARDWARE]->(h4)
+		CREATE (e_app)-[:HAS_HARDWARE]->(h2)
+		CREATE (e_db)-[:HAS_HARDWARE]->(h3)
+		CREATE (e_dc)-[:HAS_HARDWARE]->(h4)
+		CREATE (e_fw)-[:HAS_HARDWARE]->(h5)
+		CREATE (e_router)-[:HAS_HARDWARE]->(h6)
 
 		// Asignación de Instalaciones de Software
 		CREATE (e_gateway)-[:HAS_INSTALLATION]->(si_nginx)
