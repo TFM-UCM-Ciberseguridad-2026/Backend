@@ -450,7 +450,7 @@ func (r *findingRepo) ApplyRemediationByInstallationAndCVE(ctx context.Context, 
 func (r *findingRepo) ApplyRemediationByContainerAndCVE(ctx context.Context, containerID, cveID string, findingID int64, remediationFactor float64, status string) ([]int64, error) {
 	query := `
 		MATCH (c:Container {id: $container_id})-[:USES_IMAGE]->(image:ContainerImage)
-		MATCH (c)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability {cve_id: $cve_id})
+		MATCH (image)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability {cve_id: $cve_id})
 		WHERE f.container_id = c.id AND f.image_id = image.id AND f.id = $finding_id
 		SET f.remediation_factor = $remediation_factor, f.status = $status, f.last_seen = $now
 		FOREACH (_ IN CASE WHEN $remediation_factor = 0.0 THEN [1] ELSE [] END |

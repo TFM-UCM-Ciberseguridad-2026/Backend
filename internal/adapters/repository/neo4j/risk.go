@@ -102,7 +102,7 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 		// Rama C: Finding contextual de imagen de contenedor
 		MATCH (e:Endpoint {id: $endpoint_id})-[:HOSTS]->(c:Container)-[:USES_IMAGE]->(ci:ContainerImage)
 		WHERE NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
-		MATCH (c)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		MATCH (ci)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE f.context_type = 'CONTAINER_IMAGE'
 		  AND f.image_id = ci.id
 		  AND NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED']
@@ -1421,10 +1421,10 @@ func (r *riskRepo) GetContainerIDsByEndpoint(ctx context.Context, endpointID int
 // GetDirectFindingScoresByContainer devuelve los scores de findings contextuales directos de la imagen del contenedor.
 func (r *riskRepo) GetDirectFindingScoresByContainer(ctx context.Context, containerID string) ([]domain.FindingRiskSummary, error) {
 	query := `
-		MATCH (c:Container {id: $container_id})-[:USES_IMAGE]->(image:ContainerImage)
-		MATCH (c)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		MATCH (c:Container {id: $container_id})-[:USES_IMAGE]->(ci:ContainerImage)
+		MATCH (ci)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE f.container_id = c.id
-		  AND f.image_id = image.id
+		  AND f.image_id = ci.id
 		  AND NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED']
 		  AND coalesce(f.remediation_factor, 1.0) > 0.0
 		  AND coalesce(f.risk_score, 0.0) > 0.0

@@ -1856,85 +1856,99 @@ func (o *Orchestrator) SaveContainerImage(ctx context.Context, image *domain.Con
 // asociándolo al Endpoint host y a la imagen base si existe.
 func (o *Orchestrator) SaveContainer(ctx context.Context, container *domain.Container) error {
 	if container == nil {
-		return fmt.Errorf("contenedor vacío")
+			return fmt.Errorf("contenedor vacío")
 	}
 
 	containerID := strings.TrimSpace(container.ContainerID)
 	imageID := strings.TrimSpace(container.ImageID)
+
 	if containerID == "" {
-		return fmt.Errorf("container_id vacío")
+			return fmt.Errorf("container_id vacío")
 	}
 
 	existingContainer, err := o.containerPort.GetContainer(ctx, containerID)
 	if err != nil && !errors.Is(err, domain.ErrNodeNotFound) {
-		return fmt.Errorf(
-			"error recuperando container_id=%s antes de actualizar image_id: %w",
-			containerID,
-			err,
-		)
+			return fmt.Errorf(
+					"error recuperando container_id=%s antes de actualizar image_id: %w",
+					containerID,
+					err,
+			)
 	}
 
 	if existingContainer != nil {
-		oldImageID := strings.TrimSpace(existingContainer.ImageID)
-		if oldImageID != "" && oldImageID != imageID {
-			changedAt := time.Now().UTC()
-			if _, err := o.findingPort.SupersedeContainerImageFindings(
-				ctx,
-				containerID,
-				oldImageID,
-				changedAt,
-			); err != nil {
-				return fmt.Errorf(
-					"no se actualizó container_id=%s de image_id=%s a image_id=%s porque falló la invalidación de findings anteriores: %w",
-					containerID,
-					oldImageID,
-					imageID,
-					err,
-				)
+			oldImageID := strings.TrimSpace(existingContainer.ImageID)
+			oldImageRef := strings.TrimPrefix(oldImageID, containerID+"_")
+
+			if oldImageID != "" && oldImageRef != imageID {
+					changedAt := time.Now().UTC()
+
+					if _, err := o.findingPort.SupersedeContainerImageFindings(
+							ctx,
+							containerID,
+							oldImageID,
+							changedAt,
+					); err != nil {
+							return fmt.Errorf(
+									"error invalidando findings de container_id=%s e image_id=%s: %w",
+									containerID,
+									oldImageID,
+									err,
+							)
+					}
 			}
-		}
 	}
 
 	if err := o.containerPort.SaveContainer(ctx, container); err != nil {
-		return fmt.Errorf(
-			"error guardando container_id=%s, image_id=%s: %w",
-			containerID,
-			imageID,
-			err,
-		)
+			return fmt.Errorf(
+					"error guardando container_id=%s, image_id=%s: %w",
+					containerID,
+					imageID,
+					err,
+			)
 	}
 
-	// Sincronización automática de findings si la imagen ya tiene vulnerabilidades conocidas
-	if imageID != "" {
-		vulns, err := o.containerPort.GetVulnerabilitiesByContainerImage(
-			ctx,
-			imageID,
-		)
-		if err != nil {
+	savedContainer, err := o.containerPort.GetContainer(ctx, containerID)
+	if err != nil {
 			return fmt.Errorf(
-				"contenedor guardado parcialmente: container_id=%s, image_id=%s; error recuperando vulnerabilidades: %w",
-				containerID,
-				imageID,
-				err,
+					"error recuperando imagen persistida para container_id=%s: %w",
+					containerID,
+					err,
 			)
-		}
+	}
 
-		if _, err := o.syncContainerFindingsForImage(
-			ctx,
-			imageID,
-			vulns,
-		); err != nil {
-			return fmt.Errorf(
-				"contenedor guardado parcialmente: container_id=%s, image_id=%s; error sincronizando findings: %w",
-				containerID,
-				imageID,
-				err,
+	imageNodeID := strings.TrimSpace(savedContainer.ImageID)
+
+	if imageNodeID != "" {
+			vulns, err := o.containerPort.GetVulnerabilitiesByContainerImage(
+					ctx,
+					imageNodeID,
 			)
-		}
+			if err != nil {
+					return fmt.Errorf(
+							"contenedor guardado parcialmente: container_id=%s, image_id=%s: %w",
+							containerID,
+							imageNodeID,
+							err,
+					)
+			}
+
+			if _, err := o.syncContainerFindingsForImage(
+					ctx,
+					imageNodeID,
+					vulns,
+			); err != nil {
+					return fmt.Errorf(
+							"contenedor guardado parcialmente: container_id=%s, image_id=%s: %w",
+							containerID,
+							imageNodeID,
+							err,
+					)
+			}
 	}
 
 	return nil
 }
+
 
 // syncContainerFindingsForImage sincroniza/materializa los findings contextuales para todos los contenedores que usan la imagen.
 func (o *Orchestrator) syncContainerFindingsForImage(
@@ -2044,12 +2058,23 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		return nil, errors.New("scoutPort is not initialized")
 	}
 
-	if idx := strings.Index(imageID, "_"); idx != -1 && strings.HasPrefix(imageID, "container") {
-		imageID = imageID[idx+1:]
-	}
+
+
+	// if idx := strings.Index(imageID, "_"); idx != -1 && strings.HasPrefix(imageID, "container") {
+	// 	imageID = imageID[idx+1:]
+	// }
 	if idx := strings.Index(imageName, "_"); idx != -1 && strings.HasPrefix(imageName, "container") {
 		imageName = imageName[idx+1:]
 	}
+
+	 imageID = strings.TrimSpace(imageID)
+	scoutImageName := strings.TrimSpace(imageName)
+
+	if idx := strings.Index(scoutImageName, "_"); idx != -1 &&
+			strings.HasPrefix(scoutImageName, "container") {
+			scoutImageName = scoutImageName[idx+1:]
+	}
+
 
 	// Desacoplar el contexto de la desconexión HTTP del cliente, manteniendo un timeout de seguridad amplio (15 min)
 	// para garantizar que la ingesta de vulnerabilidades y findings en Neo4j se complete de forma atómica.
@@ -2069,7 +2094,7 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 	}
 
 	if !scanOpts.ForceRefresh {
-		image, err := o.containerPort.GetContainerImage(scanCtx, imageID)
+		image, err := o.containerPort.GetContainerImage(scanCtx, scoutImageName)
 		if err == nil && image != nil && image.VulnScanCompletedAt != nil && time.Since(*image.VulnScanCompletedAt) <= nvdEnrichmentTTL {
 			result.VulnerabilitiesFound = image.VulnScanProcessed
 			result.TotalAvailable = image.VulnScanTotalAvailable

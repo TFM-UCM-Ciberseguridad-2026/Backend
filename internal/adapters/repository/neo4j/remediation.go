@@ -135,7 +135,7 @@ func (r *remediationRepo) ApplyByInstallationAndCVE(ctx context.Context, install
 func (r *remediationRepo) ApplyByContainerAndCVE(ctx context.Context, containerID, cveID string, findingID int64, status string, appliedAt *time.Time) (int, error) {
 	query := `
 		MATCH (c:Container {id: $container_id})-[:USES_IMAGE]->(image:ContainerImage)
-		MATCH (c)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(:Vulnerability {cve_id: $cve_id})
+		MATCH (image)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(:Vulnerability {cve_id: $cve_id})
 		WHERE f.container_id = c.id AND f.image_id = image.id AND f.id = $finding_id
 		MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
 		SET rem.status = $status, rem.applied_at = $applied_at
