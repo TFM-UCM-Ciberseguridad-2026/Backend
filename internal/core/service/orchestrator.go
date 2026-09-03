@@ -2044,6 +2044,13 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		return nil, errors.New("scoutPort is not initialized")
 	}
 
+	if idx := strings.Index(imageID, "_"); idx != -1 && strings.HasPrefix(imageID, "container") {
+		imageID = imageID[idx+1:]
+	}
+	if idx := strings.Index(imageName, "_"); idx != -1 && strings.HasPrefix(imageName, "container") {
+		imageName = imageName[idx+1:]
+	}
+
 	// Desacoplar el contexto de la desconexión HTTP del cliente, manteniendo un timeout de seguridad amplio (15 min)
 	// para garantizar que la ingesta de vulnerabilidades y findings en Neo4j se complete de forma atómica.
 	scanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Minute)
@@ -2317,7 +2324,7 @@ func (o *Orchestrator) updateContainerImageScanMetadata(ctx context.Context, ima
 	}
 
 	query := `
-		MATCH (ci:ContainerImage {id: $image_id})
+		MATCH (ci:ContainerImage) WHERE ci.id = $image_id OR ci.image_id = $image_id OR ci.name = $image_id
 		SET ci.vuln_scan_started_at = $started_at,
 		    ci.vuln_scan_completed_at = $completed_at,
 		    ci.vuln_scan_cache_hit = $cache_hit,
@@ -2799,6 +2806,9 @@ func (o *Orchestrator) processSingleCVE(ctx context.Context, task ttpTask) error
 	v, err := o.vulnPort.GetByID(ctx, task.cveID)
 	if err != nil {
 		return fmt.Errorf("error obteniendo vuln: %w", err)
+	}
+	if v == nil {
+		return fmt.Errorf("vulnerabilidad %s no encontrada", task.cveID)
 	}
 
 	var ttps []string

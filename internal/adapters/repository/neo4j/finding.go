@@ -594,9 +594,7 @@ func (r *findingRepo) EnsureForContainerImageContextAndCVE(
 	findingKey := containerID + "|" + imageID + "|" + cveID
 
 	query := `
-			MATCH (c:Container {id: $container_id})
-					-[:USES_IMAGE]->
-					(ci:ContainerImage {id: $image_id})
+			MATCH (c:Container {id: $container_id})-[:USES_IMAGE]->(ci:ContainerImage)
 			MATCH (v:Vulnerability {cve_id: $cve_id})
 
 			MERGE (n:Finding {finding_key: $finding_key})
