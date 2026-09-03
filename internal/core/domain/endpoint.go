@@ -44,6 +44,11 @@ type Endpoint struct {
 	Environment     string       `json:"environment"`
 	IPs             []EndpointIP `json:"ips,omitempty"`
 
+	// Category es el bucket de negocio ('Workstation' o 'Server') con el que se gobierna el
+	// parcheo de este activo. No se rellena a mano: la congela ApplyCategory a partir de Type
+	// al crear y al actualizar el endpoint. Ver endpoint_category.go.
+	Category string `json:"category"`
+
 	// Security requirements CIA del endpoint (Low/Medium/High), usados como CR/IR/AR
 	// en el cálculo del CVSS environmental de cada finding asociado.
 	ConfidentialityReq string `json:"confidentiality_req"`

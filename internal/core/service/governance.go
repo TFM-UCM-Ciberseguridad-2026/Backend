@@ -161,9 +161,10 @@ func (s *governanceService) GetSLABreaches(ctx context.Context, projectID int64)
 		return nil, err
 	}
 
-	configMap := make(map[string]int)
+	// La clave es el par (categoría, severidad): el plazo depende de los dos ejes.
+	configMap := make(map[string]int, len(configs))
 	for _, c := range configs {
-		configMap[c.Severity] = c.Days
+		configMap[string(c.Category)+"|"+c.Severity] = c.Days
 	}
 
 	now := time.Now()
@@ -179,8 +180,19 @@ func (s *governanceService) GetSLABreaches(ctx context.Context, projectID int64)
 			continue
 		}
 
-		b.SLADays = configMap[b.Severity]
-		
+		// Sin categoría no hay compromiso que medir: el activo tiene un tipo que no es
+		// ninguno de los reconocidos. Se devuelve con SLADays 0 para que la pantalla lo
+		// muestre como "sin SLA" en vez de aplicarle un plazo que nadie ha acordado.
+		days, ok := configMap[string(b.Category)+"|"+b.Severity]
+		if !ok || b.Category == "" {
+			b.SLADays = 0
+			b.DaysRemaining = 0
+			finalBreaches = append(finalBreaches, b)
+			continue
+		}
+
+		b.SLADays = days
+
 		limitTimeUnix := b.FirstDetectedAt + int64(b.SLADays*24*60*60*1000)
 		daysRemaining := int((limitTimeUnix - nowUnix) / (1000 * 60 * 60 * 24))
 		b.DaysRemaining = daysRemaining
@@ -188,8 +200,15 @@ func (s *governanceService) GetSLABreaches(ctx context.Context, projectID int64)
 	}
 
 	// Order: breached first (DaysRemaining < 0) ascending by DaysRemaining (most negative first)
-	// then non-breached ascending by DaysRemaining (closest to zero first)
+	// then non-breached ascending by DaysRemaining (closest to zero first).
+	// Las entradas sin SLA se van al final: no tienen plazo, así que ordenarlas por días
+	// restantes las colocaría en medio de la tabla fingiendo un compromiso que no existe.
 	sort.Slice(finalBreaches, func(i, j int) bool {
+		iSinSLA := finalBreaches[i].SLADays == 0
+		jSinSLA := finalBreaches[j].SLADays == 0
+		if iSinSLA != jSinSLA {
+			return jSinSLA
+		}
 		return finalBreaches[i].DaysRemaining < finalBreaches[j].DaysRemaining
 	})
 

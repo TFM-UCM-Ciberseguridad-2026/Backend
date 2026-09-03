@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -1160,10 +1161,36 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 
 			// Seleccionar la clave canónica de MERGE según el tipo de nodo,
 			// para respetar las constraints UNIQUE existentes en la BD.
+			//
+			// matchProps admite clave compuesta porque no todos los nodos se identifican por
+			// una sola propiedad: SLAConfig no tiene `id` y su identidad es el par
+			// (category, severity).
 			var matchKey string
 			var matchVal interface{}
+			var matchProps map[string]interface{}
 
 			switch primaryLabel {
+			case "SLAConfig":
+				// Sin `id`: la identidad es el par (categoría de activo, severidad). Si se
+				// tratara con la clave por defecto se crearía un `id` sintético con el
+				// elementId de origen y, al reimportar en otra base, saldrían duplicados en
+				// lugar de reutilizar la configuración existente.
+				cat, hasCat := props["category"]
+				sev, hasSev := props["severity"]
+				if hasCat && hasSev && cat != nil && sev != nil {
+					matchProps = map[string]interface{}{"category": cat, "severity": sev}
+				}
+			case "IPAddress":
+				// Mismo caso que SLAConfig: SaveIPs las crea como {ip, vlan_id} y sin `id`,
+				// así que esa pareja es su identidad. Sin esto, cada importación duplicaba
+				// las direcciones del inventario en vez de reutilizarlas.
+				ip, hasIP := props["ip"]
+				if hasIP && ip != nil {
+					matchProps = map[string]interface{}{"ip": ip}
+					if vlan, ok := props["vlan_id"]; ok && vlan != nil {
+						matchProps["vlan_id"] = vlan
+					}
+				}
 			case "Vulnerability":
 				if cveVal, exists := props["cve_id"]; exists && cveVal != nil {
 					matchKey = "cve_id"
@@ -1211,10 +1238,15 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 				}
 			}
 
-			if matchKey == "" {
-				matchKey = "id"
-				matchVal = node.ID
-				props["id"] = node.ID
+			// Los nodos de clave simple se normalizan al mismo mapa que los de clave compuesta,
+			// para que la construcción del MERGE sea única.
+			if matchProps == nil {
+				if matchKey == "" {
+					matchKey = "id"
+					matchVal = node.ID
+					props["id"] = node.ID
+				}
+				matchProps = map[string]interface{}{matchKey: matchVal}
 			}
 
 			// Construir query MERGE dinámico y aplicar todas las etiquetas del nodo
@@ -1224,18 +1256,36 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 				labelStr.WriteString(l)
 			}
 
+			// Patrón de MERGE y parámetros, con las claves ordenadas para que la consulta sea
+			// determinista y el plan de ejecución se reutilice entre nodos del mismo tipo.
+			matchKeys := make([]string, 0, len(matchProps))
+			for k := range matchProps {
+				matchKeys = append(matchKeys, k)
+			}
+			sort.Strings(matchKeys)
+
+			var patron strings.Builder
+			params := map[string]interface{}{"properties": props}
+			for i, k := range matchKeys {
+				if i > 0 {
+					patron.WriteString(", ")
+				}
+				alias := fmt.Sprintf("m_%d", i)
+				patron.WriteString(k)
+				patron.WriteString(": $")
+				patron.WriteString(alias)
+				params[alias] = matchProps[k]
+			}
+
 			query := fmt.Sprintf(`
-				MERGE (n:%s {%s: $matchVal})
+				MERGE (n:%s {%s})
 				SET n%s, n += $properties
 				RETURN elementId(n) AS elemId
-			`, primaryLabel, matchKey, labelStr.String())
+			`, primaryLabel, patron.String(), labelStr.String())
 
-			res, err := tx.Run(ctx, query, map[string]interface{}{
-				"matchVal":   matchVal,
-				"properties": props,
-			})
+			res, err := tx.Run(ctx, query, params)
 			if err != nil {
-				return nil, fmt.Errorf("error al importar nodo %s (%v): %w", primaryLabel, matchVal, err)
+				return nil, fmt.Errorf("error al importar nodo %s (%v): %w", primaryLabel, matchProps, err)
 			}
 
 			if res.Next(ctx) {
@@ -1244,8 +1294,12 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 					if node.ID != "" {
 						nodeLookup[node.ID] = elemIdStr
 					}
-					if matchValStr := fmt.Sprint(matchVal); matchValStr != "" {
-						nodeLookup[matchValStr] = elemIdStr
+					// Los nodos de clave simple se indexan además por su valor de clave, que es
+					// como los referencian las relaciones del fichero exportado.
+					if matchVal != nil {
+						if matchValStr := fmt.Sprint(matchVal); matchValStr != "" {
+							nodeLookup[matchValStr] = elemIdStr
+						}
 					}
 				}
 			}

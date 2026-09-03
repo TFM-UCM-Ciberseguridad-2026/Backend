@@ -369,25 +369,56 @@ func (r *governanceRepository) GetSLAConfigs(ctx context.Context, projectID int6
 		return nil, err
 	}
 
-	var configs []domain.SLAConfig
+	// Se indexa por par (categoría, severidad) para poder detectar qué falta y completarlo
+	// con los valores por defecto sin pisar lo que el usuario ya haya configurado.
+	stored := make(map[string]domain.SLAConfig)
+	var sinCategoria []domain.SLAConfig
+
 	for res.Next(ctx) {
 		node := res.Record().Values[0].(neo4j.Node)
 		props := node.GetProperties()
-		configs = append(configs, domain.SLAConfig{
-			Severity: props["severity"].(string),
-			Days:     int(props["days"].(int64)),
-		})
+
+		severity, _ := props["severity"].(string)
+		days64, _ := props["days"].(int64)
+		category, _ := props["category"].(string)
+
+		conf := domain.SLAConfig{
+			Category: domain.EndpointCategory(category),
+			Severity: severity,
+			Days:     int(days64),
+		}
+
+		if category == "" {
+			// Configuración anterior a la separación por tipo de activo.
+			sinCategoria = append(sinCategoria, conf)
+			continue
+		}
+		stored[category+"|"+severity] = conf
 	}
-	
-	if len(configs) == 0 {
-		return []domain.SLAConfig{
-			{Severity: "Critical", Days: 15},
-			{Severity: "High", Days: 30},
-			{Severity: "Medium", Days: 60},
-			{Severity: "Low", Days: 90},
-		}, nil
+
+	// Los plazos configurados cuando el SLA era único se heredan como los de SERVIDOR, que
+	// es la lectura conservadora: el compromiso antiguo se aplicaba a todo, así que
+	// asignarlo al grupo exigente no relaja nada que ya estuviera comprometido. Los puestos
+	// arrancan con los valores por defecto, más laxos.
+	for _, legacy := range sinCategoria {
+		key := string(domain.CategoryServer) + "|" + legacy.Severity
+		if _, ok := stored[key]; !ok {
+			legacy.Category = domain.CategoryServer
+			stored[key] = legacy
+		}
 	}
-	
+
+	// Completar los huecos con la política por defecto del dominio, para que la respuesta
+	// siempre traiga la matriz entera y la pantalla no tenga que inventar valores.
+	configs := make([]domain.SLAConfig, 0, 8)
+	for _, def := range domain.DefaultSLAConfigs() {
+		if conf, ok := stored[string(def.Category)+"|"+def.Severity]; ok && conf.Days > 0 {
+			configs = append(configs, conf)
+			continue
+		}
+		configs = append(configs, def)
+	}
+
 	return configs, nil
 }
 
@@ -396,14 +427,26 @@ func (r *governanceRepository) SaveSLAConfigs(ctx context.Context, projectID int
 	defer session.Close(ctx)
 
 	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		// Los nodos antiguos no tienen `category` y su clave MERGE era solo la severidad. Se
+		// eliminan antes de escribir para que no queden duplicados compitiendo con los
+		// nuevos: sus valores ya se heredaron al leer (ver GetSLAConfigs).
+		if _, err := tx.Run(ctx, `
+			MATCH (s:SLAConfig)-[:BELONGS_TO]->(:Project {id: $projectID})
+			WHERE s.category IS NULL OR s.category = ''
+			DETACH DELETE s
+		`, map[string]interface{}{"projectID": projectID}); err != nil {
+			return nil, err
+		}
+
 		for _, conf := range configs {
 			query := `
 				MATCH (proj:Project {id: $projectID})
-				MERGE (s:SLAConfig {severity: $severity})-[:BELONGS_TO]->(proj)
+				MERGE (s:SLAConfig {severity: $severity, category: $category})-[:BELONGS_TO]->(proj)
 				SET s.days = $days
 			`
 			_, err := tx.Run(ctx, query, map[string]interface{}{
 				"severity":  conf.Severity,
+				"category":  string(conf.Category),
 				"days":      conf.Days,
 				"projectID": projectID,
 			})
@@ -420,10 +463,22 @@ func (r *governanceRepository) GetSLABreaches(ctx context.Context, projectID int
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	// Obtener vulnerabilidades activas (asociadas a hallazgos OPEN de este proyecto en concreto)
+	// Vulnerabilidades activas (hallazgos OPEN de este proyecto), agrupadas por CVE Y por
+	// categoría del activo afectado: el plazo depende de dónde está la vulnerabilidad, así
+	// que la misma CVE presente en un servidor y en un puesto son dos compromisos distintos
+	// y se devuelven como dos filas.
+	//
+	// La fecha de detección de cada grupo es la MÁS ANTIGUA de sus hallazgos: el reloj del
+	// SLA empieza a contar la primera vez que se supo, no la última.
 	query := `
 		MATCH (:Project {id: $projectID})-[:HAS_ENDPOINT]->(e:Endpoint)-[:HAS_INSTALLATION]->(s:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding {status: 'OPEN'})-[:OF_VULNERABILITY]->(v:Vulnerability)
-		RETURN DISTINCT v.cve_id, v.base_score, coalesce(v.first_detected_at, timestamp())
+		WITH v, coalesce(e.category, '') AS category, e,
+		     coalesce(v.first_detected_at, timestamp()) AS detected
+		RETURN v.cve_id           AS cve_id,
+		       v.base_score       AS base_score,
+		       category           AS category,
+		       min(detected)      AS first_detected_at,
+		       count(DISTINCT e)  AS asset_count
 	`
 	res, err := session.Run(ctx, query, map[string]interface{}{"projectID": projectID})
 	if err != nil {
@@ -433,7 +488,7 @@ func (r *governanceRepository) GetSLABreaches(ctx context.Context, projectID int
 	var breaches []domain.SLABreach
 	for res.Next(ctx) {
 		rec := res.Record()
-		
+
 		var baseScore float64
 		switch v := rec.Values[1].(type) {
 		case float64:
@@ -442,10 +497,17 @@ func (r *governanceRepository) GetSLABreaches(ctx context.Context, projectID int
 			baseScore = float64(v)
 		}
 
+		cveID, _ := rec.Values[0].(string)
+		category, _ := rec.Values[2].(string)
+		detected, _ := rec.Values[3].(int64)
+		assetCount, _ := rec.Values[4].(int64)
+
 		breaches = append(breaches, domain.SLABreach{
-			CVEID:           rec.Values[0].(string),
+			CVEID:           cveID,
 			BaseScore:       baseScore,
-			FirstDetectedAt: rec.Values[2].(int64),
+			Category:        domain.EndpointCategory(category),
+			FirstDetectedAt: detected,
+			AssetCount:      int(assetCount),
 		})
 	}
 	return breaches, nil

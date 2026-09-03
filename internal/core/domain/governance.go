@@ -81,13 +81,21 @@ type Role struct {
 	Contact string `json:"contact"` // e.g. email or department contact
 }
 
-// SLAConfig represents the SLA days for a specific severity
+// SLAConfig represents the SLA days for a specific severity within an asset category.
+//
+// El plazo depende de DOS ejes, no de uno: la severidad del CVE y el tipo de activo donde
+// está. Una misma severidad no admite el mismo plazo en un servidor que en el puesto de un
+// usuario, porque no comparten ni exposición ni ventana de mantenimiento.
 type SLAConfig struct {
-	Severity string `json:"severity"` // Critical, High, Medium, Low
-	Days     int    `json:"days"`
+	Category EndpointCategory `json:"category"` // Server | Workstation
+	Severity string           `json:"severity"` // Critical, High, Medium, Low
+	Days     int              `json:"days"`
 }
 
-// SLABreach represents a vulnerability and its SLA compliance status
+// SLABreach represents a vulnerability and its SLA compliance status.
+//
+// La misma CVE puede aparecer dos veces, una por categoría de activo, y con plazos
+// distintos: es precisamente lo que hace visible que hay dos SLAs y no uno.
 type SLABreach struct {
 	CVEID           string  `json:"cve_id"`
 	Severity        string  `json:"severity"`
@@ -95,6 +103,12 @@ type SLABreach struct {
 	FirstDetectedAt int64   `json:"first_detected_at"`
 	SLADays         int     `json:"sla_days"`
 	DaysRemaining   int     `json:"days_remaining"` // Negative means breached
+
+	// Category es el bucket de SLA aplicado. Vacía cuando el activo afectado no tiene un
+	// tipo reconocido: en ese caso no hay plazo que exigir y AssetCount indica a cuántos
+	// activos sin clasificar corresponde.
+	Category   EndpointCategory `json:"category"`
+	AssetCount int              `json:"asset_count"`
 }
 
 // RACIActivity represents an activity in the RACI matrix and its associated roles

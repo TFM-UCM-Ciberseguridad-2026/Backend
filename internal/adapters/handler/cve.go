@@ -220,6 +220,15 @@ func (h *OrchestratorHandler) AddEndpointToProject(w http.ResponseWriter, r *htt
 	}
 
 	endpoint := payload.Endpoint
+
+	// El tipo se valida en el borde de la API porque de él depende la categoría del activo y,
+	// con ella, el SLA que se le exige. Aceptar un tipo libre dejaba activos sin categoría,
+	// fuera de toda medición de cumplimiento sin que nadie se enterase.
+	if !domain.IsValidEndpointType(endpoint.Type) {
+		sendError(w, "Tipo de endpoint inválido: usa 'Server', 'Workstation', 'Domain Controller', 'Firewall' o 'Router'", http.StatusBadRequest)
+		return
+	}
+
 	if err := h.orchestrator.AddEndpointToProject(r.Context(), projectID, &endpoint); err != nil {
 		emitAuditLog("CREACION", "Endpoint", fmt.Sprint(endpoint.EndpointID), endpoint.Hostname, idStr, payload.Justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
@@ -931,6 +940,13 @@ func (h *OrchestratorHandler) UpdateEndpoint(w http.ResponseWriter, r *http.Requ
 	justification := strings.TrimSpace(req.Justification)
 	if justification == "" {
 		sendError(w, "El campo 'justificación' es obligatorio para modificar el endpoint", http.StatusBadRequest)
+		return
+	}
+
+	// Misma validación que en el alta: la edición es la vía para reclasificar un activo mal
+	// dado de alta, así que es justo aquí donde no puede colarse un tipo inventado.
+	if !domain.IsValidEndpointType(req.Endpoint.Type) {
+		sendError(w, "Tipo de endpoint inválido: usa 'Server', 'Workstation', 'Domain Controller', 'Firewall' o 'Router'", http.StatusBadRequest)
 		return
 	}
 

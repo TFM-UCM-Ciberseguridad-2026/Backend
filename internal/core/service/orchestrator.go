@@ -275,6 +275,10 @@ func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64
 		endpoint.EndpointID = id
 	}
 
+	// La categoría de negocio (puesto o servidor) se congela en el activo al darlo de alta:
+	// es la que gobierna el SLA de parcheo y debe quedar fija aunque el mapeo cambie después.
+	endpoint.ApplyCategory()
+
 	if err := o.endpointPort.Save(ctx, endpoint); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
@@ -1615,6 +1619,10 @@ func (o *Orchestrator) UpdateContainer(ctx context.Context, container *domain.Co
 
 // UpdateEndpoint actualiza los datos y re-enlaza las IPs de un Endpoint en Neo4j.
 func (o *Orchestrator) UpdateEndpoint(ctx context.Context, endpoint *domain.Endpoint) error {
+	// Recalcular la categoría aquí es lo que permite reclasificar un activo mal dado de alta:
+	// al corregir su tipo, el bucket de SLA se recoloca en la misma operación.
+	endpoint.ApplyCategory()
+
 	if err := o.endpointPort.Update(ctx, endpoint); err != nil {
 		return fmt.Errorf("error actualizando endpoint: %w", err)
 	}
