@@ -664,7 +664,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 	// 3. Condición de salto: Todos los Endpoints intermedios deben tener vulnerabilidades de red (AV:N o AV:A).
 	// 4. Privilegios (Root): Si la vuln de red tiene C:H, I:H, A:H, o si hay una vuln local (AV:L) con impacto alto.
 	query := `
-		MATCH path = (e1)-[:CONNECTED_TO|HOSTS*1..]-(eTarget)
+		MATCH path = (e1)-[:CONNECTED_TO|HOSTS*0..]-(eTarget)
 		WHERE ((e1:Endpoint AND NOT toLower(coalesce(e1.estado, e1.status, '')) IN ['decomisado', 'decommissioned'] AND (
 		        EXISTS {
 		          MATCH (e1)-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->(fE1:Finding)-[:OF_VULNERABILITY]->(vE1:Vulnerability)
@@ -676,7 +676,6 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		        }
 		      )) OR (e1:Container AND toLower(e1.state) = 'running')) AND e1.internet_exposed = true
 		  AND ((eTarget:Endpoint AND NOT toLower(coalesce(eTarget.estado, eTarget.status, '')) IN ['decomisado', 'decommissioned']) OR (eTarget:Container AND toLower(eTarget.state) = 'running'))
-		  AND e1.id <> coalesce(eTarget.id, "0")
 		  AND ($projectID = 0 OR toString($projectID) = "0" OR 
 		    EXISTS { MATCH (proj:Project)-[:HAS_ENDPOINT]-(e1) WHERE proj.id = $projectID OR toString(proj.id) = toString($projectID) OR proj.name = toString($projectID) } OR
 		    (e1:Container AND EXISTS { MATCH (proj:Project)-[:HAS_ENDPOINT]-(:Endpoint)-[:HOSTS]-(e1) WHERE proj.id = $projectID OR toString(proj.id) = toString($projectID) OR proj.name = toString($projectID) }))
@@ -1306,8 +1305,8 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 					state.Path.InitialEndpoint = firstStep.ContainerName
 				}
 
-				// Descartar rutas circulares, autosaltos o pseudo-escapes sin avance lateral real
-				if lastStep.TargetEndpoint == "Escape de Contenedor (Host)" || lastStep.TargetEndpoint == state.Path.InitialEndpoint || lastStep.TargetEndpoint == "" {
+				// Descartar rutas circulares, autosaltos o pseudo-escapes sin avance lateral real (salvo rutas directas de 1 solo paso sobre el propio nodo expuesto)
+				if lastStep.TargetEndpoint == "Escape de Contenedor (Host)" || (len(state.Path.Steps) > 1 && lastStep.TargetEndpoint == state.Path.InitialEndpoint) || lastStep.TargetEndpoint == "" {
 					continue
 				}
 
