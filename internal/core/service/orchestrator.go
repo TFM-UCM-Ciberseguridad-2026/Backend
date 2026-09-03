@@ -2281,6 +2281,13 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		return partialContainerScanResult(result, scanErr)
 	}
 
+	// Recálculo síncrono de riesgo tras el escaneo y enriquecimiento NVD de la imagen de contenedor
+	if o.riskPort != nil {
+		if err := o.ComputeAllProjectsRisk(scanCtx); err != nil {
+			fmt.Printf("[ScanAndSaveContainerImage] Advertencia en recálculo síncrono de riesgo de proyectos: %v\n", err)
+		}
+	}
+
 	return result, nil
 }
 

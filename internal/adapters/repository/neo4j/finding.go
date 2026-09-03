@@ -664,7 +664,7 @@ func (r *findingRepo) EnsureForContainerImageContextAndCVE(
 							n.source = 'DOCKER_SCOUT'
 			)
 
-			MERGE (c)-[:HAS_FINDING]->(n)
+			MERGE (ci)-[:HAS_FINDING]->(n)
 			MERGE (n)-[:OF_VULNERABILITY]->(v)
 
 			WITH n, created

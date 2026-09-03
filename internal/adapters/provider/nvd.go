@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -256,6 +257,25 @@ func (a *NistAPIAdapter) doRequestWithRetry(ctx context.Context, reqFactory func
 				return nil, waitErr
 			}
 			continue
+		}
+
+		// Detección automática de API Key no activada o rechazada por el NIST
+		if strings.TrimSpace(a.apiKey) != "" && (strings.EqualFold(strings.TrimSpace(resp.Header.Get("message")), "Invalid apiKey.") || (resp.StatusCode == http.StatusNotFound && strings.Contains(strings.ToLower(resp.Header.Get("message")), "invalid apikey"))) {
+			log.Printf("[NVD Provider] ADVERTENCIA: La NVD_API_KEY no es válida o aún no está activada por el NIST ('message: Invalid apiKey.'). Desactivando cabecera y reintentando de forma pública...")
+			a.rateMu.Lock()
+			a.apiKey = ""
+			a.minInterval = 6 * time.Second
+			a.rateMu.Unlock()
+			resp.Body.Close()
+
+			reqNoKey, err := reqFactory()
+			if err != nil {
+				return nil, err
+			}
+			respNoKey, err := a.httpClient.Do(reqNoKey)
+			if err == nil {
+				return respNoKey, nil
+			}
 		}
 
 		if !isRetryableNVDStatus(resp.StatusCode) {
