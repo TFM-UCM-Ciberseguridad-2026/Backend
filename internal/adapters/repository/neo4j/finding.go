@@ -522,3 +522,106 @@ func (r *findingRepo) EnsureForContainerImageContextAndCVE(ctx context.Context, 
 		RiskComputedAt:    getTimePtr(props, "risk_computed_at"),
 	}, created, nil
 }
+
+// GetOpenFindingsByInstallation recupera todos los findings abiertos de una instalación junto con su CVE y versión corregida.
+func (r *findingRepo) GetOpenFindingsByInstallation(ctx context.Context, installationID string) ([]domain.FindingRiskSummary, error) {
+	query := `
+		MATCH (si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE (si.id = $installation_id OR toString(si.id) = toString($installation_id))
+		  AND NOT toUpper(coalesce(f.status, 'OPEN')) IN ['PATCHED', 'RESOLVED', 'CLOSED']
+		OPTIONAL MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
+		RETURN f.id AS finding_id,
+		       v.cve_id AS cve_id,
+		       coalesce(f.risk_score, 0.0) AS risk_score,
+		       coalesce(f.priority_score, 0.0) AS priority_score,
+		       coalesce(f.status, 'OPEN') AS status,
+		       coalesce(rem.fixed_version, v.fixed_version, '') AS fixed_version
+	`
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"installation_id": installationID})
+		if err != nil {
+			return nil, err
+		}
+		var summaries []domain.FindingRiskSummary
+		for result.Next(ctx) {
+			rec := result.Record()
+			fid, _ := rec.Get("finding_id")
+			cve, _ := rec.Get("cve_id")
+			rs, _ := rec.Get("risk_score")
+			ps, _ := rec.Get("priority_score")
+			st, _ := rec.Get("status")
+			fv, _ := rec.Get("fixed_version")
+			summaries = append(summaries, domain.FindingRiskSummary{
+				FindingID:     toInt64(fid),
+				CVEID:         toStr(cve),
+				RiskScore:     toFloat64(rs),
+				PriorityScore: toFloat64(ps),
+				Status:        toStr(st),
+				FixedVersion:  toStr(fv),
+			})
+		}
+		return summaries, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.FindingRiskSummary{}, nil
+	}
+	return res.([]domain.FindingRiskSummary), nil
+}
+
+// CloseResolvedFindingsBatch cierra todos los findings resueltos por el parche o actualización.
+func (r *findingRepo) CloseResolvedFindingsBatch(ctx context.Context, installationID string, cveIDs []string, remediationFactor float64, status string) ([]int64, error) {
+	if len(cveIDs) == 0 {
+		return []int64{}, nil
+	}
+
+	query := `
+		MATCH (si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE (si.id = $installation_id OR toString(si.id) = toString($installation_id))
+		  AND v.cve_id IN $cve_ids
+		SET f.remediation_factor = $remediation_factor,
+		    f.status             = $status,
+		    f.last_seen          = $now
+		FOREACH (_ IN CASE WHEN $remediation_factor = 0.0 THEN [1] ELSE [] END |
+		    SET f.risk_score     = 0.0,
+		        f.priority_score = 0.0,
+		        f.resolved_at    = $now
+		)
+		RETURN f.id AS finding_id
+	`
+	params := map[string]any{
+		"installation_id":    installationID,
+		"cve_ids":            cveIDs,
+		"remediation_factor": remediationFactor,
+		"status":             status,
+		"now":                time.Now().UTC(),
+	}
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, params)
+		if err != nil {
+			return nil, err
+		}
+		var ids []int64
+		for result.Next(ctx) {
+			id, _ := result.Record().Get("finding_id")
+			ids = append(ids, toInt64(id))
+		}
+		return ids, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []int64{}, nil
+	}
+	return res.([]int64), nil
+}

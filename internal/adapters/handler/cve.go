@@ -715,6 +715,7 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 		AppliedAt        *time.Time `json:"applied_at"`
 		AppliedBy        string     `json:"applied_by"`
 		Notes            string     `json:"notes"`
+		TargetVersion    string     `json:"target_version"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendError(w, "Invalid JSON", http.StatusBadRequest)
@@ -729,7 +730,7 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 	application, affected, err := h.orchestrator.DeclarePatchApplied(
 		r.Context(), installationID, req.CVEID, req.PatchID,
 		domain.RemediationLevel(req.RemediationLevel),
-		appliedAt, req.AppliedBy, req.Notes,
+		appliedAt, req.AppliedBy, req.Notes, req.TargetVersion,
 	)
 	if err != nil {
 		emitAuditLog(
@@ -748,30 +749,13 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 	}
 
 	cambios := map[string]auditChange{
-		"cve_id": {
-			Antes:   nil,
-			Despues: req.CVEID,
-		},
-		"installation_id": {
-			Antes:   nil,
-			Despues: installationID,
-		},
-		"patch_id": {
-			Antes:   nil,
-			Despues: req.PatchID,
-		},
-		"remediation_level": {
-			Antes:   nil,
-			Despues: req.RemediationLevel,
-		},
-		"applied_by": {
-			Antes:   nil,
-			Despues: req.AppliedBy,
-		},
-		"affected_findings": {
-			Antes:   nil,
-			Despues: affected,
-		},
+		"cve_id":            {Despues: req.CVEID},
+		"installation_id":   {Despues: installationID},
+		"patch_id":          {Despues: req.PatchID},
+		"remediation_level": {Despues: req.RemediationLevel},
+		"applied_by":        {Despues: req.AppliedBy},
+		"target_version":    {Despues: req.TargetVersion},
+		"affected_findings": {Despues: affected},
 	}
 
 	emitAuditLog(
@@ -786,10 +770,28 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 		"",
 	)
 	sendJSON(w, map[string]any{
-		"status":            "parche declarado como aplicado",
+		"status":            "parche declarado y aplicado con éxito",
 		"application":       application,
 		"affected_findings": affected,
 	}, http.StatusCreated)
+}
+
+// GET /api/endpoints/{id}/patch-history
+func (h *OrchestratorHandler) GetEndpointPatchHistory(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	endpointID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		sendError(w, "ID de endpoint inválido", http.StatusBadRequest)
+		return
+	}
+
+	history, err := h.orchestrator.GetAppliedPatchHistoryByEndpoint(r.Context(), endpointID)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, history, http.StatusOK)
 }
 
 // GET /api/patch-queue?project_id={id}&page={p}&limit={n}&search={s}&vendor_search={v}&...

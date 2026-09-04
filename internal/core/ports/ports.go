@@ -11,7 +11,7 @@ import (
 Este archivo define los Puertos (Ports) de entrada y salida para los servicios de la aplicación (vulnerabilidades, exploits y persistencia).
 
 Propósito arquitectónico y teórico:
-1. Puertos en Arquitectura Hexagonal: Define las interfaces formales (contratos lógicos) Inbound (de entrada, como handlers o casos de uso) y Outbound (de salida, como repositorios o clientes de APIs externas) que describen qué operaciones ofrece o requiere el núcleo de la aplicación, sin implementar cómo se realizan.
+1. Puertos en Arquitectura Hexagonal: Define las interfaces formales (contratos lógicos) Inbound y Outbound que describen qué operaciones ofrece o requiere el núcleo de la aplicación, sin implementar cómo se realizan.
 2. Principio de Inversión de Dependencias (DIP): Asegura que el núcleo del negocio (service y domain) dependa de abstracciones de esta capa (ports) y no de detalles concretos de infraestructura de red, HTTP o bases de datos (adapters).
 3. Testabilidad mediante Mocks: Permite sustituir en tiempo de pruebas unitarias los componentes de persistencia o APIs externas por implementaciones simuladas que cumplan las firmas de las interfaces.
 */
@@ -19,7 +19,7 @@ Propósito arquitectónico y teórico:
 type EndpointPort interface {
 	Save(ctx context.Context, endpoint *domain.Endpoint) error                    // Guarda en la DB
 	Update(ctx context.Context, endpoint *domain.Endpoint) error                  // Actualiza en la DB
-	GetByID(ctx context.Context, id int64) (*domain.Endpoint, error)              // Te da con el id el objeto recuperado de la bd
+	GetByID(ctx context.Context, id int64) (*domain.Endpoint, error)              // Recupera el objeto de la BD por su ID
 	DeleteByID(ctx context.Context, id int64) error                               // Borra un nodo de la BD
 	SaveIPs(ctx context.Context, endpointID int64, ips []domain.EndpointIP) error // Reemplaza el conjunto de direcciones IP de un endpoint por las indicadas.
 	GetIPs(ctx context.Context, endpointID int64) ([]domain.EndpointIP, error)    // Devuelve las direcciones IP asociadas a un endpoint.
@@ -63,11 +63,9 @@ type FindingPort interface {
 	EnsureForInstallationAndCVE(ctx context.Context, installationID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
 	EnsureForContainerImageContextAndCVE(ctx context.Context, containerID string, imageID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
 
-	// ApplyRemediationByInstallationAndCVE fija factor y estado en los findings del CVE
-	// en esa instalación, y devuelve sus IDs. Con factor 0 pone también risk_score y
-	// priority_score a cero: el finding sale de las agregaciones y conservaría si no la
-	// última puntuación calculada.
 	ApplyRemediationByInstallationAndCVE(ctx context.Context, installationID, cveID string, remediationFactor float64, status string) ([]int64, error)
+	GetOpenFindingsByInstallation(ctx context.Context, installationID string) ([]domain.FindingRiskSummary, error)
+	CloseResolvedFindingsBatch(ctx context.Context, installationID string, cveIDs []string, remediationFactor float64, status string) ([]int64, error)
 	GetVulnerabilitiesByFinding(ctx context.Context, findingID any) ([]domain.Vulnerability, error)
 }
 
@@ -132,6 +130,9 @@ type PatchPort interface {
 
 	// GetApplicationsByInstallation devuelve el histórico, del más reciente al más antiguo.
 	GetApplicationsByInstallation(ctx context.Context, installationID string) ([]domain.AppliedPatch, error)
+
+	// GetAppliedPatchHistoryByEndpoint obtiene el histórico de parches agrupado por software de un endpoint
+	GetAppliedPatchHistoryByEndpoint(ctx context.Context, endpointID int64) (*domain.EndpointPatchHistory, error)
 }
 
 type ProjectPort interface {
@@ -178,7 +179,7 @@ type DatabaseHelper interface {
 	GetNodeInfo(ctx context.Context, label string, propertyKey string, propertyValue any) (map[string]any, error)
 }
 
-// VulnerabilityAPIscanner escanea vuln de la api del nist (puerto de salida)
+// VulnerabilityAPIscanner escanea vulnerabilidades desde la API del NIST (puerto de salida)
 type VulnerabilityAPIscanner interface {
 	// FetchVulnerabilities obtiene una lista de vulnerabilidades desde el API externa.
 	FetchVulnerabilities(ctx context.Context, limit int, offset int) ([]domain.Vulnerability, error)
@@ -189,8 +190,6 @@ type VulnerabilityAPIscanner interface {
 	// FetchByCVE obtiene el detalle completo de una vulnerabilidad específica.
 	FetchByCVE(ctx context.Context, cve string) (*domain.Vulnerability, error)
 }
-
-//Los CRUDS para el mitre... consutarlo con Julve
 
 type TTPPort interface {
 	Save(ctx context.Context, ttp *domain.TTP) error
@@ -277,12 +276,7 @@ type CAPECPort interface {
 	GetTTPsByCWE(ctx context.Context, cweID string) ([]string, error)
 }
 
-// PatchProvider obtiene información de remediación (parches publicados y versiones
-// corregidas) de un CVE desde una fuente externa.
-//
-// Las fuentes no son universales: OSV cubre ecosistemas open source y MSRC cubre
-// Microsoft. Cuando la fuente no conoce el CVE, la implementación devuelve (nil, nil)
-// en lugar de un error: no encontrarlo es un resultado válido, no un fallo.
+// PatchProvider obtiene información de remediación (parches publicados y versiones corregidas) de un CVE desde una fuente externa.
 type PatchProvider interface {
 	FetchPatchInfo(ctx context.Context, cveID string) (*domain.PatchIntelligence, error)
 }
@@ -367,7 +361,6 @@ type TTPMappedEvent struct {
 }
 
 // NotificationPort desacopla el worker de TTPs de cualquier detalle de transporte (WebSocket, SSE, etc.).
-// La implementación concreta (WSHub) vive en la capa de adapters/handler.
 type NotificationPort interface {
 	NotifyTTPMapped(ctx context.Context, event TTPMappedEvent) error
 }
