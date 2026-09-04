@@ -62,12 +62,14 @@ type FindingPort interface {
 
 	EnsureForInstallationAndCVE(ctx context.Context, installationID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
 	EnsureForContainerImageContextAndCVE(ctx context.Context, containerID string, imageID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
+	SupersedeContainerImageFindings(ctx context.Context, containerID string, oldImageID string, changedAt time.Time) (int, error)
 
 	// ApplyRemediationByInstallationAndCVE fija factor y estado en los findings del CVE
 	// en esa instalación, y devuelve sus IDs. Con factor 0 pone también risk_score y
 	// priority_score a cero: el finding sale de las agregaciones y conservaría si no la
 	// última puntuación calculada.
 	ApplyRemediationByInstallationAndCVE(ctx context.Context, installationID, cveID string, remediationFactor float64, status string) ([]int64, error)
+	ApplyRemediationByContainerAndCVE(ctx context.Context, containerID, cveID string, findingID int64, remediationFactor float64, status string) ([]int64, error)
 	GetVulnerabilitiesByFinding(ctx context.Context, findingID any) ([]domain.Vulnerability, error)
 }
 
@@ -77,6 +79,7 @@ type RemediationPort interface {
 	// ApplyByInstallationAndCVE sincroniza estado y fecha en las remediaciones del CVE en
 	// esa instalación, y devuelve cuántas cambió. appliedAt nulo limpia la fecha.
 	ApplyByInstallationAndCVE(ctx context.Context, installationID, cveID, status string, appliedAt *time.Time) (int, error)
+	ApplyByContainerAndCVE(ctx context.Context, containerID, cveID string, findingID int64, status string, appliedAt *time.Time) (int, error)
 
 	// GetFixedVersionByInstallationAndCVE devuelve la versión corregida que dejó el
 	// enriquecimiento desde OSV, o cadena vacía si no consta.
@@ -132,6 +135,7 @@ type PatchPort interface {
 
 	// GetApplicationsByInstallation devuelve el histórico, del más reciente al más antiguo.
 	GetApplicationsByInstallation(ctx context.Context, installationID string) ([]domain.AppliedPatch, error)
+	GetApplicationsByContainer(ctx context.Context, containerID string) ([]domain.AppliedPatch, error)
 }
 
 type ProjectPort interface {
@@ -329,6 +333,10 @@ type RiskPort interface {
 
 	// GetSoftwareRiskSummariesByEndpoint devuelve un resumen de riesgo de software para todas las instalaciones asociadas a un endpoint.
 	GetSoftwareRiskSummariesByEndpoint(ctx context.Context, endpointID int64) ([]domain.SoftwareRiskSummary, error)
+	GetNativeInstallationIDsByEndpoint(ctx context.Context, endpointID string) ([]string, error)
+	GetNativeSoftwareRiskSummariesByEndpoint(ctx context.Context, endpointID string) ([]domain.SoftwareRiskSummary, error)
+	GetContainerRiskSummariesByEndpoint(ctx context.Context, endpointID string) ([]domain.ContainerRiskSummary, error)
+	UpdateEndpointRiskAndPrioritySummary(ctx context.Context, summary domain.EndpointRiskSummary) error
 
 	// UpdateEndpointRiskAndPriority actualiza el riesgo y la prioridad de un endpoint, incluyendo los drivers técnicos y de prioridad.
 	UpdateEndpointRiskAndPriority(ctx context.Context, endpointID int64, riskScore float64, riskTier string, priorityScore float64, priorityTier string, technicalDriverInstallationID string, technicalDriverSoftwareName string, technicalDriverRiskScore float64, technicalDriverCVEID string, priorityDriverInstallationID string, priorityDriverSoftwareName string, priorityDriverPriorityScore float64, priorityDriverCVEID string, riskySoftwareCount int) error
@@ -338,6 +346,7 @@ type RiskPort interface {
 
 	// GetProjectIDByEndpoint devuelve el ID del proyecto al que pertenece un endpoint.
 	GetProjectIDByEndpoint(ctx context.Context, endpointID int64) (int64, error)
+	GetEndpointIDByContainer(ctx context.Context, containerID string) (int64, error)
 
 	// GetEndpointRiskSummariesByProject devuelve un resumen de riesgo de todos los endpoints asociados a un proyecto.
 	GetEndpointRiskSummariesByProject(ctx context.Context, projectID int64) ([]domain.EndpointRiskSummary, error)
@@ -350,6 +359,7 @@ type RiskPort interface {
 
 	// Métodos para agregación de riesgo y hallazgos en contenedores
 	GetContainerIDsByEndpoint(ctx context.Context, endpointID int64) ([]string, error)
+	GetInstallationIDsByContainer(ctx context.Context, containerID string) ([]string, error)
 	GetDirectFindingScoresByContainer(ctx context.Context, containerID string) ([]domain.FindingRiskSummary, error)
 	GetSoftwareRiskSummariesByContainer(ctx context.Context, containerID string) ([]domain.SoftwareRiskSummary, error)
 	UpdateContainerRiskAndPriority(ctx context.Context, summary domain.ContainerRiskSummary) error

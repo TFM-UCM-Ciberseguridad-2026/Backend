@@ -69,7 +69,6 @@ func (r *softwareRepo) GetByID(ctx context.Context, id int64) (*domain.Software,
 	}, nil
 }
 
-
 func (r *softwareRepo) DeleteByID(ctx context.Context, id int64) error {
 	query := `
 		MATCH (n:Software)

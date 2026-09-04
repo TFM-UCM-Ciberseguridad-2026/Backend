@@ -124,11 +124,12 @@ func LoadEnv(path string) error {
 // Primero intenta cargar el archivo .env local si existe, y luego recupera las variables del entorno.
 // NOTA: Se modificó la firma original en Backend para devolver (*Config, error) compatible con Lucas.
 func LoadConfig() (*Config, error) {
-	// Intentamos cargar el archivo .env por defecto en la raíz.
-	// Si no existe, no lanzamos error ya que las variables podrían venir directamente del entorno.
-	err := LoadEnv(".env")
-	if err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("error cargando el archivo .env: %w", err)
+	// Intentamos cargar el archivo .env desde la raíz del proyecto (../.env) o el directorio actual (.env).
+	envPaths := []string{"../.env", ".env"}
+	for _, envPath := range envPaths {
+		if err := LoadEnv(envPath); err == nil {
+			break
+		}
 	}
 
 	cfg := &Config{

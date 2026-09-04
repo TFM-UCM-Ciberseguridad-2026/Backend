@@ -18,8 +18,10 @@ type patchRepo struct {
 func (r *patchRepo) SaveApplication(ctx context.Context, a *domain.AppliedPatch) error {
 	query := `
 		MATCH (p:Patch {id: $patch_id})
-		MATCH (si:SoftwareInstallation {id: $installation_id})
-		MERGE (p)-[rel:APPLIED_TO]->(si)
+		MATCH (target)
+		WHERE ($asset_type = 'CONTAINER' AND target:Container AND target.id = $container_id)
+		   OR ($asset_type <> 'CONTAINER' AND target:SoftwareInstallation AND target.id = $installation_id)
+		MERGE (p)-[rel:APPLIED_TO]->(target)
 		SET rel.applied_at         = $applied_at,
 		    rel.applied_by         = $applied_by,
 		    rel.remediation_level  = $remediation_level,
@@ -31,7 +33,12 @@ func (r *patchRepo) SaveApplication(ctx context.Context, a *domain.AppliedPatch)
 		    rel.verification_reason     = $verification_reason,
 		    rel.installed_version       = $installed_version,
 		    rel.expected_version        = $expected_version,
-		    rel.matched_package         = $matched_package
+		    rel.matched_package         = $matched_package,
+		    rel.asset_type              = CASE WHEN $asset_type = '' THEN CASE WHEN target:Container THEN 'CONTAINER' ELSE 'SOFTWARE_INSTALLATION' END ELSE $asset_type END,
+		    rel.asset_id                = CASE WHEN $asset_id = '' THEN target.id ELSE $asset_id END,
+		    rel.container_id            = CASE WHEN $container_id = '' AND target:Container THEN target.id ELSE $container_id END,
+		    rel.image_id                = CASE WHEN $image_id = '' AND target:Container THEN coalesce(target.image_id, '') ELSE $image_id END,
+		    rel.finding_id              = $finding_id
 	`
 	// Sin RETURN propio: executeWriteUpdateHelper añade el suyo y dos seguidos son
 	// error de sintaxis.
@@ -39,6 +46,11 @@ func (r *patchRepo) SaveApplication(ctx context.Context, a *domain.AppliedPatch)
 	params := map[string]any{
 		"patch_id":                a.PatchID,
 		"installation_id":         a.InstallationID,
+		"asset_type":              a.AssetType,
+		"asset_id":                a.AssetID,
+		"container_id":            a.ContainerID,
+		"image_id":                a.ImageID,
+		"finding_id":              a.FindingID,
 		"applied_at":              a.AppliedAt,
 		"applied_by":              a.AppliedBy,
 		"remediation_level":       string(a.RemediationLevel),
@@ -77,7 +89,12 @@ func (r *patchRepo) GetApplicationsByInstallation(ctx context.Context, installat
 		       rel.verification_reason     AS verification_reason,
 		       rel.installed_version       AS installed_version,
 		       rel.expected_version        AS expected_version,
-		       rel.matched_package         AS matched_package
+		       rel.matched_package         AS matched_package,
+		       rel.asset_type              AS asset_type,
+		       rel.asset_id                AS asset_id,
+		       rel.container_id            AS container_id,
+		       rel.image_id                AS image_id,
+		       rel.finding_id              AS finding_id
 		ORDER BY applied_at DESC
 	`
 
@@ -101,7 +118,12 @@ func (r *patchRepo) GetApplicationsByInstallation(ctx context.Context, installat
 
 			applications = append(applications, domain.AppliedPatch{
 				PatchID:           getInt64(props, "patch_id"),
+				AssetType:         getString(props, "asset_type"),
+				AssetID:           getString(props, "asset_id"),
 				InstallationID:    installationID,
+				ContainerID:       getString(props, "container_id"),
+				ImageID:           getString(props, "image_id"),
+				FindingID:         getInt64(props, "finding_id"),
 				CVEID:             getString(props, "cve_id"),
 				AppliedAt:         appliedAt,
 				AppliedBy:         getString(props, "applied_by"),
@@ -124,6 +146,54 @@ func (r *patchRepo) GetApplicationsByInstallation(ctx context.Context, installat
 		return applications, result.Err()
 	})
 
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.AppliedPatch{}, nil
+	}
+	return res.([]domain.AppliedPatch), nil
+}
+
+func (r *patchRepo) GetApplicationsByContainer(ctx context.Context, containerID string) ([]domain.AppliedPatch, error) {
+	query := `
+		MATCH (p:Patch)-[rel:APPLIED_TO]->(c:Container {id: $container_id})
+		RETURN p.id AS patch_id, p.url AS patch_url, p.description AS patch_description,
+		       rel.asset_type AS asset_type, rel.asset_id AS asset_id,
+		       rel.container_id AS container_id, rel.image_id AS image_id, rel.finding_id AS finding_id,
+		       rel.applied_at AS applied_at, rel.applied_by AS applied_by,
+		       rel.remediation_level AS remediation_level, rel.remediation_factor AS remediation_factor,
+		       rel.cve_id AS cve_id, rel.notes AS notes,
+		       rel.verified AS verified, rel.verification_conclusive AS verification_conclusive,
+		       rel.verification_reason AS verification_reason, rel.installed_version AS installed_version,
+		       rel.expected_version AS expected_version, rel.matched_package AS matched_package
+		ORDER BY applied_at DESC
+	`
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"container_id": containerID})
+		if err != nil {
+			return nil, err
+		}
+		applications := make([]domain.AppliedPatch, 0)
+		for result.Next(ctx) {
+			props := result.Record().AsMap()
+			appliedAt := time.Time{}
+			if value, ok := props["applied_at"].(time.Time); ok {
+				appliedAt = value
+			}
+			applications = append(applications, domain.AppliedPatch{
+				PatchID: getInt64(props, "patch_id"), AssetType: getString(props, "asset_type"), AssetID: getString(props, "asset_id"),
+				ContainerID: containerID, ImageID: getString(props, "image_id"), FindingID: getInt64(props, "finding_id"), CVEID: getString(props, "cve_id"),
+				AppliedAt: appliedAt, AppliedBy: getString(props, "applied_by"), RemediationLevel: domain.RemediationLevel(getString(props, "remediation_level")),
+				RemediationFactor: getFloat64(props, "remediation_factor"), Notes: getString(props, "notes"),
+				Verification: domain.PatchVerification{Verified: getBool(props, "verified"), Conclusive: getBool(props, "verification_conclusive"), Reason: getString(props, "verification_reason"), InstalledVersion: getString(props, "installed_version"), ExpectedVersion: getString(props, "expected_version"), MatchedPackage: getString(props, "matched_package")},
+				PatchURL:     getString(props, "patch_url"), PatchDescription: getString(props, "patch_description"),
+			})
+		}
+		return applications, result.Err()
+	})
 	if err != nil {
 		return nil, err
 	}
