@@ -121,10 +121,10 @@ func main() {
 
 	// 6. Ejecutar el escaneo automático
 	fmt.Println("\nEjecutando escaneo automático por CPE/versión...")
-	if _, err := orchestrator.AutoScanAndRegisterVulnerabilities(ctx, "inst-tomcat-target", 200); err != nil {
+	if _, err := orchestrator.AutoScanAndRegisterVulnerabilities(ctx, "inst-tomcat-target", 200, domain.VulnerabilityScanOptions{}); err != nil {
 		log.Fatalf("Error durante el escaneo automático de Tomcat: %v", err)
 	}
-	if _, err := orchestrator.AutoScanAndRegisterVulnerabilities(ctx, "inst-ubuntu-target", 201); err != nil {
+	if _, err := orchestrator.AutoScanAndRegisterVulnerabilities(ctx, "inst-ubuntu-target", 201, domain.VulnerabilityScanOptions{}); err != nil {
 		log.Fatalf("Error durante el escaneo automático de Ubuntu: %v", err)
 	}
 	fmt.Println("Escaneo automático finalizado.")

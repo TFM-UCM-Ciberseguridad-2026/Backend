@@ -6,15 +6,21 @@ package domain
 // PatchQueueItem es una entrada de la cola. Lleva el activo y el software además del
 // finding para que la respuesta se pueda leer sin consultar el grafo por cada línea.
 type PatchQueueItem struct {
-	Position int `json:"position"`
+	Position  int    `json:"position"`
+	AssetType string `json:"asset_type"`
+	AssetID   string `json:"asset_id"`
 
 	FindingID int64  `json:"finding_id"`
 	CVEID     string `json:"cve_id"`
 	Status    string `json:"status"`
 
-	InstallationID  string `json:"installation_id"`
+	InstallationID  string `json:"installation_id,omitempty"`
+	ContainerID     string `json:"container_id,omitempty"`
+	ImageID         string `json:"image_id,omitempty"`
 	SoftwareName    string `json:"software_name"`
 	SoftwareVersion string `json:"software_version"`
+	SoftwareVendor  string `json:"software_vendor,omitempty"`
+	SoftwareCPE     string `json:"software_cpe,omitempty"`
 	FixedVersion    string `json:"fixed_version,omitempty"`
 
 	EndpointID  int64  `json:"endpoint_id"`
@@ -34,4 +40,56 @@ type PatchQueueItem struct {
 	// PatchAvailable indica si hay un parche registrado para el CVE. Un finding muy
 	// prioritario sin parche disponible no es accionable todavía.
 	PatchAvailable bool `json:"patch_available"`
+
+	// RemediationKind indica si la remediación es un parche oficial, una mitigación o una
+	RemediationKind string `json:"remediation_kind"`
+}
+
+// PatchQueueQuery representa los parámetros de búsqueda, filtrado avanzado, ordenación y paginación para la cola de parcheo.
+type PatchQueueQuery struct {
+	ProjectID       *int64 `json:"project_id,omitempty"`
+	Page            int    `json:"page"`
+	Limit           int    `json:"limit"`
+	Search          string `json:"search"`
+	VendorSearch    string `json:"vendor_search"`
+	HostnameSearch  string `json:"hostname_search"`
+	Environment     string `json:"environment"`      // "ALL", "PROD", "STAGING", "DEV", etc.
+	InternetExposed string `json:"internet_exposed"` // "ALL", "TRUE", "FALSE"
+	InContainer     string `json:"in_container"`     // "ALL", "TRUE", "FALSE"
+	PriorityTier    string `json:"priority_tier"`    // "ALL", "CRITICAL", "HIGH", "MEDIUM", "LOW"
+	PatchAvailable  string `json:"patch_available"`  // "ALL", "TRUE", "FALSE"
+	RemediationKind string `json:"remediation_kind"` // "ALL", "OFFICIAL_FIX", "WORKAROUND", "UNAVAILABLE"
+	SortField       string `json:"sort_field"`
+	SortDirection   string `json:"sort_direction"`
+}
+
+type PatchQueueResponse struct {
+	Queue              []PatchQueueItem `json:"queue"`
+	Total              int              `json:"total"`
+	Page               int              `json:"page"`
+	Limit              int              `json:"limit"`
+	TotalPages         int              `json:"total_pages"`
+	PriorityTierCounts map[string]int64 `json:"priority_tier_counts,omitempty"`
+}
+
+type ProjectPatchRefreshItem struct {
+	CVEID         string `json:"cve_id"`
+	Found         bool   `json:"found"`
+	PatchCount    int    `json:"patches"`
+	FixedVersions int    `json:"fixed_versions"`
+	Error         string `json:"error,omitempty"`
+}
+
+type ProjectPatchRefreshResult struct {
+	ProjectID  int64                     `json:"project_id"`
+	TotalCVEs  int                       `json:"total_cves"`
+	Offset     int                       `json:"offset"`
+	Limit      int                       `json:"limit"`
+	Processed  int                       `json:"processed"`
+	HasMore    bool                      `json:"has_more"`
+	NextOffset int                       `json:"next_offset"`
+	Refreshed  int                       `json:"refreshed"`
+	NotFound   int                       `json:"not_found"`
+	Failed     int                       `json:"failed"`
+	Results    []ProjectPatchRefreshItem `json:"results"`
 }

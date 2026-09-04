@@ -54,11 +54,6 @@ type CPEGuesserPort interface {
 	SearchBaseCPEs(ctx context.Context, tokens []string, topK int) ([]string, error)
 }
 
-
-
-
-
-
 type FindingPort interface {
 	Save(ctx context.Context, finding *domain.Finding) error
 	Update(ctx context.Context, finding *domain.Finding) error
@@ -66,13 +61,15 @@ type FindingPort interface {
 	DeleteByID(ctx context.Context, id int64) error
 
 	EnsureForInstallationAndCVE(ctx context.Context, installationID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
-	EnsureForContainerImageAndCVE(ctx context.Context, imageID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
+	EnsureForContainerImageContextAndCVE(ctx context.Context, containerID string, imageID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
+	SupersedeContainerImageFindings(ctx context.Context, containerID string, oldImageID string, changedAt time.Time) (int, error)
 
 	// ApplyRemediationByInstallationAndCVE fija factor y estado en los findings del CVE
 	// en esa instalación, y devuelve sus IDs. Con factor 0 pone también risk_score y
 	// priority_score a cero: el finding sale de las agregaciones y conservaría si no la
 	// última puntuación calculada.
 	ApplyRemediationByInstallationAndCVE(ctx context.Context, installationID, cveID string, remediationFactor float64, status string) ([]int64, error)
+	ApplyRemediationByContainerAndCVE(ctx context.Context, containerID, cveID string, findingID int64, remediationFactor float64, status string) ([]int64, error)
 	GetVulnerabilitiesByFinding(ctx context.Context, findingID any) ([]domain.Vulnerability, error)
 }
 
@@ -82,6 +79,7 @@ type RemediationPort interface {
 	// ApplyByInstallationAndCVE sincroniza estado y fecha en las remediaciones del CVE en
 	// esa instalación, y devuelve cuántas cambió. appliedAt nulo limpia la fecha.
 	ApplyByInstallationAndCVE(ctx context.Context, installationID, cveID, status string, appliedAt *time.Time) (int, error)
+	ApplyByContainerAndCVE(ctx context.Context, containerID, cveID string, findingID int64, status string, appliedAt *time.Time) (int, error)
 
 	// GetFixedVersionByInstallationAndCVE devuelve la versión corregida que dejó el
 	// enriquecimiento desde OSV, o cadena vacía si no consta.
@@ -137,6 +135,7 @@ type PatchPort interface {
 
 	// GetApplicationsByInstallation devuelve el histórico, del más reciente al más antiguo.
 	GetApplicationsByInstallation(ctx context.Context, installationID string) ([]domain.AppliedPatch, error)
+	GetApplicationsByContainer(ctx context.Context, containerID string) ([]domain.AppliedPatch, error)
 }
 
 type ProjectPort interface {
@@ -188,7 +187,7 @@ type VulnerabilityAPIscanner interface {
 	// FetchVulnerabilities obtiene una lista de vulnerabilidades desde el API externa.
 	FetchVulnerabilities(ctx context.Context, limit int, offset int) ([]domain.Vulnerability, error)
 	// FetchByCPE obtiene las vulnerabilidades asociadas a un CPE específico.
-	FetchByCPE(ctx context.Context, cpe string) ([]domain.Vulnerability, error)
+	FetchByCPE(ctx context.Context, cpe string, opts ...domain.VulnerabilityFetchOptions) (*domain.VulnerabilityFetchResult, error)
 	// FetchByDate obtiene las vulnerabilidades modificadas en un rango de fechas.
 	FetchByDate(ctx context.Context, startDate, endDate time.Time) ([]domain.Vulnerability, error)
 	// FetchByCVE obtiene el detalle completo de una vulnerabilidad específica.
@@ -228,7 +227,7 @@ type ThreatActorPort interface {
 }
 
 type InfrastructurePort interface {
-	GetGraphData(ctx context.Context) (*domain.GraphData, error)
+	GetGraphData(ctx context.Context, projectID int64) (*domain.GraphData, error)
 	GetTopAPTsByInfrastructureTTPs(ctx context.Context, limit int, projectID int64) ([]domain.APTThreatResult, error)
 	GetTTPMatrix(ctx context.Context, projectID *int64) ([]domain.TTPMatrixItem, error)
 	GetTTPStats(ctx context.Context, projectID int64) (*domain.TTPStats, error)
@@ -237,6 +236,7 @@ type InfrastructurePort interface {
 	// IsAnalysisPending comprueba si hay vulnerabilidades de red pendientes de enriquecimiento en background.
 	IsAnalysisPending(ctx context.Context, projectID int64) (bool, error)
 	ImportGraphData(ctx context.Context, data *domain.GraphData) error
+	GetPaginatedInventory(ctx context.Context, query domain.InventoryQuery) (*domain.PaginatedInventoryResponse, error)
 }
 
 // ContainerPort define las operaciones para gestionar imágenes y contenedores.
@@ -246,6 +246,8 @@ type ContainerPort interface {
 	GetAllContainerImages(ctx context.Context) ([]domain.ContainerImage, error)
 	SaveContainer(ctx context.Context, container *domain.Container) error
 	GetContainer(ctx context.Context, containerID string) (*domain.Container, error)
+	GetContainerIDsByImage(ctx context.Context, imageID string) ([]string, error)
+	GetVulnerabilitiesByContainerImage(ctx context.Context, imageID string) ([]domain.Vulnerability, error)
 	LinkVulnerabilityToImage(ctx context.Context, imageID string, cveID string) error
 	SaveIPs(ctx context.Context, containerID string, ips []domain.EndpointIP) error
 }
@@ -297,9 +299,11 @@ type RiskPort interface {
 	// y devuelve todo lo necesario para calcular el riesgo de cada finding.
 	GetFindingContextsByEndpoint(ctx context.Context, endpointID int64) ([]domain.FindingRiskContext, error)
 
-	// GetPatchQueue devuelve los findings pendientes ordenados por prioridad.
-	// projectID nulo recorre toda la infraestructura.
-	GetPatchQueue(ctx context.Context, projectID *int64, limit int) ([]domain.PatchQueueItem, error)
+	// GetPatchQueue devuelve los findings pendientes ordenados por prioridad y paginados.
+	GetPatchQueue(ctx context.Context, query domain.PatchQueueQuery) (*domain.PatchQueueResponse, error)
+
+	// GetOpenFindingCVEsByProject devuelve los CVEs de findings abiertos de un proyecto.
+	GetOpenFindingCVEsByProject(ctx context.Context, projectID int64) ([]string, error)
 
 	// GetEndpointIDsByInstallation devuelve los endpoints que alojan una instalación,
 	// directamente o vía contenedor. Inverso de GetInstallationIDsByEndpoint.
@@ -330,6 +334,10 @@ type RiskPort interface {
 
 	// GetSoftwareRiskSummariesByEndpoint devuelve un resumen de riesgo de software para todas las instalaciones asociadas a un endpoint.
 	GetSoftwareRiskSummariesByEndpoint(ctx context.Context, endpointID int64) ([]domain.SoftwareRiskSummary, error)
+	GetNativeInstallationIDsByEndpoint(ctx context.Context, endpointID string) ([]string, error)
+	GetNativeSoftwareRiskSummariesByEndpoint(ctx context.Context, endpointID string) ([]domain.SoftwareRiskSummary, error)
+	GetContainerRiskSummariesByEndpoint(ctx context.Context, endpointID string) ([]domain.ContainerRiskSummary, error)
+	UpdateEndpointRiskAndPrioritySummary(ctx context.Context, summary domain.EndpointRiskSummary) error
 
 	// UpdateEndpointRiskAndPriority actualiza el riesgo y la prioridad de un endpoint, incluyendo los drivers técnicos y de prioridad.
 	UpdateEndpointRiskAndPriority(ctx context.Context, endpointID int64, riskScore float64, riskTier string, priorityScore float64, priorityTier string, technicalDriverInstallationID string, technicalDriverSoftwareName string, technicalDriverRiskScore float64, technicalDriverCVEID string, priorityDriverInstallationID string, priorityDriverSoftwareName string, priorityDriverPriorityScore float64, priorityDriverCVEID string, riskySoftwareCount int) error
@@ -339,6 +347,7 @@ type RiskPort interface {
 
 	// GetProjectIDByEndpoint devuelve el ID del proyecto al que pertenece un endpoint.
 	GetProjectIDByEndpoint(ctx context.Context, endpointID int64) (int64, error)
+	GetEndpointIDByContainer(ctx context.Context, containerID string) (int64, error)
 
 	// GetEndpointRiskSummariesByProject devuelve un resumen de riesgo de todos los endpoints asociados a un proyecto.
 	GetEndpointRiskSummariesByProject(ctx context.Context, projectID int64) ([]domain.EndpointRiskSummary, error)
@@ -348,17 +357,24 @@ type RiskPort interface {
 
 	// GetAllProjectIDs devuelve los IDs de todos los proyectos para el recálculo diario.
 	GetAllProjectIDs(ctx context.Context) ([]int64, error)
+
+	// Métodos para agregación de riesgo y hallazgos en contenedores
+	GetContainerIDsByEndpoint(ctx context.Context, endpointID int64) ([]string, error)
+	GetInstallationIDsByContainer(ctx context.Context, containerID string) ([]string, error)
+	GetDirectFindingScoresByContainer(ctx context.Context, containerID string) ([]domain.FindingRiskSummary, error)
+	GetSoftwareRiskSummariesByContainer(ctx context.Context, containerID string) ([]domain.SoftwareRiskSummary, error)
+	UpdateContainerRiskAndPriority(ctx context.Context, summary domain.ContainerRiskSummary) error
 }
 
 // TTPMappedEvent se emite por el worker de TTPs cada vez que una CVE queda mapeada.
 // ProjectID = 0 indica origen global (sweep automático, cron, o escaneo sin contexto de proyecto).
 type TTPMappedEvent struct {
-	CVEID      string  `json:"cve_id"`
+	CVEID      string   `json:"cve_id"`
 	TTPs       []string `json:"ttps"`
-	Confidence string  `json:"confidence"`
-	Source     string  `json:"source"`
-	ProjectID  int64   `json:"project_id"` // 0 = global
-	Log        string  `json:"log"`
+	Confidence string   `json:"confidence"`
+	Source     string   `json:"source"`
+	ProjectID  int64    `json:"project_id"` // 0 = global
+	Log        string   `json:"log"`
 }
 
 // NotificationPort desacopla el worker de TTPs de cualquier detalle de transporte (WebSocket, SSE, etc.).

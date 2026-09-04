@@ -146,10 +146,11 @@ func main() {
 	// ── 4. Cola de parcheo ─────────────────────────────────────────────────
 	fmt.Println("\n[4/5] Consultando la cola de parcheo del proyecto...")
 	pid := projectID
-	cola, err := orch.GetPatchQueue(ctx, &pid, 20)
+	resp, err := orch.GetPatchQueue(ctx, domain.PatchQueueQuery{ProjectID: &pid, Page: 1, Limit: 20})
 	if err != nil {
 		log.Fatalf("cola: %v", err)
 	}
+	cola := resp.Queue
 
 	fmt.Println()
 	fmt.Println("  #  Host          Entorno   Riesgo   Crit.   Urg.   Prioridad  Tier      Parche")
@@ -210,20 +211,22 @@ func main() {
 		cola[0].AssetCriticality, cola[2].AssetCriticality)
 
 	// Sin filtro de proyecto debe devolver al menos lo mismo
-	global, err := orch.GetPatchQueue(ctx, nil, 100)
+	globalResp, err := orch.GetPatchQueue(ctx, domain.PatchQueueQuery{Page: 1, Limit: 100})
 	if err != nil {
 		log.Fatalf("cola global: %v", err)
 	}
+	global := globalResp.Queue
 	if len(global) < len(cola) {
 		log.Fatalf("ASSERT FAIL: la cola global (%d) no puede tener menos que la del proyecto (%d)", len(global), len(cola))
 	}
 	fmt.Printf("    ✓ Sin filtro devuelve toda la infraestructura (%d entradas)\n", len(global))
 
 	// El límite se respeta
-	limitada, err := orch.GetPatchQueue(ctx, &pid, 2)
+	limitadaResp, err := orch.GetPatchQueue(ctx, domain.PatchQueueQuery{ProjectID: &pid, Page: 1, Limit: 2})
 	if err != nil {
 		log.Fatalf("cola limitada: %v", err)
 	}
+	limitada := limitadaResp.Queue
 	if len(limitada) != 2 {
 		log.Fatalf("ASSERT FAIL: limit=2 devolvió %d entradas", len(limitada))
 	}
@@ -241,10 +244,11 @@ func main() {
 		log.Fatalf("declaración: %v", err)
 	}
 
-	trasParche, err := orch.GetPatchQueue(ctx, &pid, 20)
+	trasParcheResp, err := orch.GetPatchQueue(ctx, domain.PatchQueueQuery{ProjectID: &pid, Page: 1, Limit: 20})
 	if err != nil {
 		log.Fatalf("cola tras parche: %v", err)
 	}
+	trasParche := trasParcheResp.Queue
 	if len(trasParche) != 2 {
 		log.Fatalf("ASSERT FAIL: tras parchear db-prod la cola debería tener 2, tiene %d", len(trasParche))
 	}

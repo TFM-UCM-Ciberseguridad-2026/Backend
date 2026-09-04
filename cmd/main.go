@@ -58,6 +58,7 @@ func main() {
 
 	// 4. Inicialización del Servicio/Orquestador (Core)
 	nistAPIAdapter := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey, cfg.NVD.TimeoutSeconds)
+	nistAPIAdapter.SetCacheTTL(time.Duration(cfg.NVD.CacheTTLHours) * time.Hour)
 	epssAdapter := provider.NewEPSSAdapter()
 	kevAdapter := provider.NewKEVAdapter()
 	scoutAdapter := provider.NewScoutAdapter()
@@ -91,8 +92,6 @@ func main() {
 		WithTTPMapper(ollamaClient).
 		WithCPEResolution(nistAPIAdapter).
 		WithCPEGuesser(cpeGuesserAdapter)
-
-
 
 	// Hub WebSocket para notificaciones en tiempo real del worker de TTPs
 	wsHub := handler.NewWSHub()
@@ -142,7 +141,7 @@ func main() {
 
 		if count == 0 || taCount == 0 {
 			log.Printf("[MITRE Sync] Catálogo incompleto (TTPs: %d, Threat Actors: %d). Iniciando descarga e importación automática...", count, taCount)
-			
+
 			var num int
 			for attempt := 1; attempt <= 3; attempt++ {
 				num, err = orchestrator.SyncATTACKCatalog(initCtx)
@@ -185,7 +184,7 @@ func main() {
 
 		if capecCount == 0 || mapsToTtpCount == 0 {
 			log.Printf("[CAPEC Sync] Catálogo vacío o sin relaciones TTP (patrones: %d, relaciones TTP: %d). Iniciando descarga e importación...", capecCount, mapsToTtpCount)
-			
+
 			var num int
 			for attempt := 1; attempt <= 3; attempt++ {
 				num, err = orchestrator.SyncCAPECCatalog(initCtx)
@@ -230,7 +229,7 @@ func main() {
 			log.Println("Sincronización diaria NIST completada con éxito.")
 		}
 	})
-	
+
 	// Añadimos el escaneo de contenedores diario
 	s.Every(1).Day().At("03:00").Do(func() {
 		fmt.Println("Ejecutando tarea diaria: Escaneo de imágenes con Docker Scout...")
@@ -242,7 +241,7 @@ func main() {
 			log.Println("Escaneo diario Docker Scout completado con éxito.")
 		}
 	})
-	
+
 	s.StartAsync()
 
 	// 6. Levantar Servidor Web (con Graceful Shutdown)

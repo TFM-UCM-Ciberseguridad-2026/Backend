@@ -208,34 +208,34 @@ func main() {
 	}
 	fmt.Println("    ✓ El endpoint decomisado sigue quedando fuera del cálculo")
 
-	// La instalación del contenedor debe aparecer entre las del endpoint.
-	instalaciones, err := riskRepo.GetInstallationIDsByEndpoint(ctx, epContID)
+	// La instalación interna debe aparecer en el contenedor, no en la consulta nativa del endpoint.
+	instalaciones, err := riskRepo.GetInstallationIDsByContainer(ctx, containerD)
 	if err != nil {
-		log.Fatalf("GetInstallationIDsByEndpoint: %v", err)
+		log.Fatalf("GetInstallationIDsByContainer: %v", err)
 	}
 	if !contiene(instalaciones, instCont) {
-		log.Fatalf("ASSERT FAIL: %s no aparece entre las instalaciones del endpoint: %v", instCont, instalaciones)
+		log.Fatalf("ASSERT FAIL: %s no aparece entre las instalaciones del contenedor: %v", instCont, instalaciones)
 	}
-	fmt.Println("    ✓ GetInstallationIDsByEndpoint incluye la instalación del contenedor")
+	fmt.Println("    ✓ GetInstallationIDsByContainer incluye la instalación interna")
 
-	// Y en el resumen de software del endpoint.
-	resumen, err := riskRepo.GetSoftwareRiskSummariesByEndpoint(ctx, epContID)
+	// La consulta nativa del endpoint no debe incluir instalaciones internas.
+	nativas, err := riskRepo.GetNativeInstallationIDsByEndpoint(ctx, fmt.Sprint(epContID))
 	if err != nil {
-		log.Fatalf("GetSoftwareRiskSummariesByEndpoint: %v", err)
+		log.Fatalf("GetNativeInstallationIDsByEndpoint: %v", err)
 	}
-	encontrado := false
-	for _, s := range resumen {
-		if s.InstallationID == instCont {
-			encontrado = true
-			if s.RiskScore == 0 {
-				log.Fatalf("ASSERT FAIL: el resumen devuelve riesgo 0 para %s", instCont)
-			}
-		}
+	if contiene(nativas, instCont) {
+		log.Fatalf("ASSERT FAIL: %s aparece como instalación nativa del endpoint", instCont)
 	}
-	if !encontrado {
-		log.Fatalf("ASSERT FAIL: %s no aparece en el resumen de software del endpoint", instCont)
+	fmt.Println("    ✓ Las instalaciones internas no se mezclan con las nativas del endpoint")
+
+	containerSummaries, err := riskRepo.GetContainerRiskSummariesByEndpoint(ctx, fmt.Sprint(epContID))
+	if err != nil {
+		log.Fatalf("GetContainerRiskSummariesByEndpoint: %v", err)
 	}
-	fmt.Println("    ✓ GetSoftwareRiskSummariesByEndpoint incluye la instalación del contenedor")
+	if len(containerSummaries) != 1 || containerSummaries[0].RiskScore == 0 {
+		log.Fatalf("ASSERT FAIL: el resumen del contenedor no conserva el riesgo: %+v", containerSummaries)
+	}
+	fmt.Println("    ✓ El resumen del contenedor conserva el riesgo agregado")
 
 	// Y los findings de esa instalación se leen sin pasar por el endpoint.
 	scores, err := riskRepo.GetFindingScoresByInstallation(ctx, instCont)

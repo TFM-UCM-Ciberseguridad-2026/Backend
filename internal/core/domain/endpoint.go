@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 /*
 Este archivo define las entidades de dominio para Endpoints.
@@ -8,8 +11,7 @@ Este archivo define las entidades de dominio para Endpoints.
 Propósito arquitectónico y teórico:
 1. Ubicación en Arquitectura Hexagonal: Se localiza en `internal/core/domain`, definiendo las estructuras de datos esenciales para el modelado de la red y equipos sin acoplamiento tecnológico.
 2. Inventario de Infraestructura: Representa lógicamente los activos auditados en la red (endpoints como servidores, workstations o contenedores).
-3. Relacion/*
-es de Red: Define la pertenencia y ubicación de los endpoints en subredes específicas (direccionamiento CIDR, VLANs, Gateways).
+3. Relaciones de Red: Define la pertenencia y ubicación de los endpoints en subredes específicas (direccionamiento CIDR, VLANs, Gateways).
 4. Contextualización de la Superficie de Ataque: Proporciona el mapeo lógico de la infraestructura de red para evaluar el impacto lateral y la severidad contextual de las vulnerabilidades descubiertas en el software instalado en cada host.
 */
 
@@ -31,6 +33,26 @@ func IsValidEndpointType(t string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// NormalizeEndpointType convierte cadenas libres/legacy (como 'Linux', 'Windows') a un tipo de equipo válido.
+func NormalizeEndpointType(t string) string {
+	if IsValidEndpointType(t) {
+		return t
+	}
+	lower := strings.ToLower(strings.TrimSpace(t))
+	switch {
+	case strings.Contains(lower, "workstation") || strings.Contains(lower, "puesto") || strings.Contains(lower, "pc") || strings.Contains(lower, "laptop"):
+		return EndpointTypeWorkstation
+	case strings.Contains(lower, "domain") || strings.Contains(lower, "dc") || strings.Contains(lower, "ad"):
+		return EndpointTypeDomainController
+	case strings.Contains(lower, "firewall") || strings.Contains(lower, "fw"):
+		return EndpointTypeFirewall
+	case strings.Contains(lower, "router") || strings.Contains(lower, "switch"):
+		return EndpointTypeRouter
+	default:
+		return EndpointTypeServer
 	}
 }
 

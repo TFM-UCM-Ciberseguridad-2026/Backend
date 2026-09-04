@@ -26,7 +26,6 @@ type NVDProductItem struct {
 	URL          string    `json:"url,omitempty"`
 }
 
-
 // CPESuggestion representa una opción candidata de CPE oficial devuelta para autocompletar o sugerir al usuario.
 type CPESuggestion struct {
 	CPE                      string `json:"cpe"`
@@ -38,7 +37,6 @@ type CPESuggestion struct {
 	URL                      string `json:"url,omitempty"`
 }
 
-
 // CPEMatchResult es el resultado producido por la canalización de resolución de CPEs en el dominio.
 type CPEMatchResult struct {
 	CPE              string          `json:"cpe"`
@@ -48,7 +46,6 @@ type CPEMatchResult struct {
 	SuggestedCPE     string          `json:"suggested_cpe,omitempty"`
 	Suggestions      []CPESuggestion `json:"suggestions,omitempty"`
 }
-
 
 /*
 MapTypeToCPEPart se encarga de normalizar el tipo de activo a los formatos válidos de CPE v2.3:
@@ -84,6 +81,22 @@ func GenerateCPE23(part, vendor, product, version string) string {
 	cleanVendor := cleanCPEToken(vendor)
 	cleanProduct := cleanCPEToken(product)
 	cleanVersion := cleanCPEToken(version)
+
+	// Normalización canónica de productos de Microsoft Windows para evitar colisiones con CPEs heredados ("windows")
+	if cpePart == "o" && (cleanVendor == "microsoft" || cleanVendor == "windows" || cleanVendor == "*") {
+		if cleanVendor == "windows" || cleanVendor == "*" {
+			cleanVendor = "microsoft"
+		}
+		if cleanProduct == "windows" || cleanProduct == "win" {
+			if strings.HasPrefix(cleanVersion, "10.0.") || strings.HasPrefix(cleanVersion, "10.") || strings.Contains(cleanVersion, "10_0") {
+				cleanProduct = "windows_10"
+			} else if strings.HasPrefix(cleanVersion, "11.0.") || strings.HasPrefix(cleanVersion, "11.") {
+				cleanProduct = "windows_11"
+			} else if strings.HasPrefix(cleanVersion, "6.1.") {
+				cleanProduct = "windows_7"
+			}
+		}
+	}
 
 	return fmt.Sprintf("cpe:2.3:%s:%s:%s:%s:*:*:*:*:*:*:*", cpePart, cleanVendor, cleanProduct, cleanVersion)
 }
@@ -262,6 +275,3 @@ func SanitizeAndTokenizeInput(rawInput string) ([]string, string) {
 
 	return tokens, extractedVersion
 }
-
-
-

@@ -95,7 +95,6 @@ func NewRouter(h *OrchestratorHandler, hub *WSHub, govHandler *GovernanceHandler
 	   Sin query param (o project_id=0): suscripción global (recibe todos los eventos). */
 	mux.HandleFunc("GET /api/ws/ttps", hub.ServeWS)
 
-
 	/* POST /api/installations/{id}/scan-vulns: Automatiza el escaneo y registro de vulnerabilidades por CPE/versión contra la API del NIST. */
 	mux.HandleFunc("POST /api/installations/{id}/scan-vulns", h.ScanSoftwareVulnerabilities)
 
@@ -125,6 +124,8 @@ func NewRouter(h *OrchestratorHandler, hub *WSHub, govHandler *GovernanceHandler
 
 	/* GET /api/installations/{id}/applied-patches: Histórico de parches aplicados sobre la instalación. */
 	mux.HandleFunc("GET /api/installations/{id}/applied-patches", h.GetAppliedPatchHistory)
+	mux.HandleFunc("POST /api/containers/{id}/applied-patches", h.DeclareContainerPatchApplied)
+	mux.HandleFunc("GET /api/containers/{id}/applied-patches", h.GetContainerAppliedPatchHistory)
 
 	/* GET /api/patch-queue: Cola de parcheo ordenada por prioridad, opcionalmente filtrada por proyecto. */
 	mux.HandleFunc("GET /api/patch-queue", h.GetPatchQueue)
@@ -142,20 +143,24 @@ func NewRouter(h *OrchestratorHandler, hub *WSHub, govHandler *GovernanceHandler
 	mux.HandleFunc("DELETE /api/software/{id}", h.DeleteSoftware)
 	mux.HandleFunc("PUT /api/installations/{id}", h.UpdateSoftwareInstallation)
 	mux.HandleFunc("DELETE /api/installations/{id}", h.DeleteSoftwareInstallation)
-	
+
 	// Contenedores CRUD
 	mux.HandleFunc("POST /api/endpoints/{id}/containers", h.AddContainerToEndpoint)
 	mux.HandleFunc("PUT /api/containers/{id}", h.UpdateContainer)
 	mux.HandleFunc("DELETE /api/containers/{id}", h.DeleteContainer)
 	mux.HandleFunc("POST /api/containers/{id}/installations", h.RegisterContainerSoftwareInstallation)
 	mux.HandleFunc("POST /api/containers/images/{id}/scan-vulns", h.ScanContainerImageVulnerabilities)
-	
+
 	mux.HandleFunc("DELETE /api/nodes/{id}", h.DeleteNode)
+
+	/* POST /api/projects/{id}/patches/refresh: Refresca patches y fixed_versions para todos los CVEs abiertos del proyecto. */
+	mux.HandleFunc("POST /api/projects/{id}/patches/refresh", h.RefreshProjectPatches)
 
 	// Búsqueda y Autocompletado de CPEs para la UI
 	mux.HandleFunc("GET /api/cpe/search", h.SearchCPE)
 
+	/* GET /api/inventory: Devuelve la lista paginada de activos de inventario según filtros y ordenación. */
+	mux.HandleFunc("GET /api/inventory", h.GetInventory)
+
 	return mux
 }
-
-

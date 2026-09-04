@@ -179,6 +179,11 @@ func parseSarif(sarif *sarifReport) []domain.Vulnerability {
 				continue
 			}
 
+			cveID := strings.TrimSpace(rule.ID)
+			if cveID == "" || strings.EqualFold(cveID, "UNSPECIFIED") || strings.EqualFold(cveID, "UNKNOWN") || strings.EqualFold(cveID, "N/A") {
+				continue
+			}
+
 			// Extraer CVSS vector y BaseScore con prioridad decreciente de fuentes:
 			// 1. cvssV3_vector en properties (presente en npm packages de node:10, etc.)
 			// 2. CVSS Vector en help.text (presente en apk/deb packages)
@@ -214,7 +219,7 @@ func parseSarif(sarif *sarifReport) []domain.Vulnerability {
 			}
 
 			vulns = append(vulns, domain.Vulnerability{
-				CVEID:       rule.ID,
+				CVEID:       cveID,
 				Description: rule.ShortDescription.Text,
 				CVSSVector:  cvssVector,
 				BaseScore:   baseScore,

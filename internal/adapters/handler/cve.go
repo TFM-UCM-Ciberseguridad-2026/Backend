@@ -8,11 +8,8 @@ Emite logs estructurados en JSON (sin campo operador) con diffs exactos y justif
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -20,7 +17,6 @@ import (
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/service"
 )
-
 
 type OrchestratorHandler struct {
 	orchestrator *service.Orchestrator
@@ -30,72 +26,7 @@ func NewOrchestratorHandler(o *service.Orchestrator) *OrchestratorHandler {
 	return &OrchestratorHandler{orchestrator: o}
 }
 
-
 // ESTRUCTURAS Y EMISOR DE AUDITORÍA (STDOUT + FICHERO PERSISTENTE)
-
-var auditWriter io.Writer = os.Stdout
-
-func init() {
-	logPath := os.Getenv("AUDIT_LOG_PATH")
-	if logPath == "" {
-		logPath = "logs/audit.log"
-	}
-	dir := filepath.Dir(logPath)
-	if dir != "" && dir != "." {
-		_ = os.MkdirAll(dir, 0755)
-	}
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err == nil {
-		auditWriter = io.MultiWriter(os.Stdout, f)
-	} else {
-		auditWriter = os.Stdout
-	}
-}
-
-type auditChange struct {
-	Antes   any `json:"antes,omitempty"`
-	Despues any `json:"despues,omitempty"`
-}
-
-type auditAction struct {
-	Tipo         string `json:"tipo"`          // CREACION, MODIFICACION, ELIMINACION
-	TipoActivo   string `json:"tipo_activo"`   // Endpoint, Network, Container, etc.
-	IDActivo     string `json:"id_activo"`
-	NombreActivo string `json:"nombre_activo,omitempty"`
-	ProyectoID   string `json:"proyecto_id,omitempty"`
-}
-
-type auditLogEntry struct {
-	FechaHora         string                 `json:"fecha_hora"`
-	Nivel             string                 `json:"nivel"` // "AUDIT"
-	Accion            auditAction            `json:"accion"`
-	Justificacion     string                 `json:"justificacion,omitempty"`
-	CambiosRealizados map[string]auditChange `json:"cambios_realizados,omitempty"`
-	Estado            string                 `json:"estado"` // SUCCESS / ERROR
-	DetallesError     string                 `json:"detalles_error,omitempty"`
-}
-
-func emitAuditLog(tipoAccion, tipoActivo, idActivo, nombreActivo, proyectoID, justificacion string, cambios map[string]auditChange, estado, errStr string) {
-	entry := auditLogEntry{
-		FechaHora: time.Now().UTC().Format(time.RFC3339Nano),
-		Nivel:     "AUDIT",
-		Accion: auditAction{
-			Tipo:         tipoAccion,
-			TipoActivo:   tipoActivo,
-			IDActivo:     idActivo,
-			NombreActivo: nombreActivo,
-			ProyectoID:   proyectoID,
-		},
-		Justificacion:     justificacion,
-		CambiosRealizados: cambios,
-		Estado:            estado,
-		DetallesError:     errStr,
-	}
-
-	if b, err := json.Marshal(entry); err == nil {
-		fmt.Fprintln(auditWriter, string(b)) // Escribe simultáneamente en consola y fichero
-	}
-}
 
 func extractJustification(r *http.Request) string {
 	if q := r.URL.Query().Get("justification"); strings.TrimSpace(q) != "" {
@@ -220,14 +151,7 @@ func (h *OrchestratorHandler) AddEndpointToProject(w http.ResponseWriter, r *htt
 	}
 
 	endpoint := payload.Endpoint
-
-	// El tipo se valida en el borde de la API porque de él depende la categoría del activo y,
-	// con ella, el SLA que se le exige. Aceptar un tipo libre dejaba activos sin categoría,
-	// fuera de toda medición de cumplimiento sin que nadie se enterase.
-	if !domain.IsValidEndpointType(endpoint.Type) {
-		sendError(w, "Tipo de endpoint inválido: usa 'Server', 'Workstation', 'Domain Controller', 'Firewall' o 'Router'", http.StatusBadRequest)
-		return
-	}
+	endpoint.Type = domain.NormalizeEndpointType(endpoint.Type)
 
 	if err := h.orchestrator.AddEndpointToProject(r.Context(), projectID, &endpoint); err != nil {
 		emitAuditLog("CREACION", "Endpoint", fmt.Sprint(endpoint.EndpointID), endpoint.Hostname, idStr, payload.Justification, nil, "ERROR", err.Error())
@@ -361,16 +285,33 @@ func (h *OrchestratorHandler) ScanContainerImageVulnerabilities(w http.ResponseW
 		imageName = imageID
 	}
 
-	if err := h.orchestrator.ScanAndSaveContainerImage(r.Context(), imageName, imageID); err != nil {
+	forceRefresh := strings.EqualFold(r.URL.Query().Get("force_refresh"), "true")
+
+	result, err := h.orchestrator.ScanAndSaveContainerImage(
+		r.Context(),
+		imageName,
+		imageID,
+		domain.VulnerabilityScanOptions{
+			ForceRefresh: forceRefresh,
+		},
+	)
+	if err != nil {
 		fmt.Printf("[ScanContainerImage] Error escaneando %s: %v\n", imageName, err)
+		if result != nil {
+			result.Partial = true
+			if result.Error == "" {
+				result.Error = err.Error()
+			}
+
+			sendJSON(w, result, http.StatusMultiStatus)
+			return
+		}
+
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	sendJSON(w, map[string]string{
-		"status":  "success",
-		"message": fmt.Sprintf("Escaneo de '%s' completado.", imageName),
-	}, http.StatusOK)
+	sendJSON(w, result, http.StatusOK)
 }
 
 // POST /api/containers/{id}/installations
@@ -479,7 +420,14 @@ func (h *OrchestratorHandler) GetFindingVulnerabilities(w http.ResponseWriter, r
 
 // GET /api/infrastructure
 func (h *OrchestratorHandler) GetInfrastructure(w http.ResponseWriter, r *http.Request) {
-	graph, err := h.orchestrator.GetInfrastructure(r.Context())
+	projectIDStr := r.URL.Query().Get("project_id")
+	var projectID int64
+	if projectIDStr != "" {
+		if id, err := strconv.ParseInt(projectIDStr, 10, 64); err == nil {
+			projectID = id
+		}
+	}
+	graph, err := h.orchestrator.GetInfrastructure(r.Context(), projectID)
 	if err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -541,7 +489,6 @@ func (h *OrchestratorHandler) GetExploitationPaths(w http.ResponseWriter, r *htt
 		projectID, err = strconv.ParseInt(projectIDStr, 10, 64)
 		if err != nil {
 			sendError(w, "Invalid project_id", http.StatusBadRequest)
-			return
 		}
 	}
 	paths, err := h.orchestrator.GenerateExploitationPaths(r.Context(), projectID)
@@ -604,19 +551,27 @@ func (h *OrchestratorHandler) ScanSoftwareVulnerabilities(w http.ResponseWriter,
 		return
 	}
 
-	limit := 100
+	limit := 0
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		parsedLimit, err := strconv.Atoi(limitStr)
-		if err != nil || parsedLimit <= 0 {
+		if err != nil || parsedLimit < 0 {
 			sendError(w, "Invalid limit", http.StatusBadRequest)
 			return
 		}
-		if parsedLimit < limit {
-			limit = parsedLimit
-		}
+		limit = parsedLimit
 	}
 
-	result, err := h.orchestrator.AutoScanAndRegisterVulnerabilities(r.Context(), instID, swID, limit)
+	forceRefresh := strings.EqualFold(r.URL.Query().Get("force_refresh"), "true")
+
+	result, err := h.orchestrator.AutoScanAndRegisterVulnerabilities(
+		r.Context(),
+		instID,
+		swID,
+		domain.VulnerabilityScanOptions{
+			Limit:        limit,
+			ForceRefresh: forceRefresh,
+		},
+	)
 	if err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -789,11 +744,59 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 		appliedAt, req.AppliedBy, req.Notes,
 	)
 	if err != nil {
+		emitAuditLog(
+			"CREACION",
+			"AppliedPatch",
+			fmt.Sprintf("%s:%s:%d", installationID, req.CVEID, req.PatchID),
+			req.CVEID,
+			"",
+			req.Notes,
+			nil,
+			"ERROR",
+			err.Error(),
+		)
 		sendError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	emitAuditLog("CREACION", "AppliedPatch", fmt.Sprint(req.PatchID), req.CVEID, "", req.Notes, nil, "SUCCESS", "")
+	cambios := map[string]auditChange{
+		"cve_id": {
+			Antes:   nil,
+			Despues: req.CVEID,
+		},
+		"installation_id": {
+			Antes:   nil,
+			Despues: installationID,
+		},
+		"patch_id": {
+			Antes:   nil,
+			Despues: req.PatchID,
+		},
+		"remediation_level": {
+			Antes:   nil,
+			Despues: req.RemediationLevel,
+		},
+		"applied_by": {
+			Antes:   nil,
+			Despues: req.AppliedBy,
+		},
+		"affected_findings": {
+			Antes:   nil,
+			Despues: affected,
+		},
+	}
+
+	emitAuditLog(
+		"CREACION",
+		"AppliedPatch",
+		fmt.Sprintf("%s:%s:%d", installationID, req.CVEID, req.PatchID),
+		req.CVEID,
+		"",
+		req.Notes,
+		cambios,
+		"SUCCESS",
+		"",
+	)
 	sendJSON(w, map[string]any{
 		"status":            "parche declarado como aplicado",
 		"application":       application,
@@ -801,10 +804,63 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 	}, http.StatusCreated)
 }
 
-// GET /api/patch-queue
+// POST /api/containers/{id}/applied-patches
+func (h *OrchestratorHandler) DeclareContainerPatchApplied(w http.ResponseWriter, r *http.Request) {
+	containerID := r.PathValue("id")
+	var req struct {
+		CVEID            string     `json:"cve_id"`
+		PatchID          int64      `json:"patch_id"`
+		FindingID        int64      `json:"finding_id"`
+		RemediationLevel string     `json:"remediation_level"`
+		AppliedAt        *time.Time `json:"applied_at"`
+		AppliedBy        string     `json:"applied_by"`
+		Notes            string     `json:"notes"`
+	}
+	if containerID == "" {
+		sendError(w, "Invalid container ID", http.StatusBadRequest)
+		return
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendError(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	appliedAt := time.Time{}
+	if req.AppliedAt != nil {
+		appliedAt = *req.AppliedAt
+	}
+	level := domain.RemediationLevel(req.RemediationLevel)
+	application, affected, err := h.orchestrator.DeclarePatchAppliedToContainer(r.Context(), containerID, req.CVEID, req.FindingID, req.PatchID, level, appliedAt, req.AppliedBy, req.Notes)
+	auditID := fmt.Sprintf("%s:%s:%d", containerID, req.CVEID, req.FindingID)
+	changes := map[string]auditChange{
+		"asset_type": {Antes: nil, Despues: "CONTAINER"}, "asset_id": {Antes: nil, Despues: containerID},
+		"container_id": {Antes: nil, Despues: containerID}, "image_id": {Antes: nil, Despues: applicationImageID(application)},
+		"finding_id": {Antes: nil, Despues: req.FindingID}, "cve_id": {Antes: nil, Despues: req.CVEID},
+		"patch_id": {Antes: nil, Despues: req.PatchID}, "remediation_level": {Antes: nil, Despues: req.RemediationLevel},
+		"applied_by": {Antes: nil, Despues: req.AppliedBy}, "affected_findings": {Antes: nil, Despues: affected},
+	}
+	if err != nil {
+		emitAuditLog("CREACION", "AppliedPatch", auditID, req.CVEID, "", req.Notes, changes, "ERROR", err.Error())
+		sendError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	emitAuditLog("CREACION", "AppliedPatch", auditID, req.CVEID, "", req.Notes, changes, "SUCCESS", "")
+	sendJSON(w, map[string]any{"status": "parche declarado como aplicado", "application": application, "affected_findings": affected}, http.StatusCreated)
+}
+
+func applicationImageID(application *domain.AppliedPatch) string {
+	if application == nil {
+		return ""
+	}
+	return application.ImageID
+}
+
+// GET /api/patch-queue?project_id={id}&page={p}&limit={n}&search={s}&vendor_search={v}&...
+// Cola de parcheo: findings pendientes ordenados por prioridad/riesgo con filtrado avanzado y paginado.
 func (h *OrchestratorHandler) GetPatchQueue(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
 	var projectID *int64
-	if raw := r.URL.Query().Get("project_id"); raw != "" {
+	if raw := q.Get("project_id"); raw != "" {
 		parsed, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
 			sendError(w, "Invalid project_id", http.StatusBadRequest)
@@ -813,26 +869,44 @@ func (h *OrchestratorHandler) GetPatchQueue(w http.ResponseWriter, r *http.Reque
 		projectID = &parsed
 	}
 
-	limit := 0
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed <= 0 {
-			sendError(w, "Invalid limit", http.StatusBadRequest)
-			return
+	page := 1
+	if raw := q.Get("page"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			page = parsed
 		}
-		limit = parsed
 	}
 
-	queue, err := h.orchestrator.GetPatchQueue(r.Context(), projectID, limit)
+	limit := 20
+	if raw := q.Get("limit"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	query := domain.PatchQueueQuery{
+		ProjectID:       projectID,
+		Page:            page,
+		Limit:           limit,
+		Search:          strings.TrimSpace(q.Get("search")),
+		VendorSearch:    strings.TrimSpace(q.Get("vendor_search")),
+		HostnameSearch:  strings.TrimSpace(q.Get("hostname_search")),
+		Environment:     strings.TrimSpace(q.Get("environment")),
+		InternetExposed: strings.TrimSpace(q.Get("internet_exposed")),
+		InContainer:     strings.TrimSpace(q.Get("in_container")),
+		PriorityTier:    strings.TrimSpace(q.Get("priority_tier")),
+		PatchAvailable:  strings.TrimSpace(q.Get("patch_available")),
+		RemediationKind: strings.TrimSpace(q.Get("remediation_kind")),
+		SortField:       strings.TrimSpace(q.Get("sort_field")),
+		SortDirection:   strings.TrimSpace(q.Get("sort_direction")),
+	}
+
+	res, err := h.orchestrator.GetPatchQueue(r.Context(), query)
 	if err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	sendJSON(w, map[string]any{
-		"count": len(queue),
-		"queue": queue,
-	}, http.StatusOK)
+	sendJSON(w, res, http.StatusOK)
 }
 
 // GET /api/installations/{id}/applied-patches
@@ -854,6 +928,21 @@ func (h *OrchestratorHandler) GetAppliedPatchHistory(w http.ResponseWriter, r *h
 		"count":           len(history),
 		"applied_patches": history,
 	}, http.StatusOK)
+}
+
+// GET /api/containers/{id}/applied-patches
+func (h *OrchestratorHandler) GetContainerAppliedPatchHistory(w http.ResponseWriter, r *http.Request) {
+	containerID := r.PathValue("id")
+	if containerID == "" {
+		sendError(w, "Invalid container ID", http.StatusBadRequest)
+		return
+	}
+	history, err := h.orchestrator.GetAppliedPatchHistoryByContainer(r.Context(), containerID)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sendJSON(w, map[string]any{"container_id": containerID, "count": len(history), "applied_patches": history}, http.StatusOK)
 }
 
 type createNetworkRequest struct {
@@ -943,17 +1032,11 @@ func (h *OrchestratorHandler) UpdateEndpoint(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Misma validación que en el alta: la edición es la vía para reclasificar un activo mal
-	// dado de alta, así que es justo aquí donde no puede colarse un tipo inventado.
-	if !domain.IsValidEndpointType(req.Endpoint.Type) {
-		sendError(w, "Tipo de endpoint inválido: usa 'Server', 'Workstation', 'Domain Controller', 'Firewall' o 'Router'", http.StatusBadRequest)
-		return
-	}
-
 	oldEndpoint, _ := h.orchestrator.GetEndpointByID(r.Context(), endpointID)
 
 	endpoint := req.Endpoint
 	endpoint.EndpointID = endpointID
+	endpoint.Type = domain.NormalizeEndpointType(endpoint.Type)
 
 	if err := h.orchestrator.UpdateEndpoint(r.Context(), &endpoint); err != nil {
 		emitAuditLog("MODIFICACION", "Endpoint", idStr, endpoint.Hostname, "", justification, nil, "ERROR", err.Error())
@@ -1522,7 +1605,6 @@ func (h *OrchestratorHandler) MapTTPsManually(w http.ResponseWriter, r *http.Req
 	}, http.StatusOK)
 }
 
-
 // POST /api/endpoints/{id}/containers
 func (h *OrchestratorHandler) AddContainerToEndpoint(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
@@ -1623,6 +1705,106 @@ func (h *OrchestratorHandler) DeleteContainer(w http.ResponseWriter, r *http.Req
 	h.DeleteNode(w, r)
 }
 
+// POST /api/projects/{id}/patches/refresh
+func (h *OrchestratorHandler) RefreshProjectPatches(w http.ResponseWriter, r *http.Request) {
+	rawProjectID := r.PathValue("id")
+	projectID, err := strconv.ParseInt(rawProjectID, 10, 64)
+	if err != nil || projectID <= 0 {
+		sendError(w, "Invalid project ID", http.StatusBadRequest)
+		return
+	}
+
+	limit := 20
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			sendError(w, "Invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+
+	offset := 0
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			sendError(w, "Invalid offset", http.StatusBadRequest)
+			return
+		}
+		offset = parsed
+	}
+
+	result, err := h.orchestrator.RefreshProjectPatches(r.Context(), projectID, limit, offset)
+	if err != nil {
+		emitAuditLog(
+			"MODIFICACION",
+			"ProjectPatchRefresh",
+			fmt.Sprint(projectID),
+			"RefreshProjectPatches",
+			fmt.Sprint(projectID),
+			"Refresh patches/fixed_versions para CVEs abiertos del proyecto",
+			nil,
+			"ERROR",
+			err.Error(),
+		)
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	cambios := map[string]auditChange{
+		"total_cves": {
+			Antes:   nil,
+			Despues: result.TotalCVEs,
+		},
+		"offset": {
+			Antes:   nil,
+			Despues: result.Offset,
+		},
+		"limit": {
+			Antes:   nil,
+			Despues: result.Limit,
+		},
+		"processed": {
+			Antes:   nil,
+			Despues: result.Processed,
+		},
+		"has_more": {
+			Antes:   nil,
+			Despues: result.HasMore,
+		},
+		"next_offset": {
+			Antes:   nil,
+			Despues: result.NextOffset,
+		},
+		"refreshed": {
+			Antes:   nil,
+			Despues: result.Refreshed,
+		},
+		"not_found": {
+			Antes:   nil,
+			Despues: result.NotFound,
+		},
+		"failed": {
+			Antes:   nil,
+			Despues: result.Failed,
+		},
+	}
+
+	emitAuditLog(
+		"MODIFICACION",
+		"ProjectPatchRefresh",
+		fmt.Sprint(projectID),
+		"RefreshProjectPatches",
+		fmt.Sprint(projectID),
+		"Refresh patches/fixed_versions para CVEs abiertos del proyecto",
+		cambios,
+		"SUCCESS",
+		"",
+	)
+
+	sendJSON(w, result, http.StatusOK)
+}
+
 func (h *OrchestratorHandler) GetTTPMatrix(w http.ResponseWriter, r *http.Request) {
 	var projectID *int64
 	projectIDStr := r.URL.Query().Get("project_id")
@@ -1672,9 +1854,6 @@ func (h *OrchestratorHandler) SearchCPE(w http.ResponseWriter, r *http.Request) 
 
 	sendJSON(w, items, http.StatusOK)
 }
-
-
-
 // GetTTPStats devuelve métricas agregadas de TTPs para el dashboard (KPIs, top-10, distribución).
 func (h *OrchestratorHandler) GetTTPStats(w http.ResponseWriter, r *http.Request) {
 	var projectID int64
@@ -1696,4 +1875,3 @@ func (h *OrchestratorHandler) GetTTPStats(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 	json.NewEncoder(w).Encode(stats)
 }
-

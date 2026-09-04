@@ -27,14 +27,37 @@ func (r *containerRepo) SaveContainerImage(ctx context.Context, image *domain.Co
 		SET i.name = $name,
 		    i.tag = $tag,
 		    i.digest = $digest,
-		    i.risk_score = $risk_score
+		    i.risk_score = $risk_score,
+		    i.vuln_scan_started_at = coalesce($vuln_scan_started_at, i.vuln_scan_started_at),
+		    i.vuln_scan_completed_at = coalesce($vuln_scan_completed_at, i.vuln_scan_completed_at),
+		    i.vuln_scan_cache_hit = coalesce($vuln_scan_cache_hit, i.vuln_scan_cache_hit),
+		    i.vuln_scan_total_available = coalesce($vuln_scan_total_available, i.vuln_scan_total_available),
+		    i.vuln_scan_processed = coalesce($vuln_scan_processed, i.vuln_scan_processed),
+		    i.vuln_scan_pages_fetched = coalesce($vuln_scan_pages_fetched, i.vuln_scan_pages_fetched)
+		WITH i
+		OPTIONAL MATCH (ci:ContainerImage) WHERE ci.image_id = $id OR ci.name = $id
+		SET ci.tag = $tag,
+		    ci.digest = $digest,
+		    ci.risk_score = $risk_score,
+		    ci.vuln_scan_started_at = coalesce($vuln_scan_started_at, ci.vuln_scan_started_at),
+		    ci.vuln_scan_completed_at = coalesce($vuln_scan_completed_at, ci.vuln_scan_completed_at),
+		    ci.vuln_scan_cache_hit = coalesce($vuln_scan_cache_hit, ci.vuln_scan_cache_hit),
+		    ci.vuln_scan_total_available = coalesce($vuln_scan_total_available, ci.vuln_scan_total_available),
+		    ci.vuln_scan_processed = coalesce($vuln_scan_processed, ci.vuln_scan_processed),
+		    ci.vuln_scan_pages_fetched = coalesce($vuln_scan_pages_fetched, ci.vuln_scan_pages_fetched)
 	`
 	params := map[string]any{
-		"id":         image.ImageID,
-		"name":       image.Name,
-		"tag":        image.Tag,
-		"digest":     image.Digest,
-		"risk_score": image.RiskScore,
+		"id":                        image.ImageID,
+		"name":                      image.Name,
+		"tag":                       image.Tag,
+		"digest":                    image.Digest,
+		"risk_score":                image.RiskScore,
+		"vuln_scan_started_at":      timePtrValue(image.VulnScanStartedAt),
+		"vuln_scan_completed_at":    timePtrValue(image.VulnScanCompletedAt),
+		"vuln_scan_cache_hit":       image.VulnScanCacheHit,
+		"vuln_scan_total_available": image.VulnScanTotalAvailable,
+		"vuln_scan_processed":       image.VulnScanProcessed,
+		"vuln_scan_pages_fetched":   image.VulnScanPagesFetched,
 	}
 
 	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
@@ -80,11 +103,17 @@ func (r *containerRepo) GetContainerImage(ctx context.Context, imageID string) (
 			}
 
 			return &domain.ContainerImage{
-				ImageID:   getString(props["id"]),
-				Name:      getString(props["name"]),
-				Tag:       getString(props["tag"]),
-				Digest:    getString(props["digest"]),
-				RiskScore: getFloat(props["risk_score"]),
+				ImageID:                getString(props["id"]),
+				Name:                   getString(props["name"]),
+				Tag:                    getString(props["tag"]),
+				Digest:                 getString(props["digest"]),
+				RiskScore:              getFloat(props["risk_score"]),
+				VulnScanStartedAt:      getTimePtr(props, "vuln_scan_started_at"),
+				VulnScanCompletedAt:    getTimePtr(props, "vuln_scan_completed_at"),
+				VulnScanCacheHit:       getBool(props, "vuln_scan_cache_hit"),
+				VulnScanTotalAvailable: int(getInt64(props, "vuln_scan_total_available")),
+				VulnScanProcessed:      int(getInt64(props, "vuln_scan_processed")),
+				VulnScanPagesFetched:   int(getInt64(props, "vuln_scan_pages_fetched")),
 			}, nil
 		}
 		return nil, nil
@@ -131,10 +160,16 @@ func (r *containerRepo) GetAllContainerImages(ctx context.Context) ([]domain.Con
 			props := iNode.GetProperties()
 
 			images = append(images, domain.ContainerImage{
-				ImageID: getString(props, "id"),
-				Name:    getString(props, "name"),
-				Tag:     getString(props, "tag"),
-				Digest:  getString(props, "digest"),
+				ImageID:                getString(props, "id"),
+				Name:                   getString(props, "name"),
+				Tag:                    getString(props, "tag"),
+				Digest:                 getString(props, "digest"),
+				VulnScanStartedAt:      getTimePtr(props, "vuln_scan_started_at"),
+				VulnScanCompletedAt:    getTimePtr(props, "vuln_scan_completed_at"),
+				VulnScanCacheHit:       getBool(props, "vuln_scan_cache_hit"),
+				VulnScanTotalAvailable: int(getInt64(props, "vuln_scan_total_available")),
+				VulnScanProcessed:      int(getInt64(props, "vuln_scan_processed")),
+				VulnScanPagesFetched:   int(getInt64(props, "vuln_scan_pages_fetched")),
 			})
 		}
 		return images, result.Err()
@@ -169,12 +204,18 @@ func (r *containerRepo) SaveContainer(ctx context.Context, container *domain.Con
 
 	query := `
 		MERGE (c:Container {id: $id})
+		ON CREATE SET c.risk_score = 0.0,
+		              c.risk_tier = 'LOW',
+		              c.priority_score = 0.0,
+		              c.priority_tier = 'LOW',
+		              c.risky_asset_count = 0,
+		              c.direct_finding_count = 0,
+		              c.risky_installation_count = 0
 		SET c.name = $name,
 		    c.state = $state,
 		    c.image_id = $image_id,
 		    c.internet_exposed = $internet_exposed,
-		    c.privileged = $privileged,
-		    c.risk_score = $risk_score
+		    c.privileged = $privileged
 		
 		WITH c
 		// Asociar al host (obligatorio)
@@ -193,7 +234,6 @@ func (r *containerRepo) SaveContainer(ctx context.Context, container *domain.Con
 		"internet_exposed": container.InternetExposed,
 		"privileged":       container.Privileged,
 		"host_id":          container.HostID,
-		"risk_score":       container.RiskScore,
 	}
 
 	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
@@ -206,7 +246,7 @@ func (r *containerRepo) SaveContainer(ctx context.Context, container *domain.Con
 	// Desenlazar imagen anterior si ha cambiado o se ha vaciado
 	cleanQuery := `
 		MATCH (c:Container {id: $id})-[r:USES_IMAGE]->(old_i:ContainerImage)
-		WHERE old_i.id <> $image_id OR $image_id = ''
+		WHERE old_i.id <> ($id + '_' + $image_id) OR $image_id = ''
 		DELETE r
 		WITH old_i
 		WHERE NOT ()-[:USES_IMAGE]->(old_i)
@@ -219,8 +259,10 @@ func (r *containerRepo) SaveContainer(ctx context.Context, container *domain.Con
 	if container.ImageID != "" {
 		imgQuery := `
 			MATCH (c:Container {id: $id})
-			MERGE (i:ContainerImage {id: $image_id})
-			ON CREATE SET i.name = $image_id
+			WITH c, $id + '_' + $image_id AS img_node_id
+			MERGE (i:ContainerImage {id: img_node_id})
+			ON CREATE SET i.name = $image_id, i.image_id = $image_id
+			ON MATCH SET i.name = $image_id, i.image_id = $image_id
 			MERGE (c)-[:USES_IMAGE]->(i)
 		`
 		_, _ = session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
@@ -275,10 +317,18 @@ func (r *containerRepo) GetContainer(ctx context.Context, containerID string) (*
 				if val == nil {
 					return 0
 				}
-				if i, ok := val.(int64); ok {
-					return i
+				switch v := val.(type) {
+				case int64:
+					return v
+				case float64:
+					return int64(v)
+				case int:
+					return int64(v)
+				case int32:
+					return int64(v)
+				default:
+					return 0
 				}
-				return 0
 			}
 
 			imgID, _ := record.Get("image_id")
@@ -295,14 +345,32 @@ func (r *containerRepo) GetContainer(ctx context.Context, containerID string) (*
 			}
 
 			return &domain.Container{
-				ContainerID:     getString(props["id"]),
-				Name:            getString(props["name"]),
-				State:           getString(props["state"]),
-				RiskScore:       getFloat(props["risk_score"]),
-				InternetExposed: getBool(props["internet_exposed"]),
-				Privileged:      getBool(props["privileged"]),
-				ImageID:         getString(imgID),
-				HostID:          getInt(hostID),
+				ContainerID:                 getString(props["id"]),
+				Name:                        getString(props["name"]),
+				State:                       getString(props["state"]),
+				RiskScore:                   getFloat(props["risk_score"]),
+				RiskTier:                    getString(props["risk_tier"]),
+				PriorityScore:               getFloat(props["priority_score"]),
+				PriorityTier:                getString(props["priority_tier"]),
+				TechnicalDriverType:         getString(props["technical_driver_type"]),
+				TechnicalDriverAssetID:      getString(props["technical_driver_asset_id"]),
+				TechnicalDriverAssetName:    getString(props["technical_driver_asset_name"]),
+				TechnicalDriverFindingID:    getInt(props["technical_driver_finding_id"]),
+				TechnicalDriverCVEID:        getString(props["technical_driver_cve_id"]),
+				TechnicalDriverRiskScore:    getFloat(props["technical_driver_risk_score"]),
+				PriorityDriverType:          getString(props["priority_driver_type"]),
+				PriorityDriverAssetID:       getString(props["priority_driver_asset_id"]),
+				PriorityDriverAssetName:     getString(props["priority_driver_asset_name"]),
+				PriorityDriverFindingID:     getInt(props["priority_driver_finding_id"]),
+				PriorityDriverCVEID:         getString(props["priority_driver_cve_id"]),
+				PriorityDriverPriorityScore: getFloat(props["priority_driver_priority_score"]),
+				RiskyAssetCount:             int(getInt(props["risky_asset_count"])),
+				RiskComputedAt:              getTimePtr(props, "risk_computed_at"),
+				PriorityComputedAt:          getTimePtr(props, "priority_computed_at"),
+				InternetExposed:             getBool(props["internet_exposed"]),
+				Privileged:                  getBool(props["privileged"]),
+				ImageID:                     getString(imgID),
+				HostID:                      getInt(hostID),
 			}, nil
 		}
 		return nil, nil
@@ -312,30 +380,98 @@ func (r *containerRepo) GetContainer(ctx context.Context, containerID string) (*
 		return nil, err
 	}
 	if res == nil {
-		return nil, fmt.Errorf("container not found")
+		return nil, domain.ErrNodeNotFound
 	}
 	return res.(*domain.Container), nil
 }
 
-// LinkVulnerabilityToImage enlaza una imagen de contenedor con un CVE (descubierto por ejemplo por Docker Scout)
+// GetContainerIDsByImage devuelve los IDs de todos los contenedores que usan la imagen indicada.
+func (r *containerRepo) GetContainerIDsByImage(ctx context.Context, imageID string) ([]string, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (c:Container)-[:USES_IMAGE]->(ci:ContainerImage)
+		WHERE ci.id = $image_id OR ci.image_id = $image_id OR ci.name = $image_id
+		RETURN c.id AS container_id
+	`
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"image_id": imageID})
+		if err != nil {
+			return nil, err
+		}
+		var ids []string
+		for result.Next(ctx) {
+			idVal, _ := result.Record().Get("container_id")
+			if s, ok := idVal.(string); ok {
+				ids = append(ids, s)
+			}
+		}
+		return ids, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []string{}, nil
+	}
+	return res.([]string), nil
+}
+
+// GetVulnerabilitiesByContainerImage devuelve las vulnerabilidades enlazadas a la imagen (inteligencia compartida).
+func (r *containerRepo) GetVulnerabilitiesByContainerImage(ctx context.Context, imageID string) ([]domain.Vulnerability, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+		WHERE ci.id = $image_id OR ci.image_id = $image_id OR ci.name = $image_id
+		RETURN DISTINCT properties(v) AS props
+	`
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"image_id": imageID})
+		if err != nil {
+			return nil, err
+		}
+		var vulns []domain.Vulnerability
+		for result.Next(ctx) {
+			rec := result.Record()
+			propsRaw, _ := rec.Get("props")
+			if props, ok := propsRaw.(map[string]any); ok {
+				vulns = append(vulns, domain.Vulnerability{
+					CVEID:       getString(props, "cve_id"),
+					Description: getString(props, "description"),
+					BaseScore:   getFloat64(props, "base_score"),
+					CVSSVector:  getString(props, "cvss_vector"),
+					NVDVector:   getString(props, "nvd_vector"),
+					CWE:         getStringSlice(props, "cwe"),
+					CPE:         getString(props, "cpe"),
+					Exploit:     getBool(props, "exploit"),
+					KEV:         getBool(props, "kev"),
+					EPSSScore:   getFloat64(props, "epss_score"),
+				})
+			}
+		}
+		return vulns, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.Vulnerability{}, nil
+	}
+	return res.([]domain.Vulnerability), nil
+}
+
+// LinkVulnerabilityToImage enlaza una imagen de contenedor con un CVE para inteligencia compartida (HAS_VULNERABILITY)
 func (r *containerRepo) LinkVulnerabilityToImage(ctx context.Context, imageID string, cveID string) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
 	query := `
-		MATCH (ci:ContainerImage {id: $image_id})
+		MATCH (ci:ContainerImage) WHERE ci.id = $image_id OR ci.image_id = $image_id OR ci.name = $image_id
 		MATCH (v:Vulnerability {cve_id: $cve_id})
-		MERGE (f:Finding {unique_ref: 'finding-' + $image_id + '-' + $cve_id})
-		ON CREATE SET f.id = id(f),
-		              f.status = 'OPEN',
-		              f.severity = coalesce(v.severity, 'CRITICAL'),
-		              f.risk_score = coalesce(v.base_score / 10.0, 0.98),
-		              f.impact_score = coalesce(v.base_score / 10.0, 0.98),
-		              f.likelihood = 1.0,
-		              f.exposure_factor = 1.0,
-		              f.remediation_factor = 1.0
-		MERGE (ci)-[:HAS_FINDING]->(f)
-		MERGE (f)-[:OF_VULNERABILITY]->(v)
+		MERGE (ci)-[:HAS_VULNERABILITY]->(v)
 	`
 	params := map[string]any{
 		"image_id": imageID,

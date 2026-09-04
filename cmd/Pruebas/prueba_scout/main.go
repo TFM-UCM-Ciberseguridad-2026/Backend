@@ -9,6 +9,7 @@ import (
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/provider"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/repository/neo4j"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/config"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/service"
 )
 
@@ -86,7 +87,7 @@ func main() {
 
 	// Ejecutar la integración de Scout (simula: docker scout cves alpine:with-curl)
 	fmt.Println("\n[*] Ejecutando escaneo con Docker Scout...")
-	err = orchestrator.ScanAndSaveContainerImage(ctx, "alpine:with-curl", "IMG-ALPINE-CURL")
+	_, err = orchestrator.ScanAndSaveContainerImage(ctx, "alpine:with-curl", "IMG-ALPINE-CURL", domain.VulnerabilityScanOptions{ForceRefresh: true})
 	if err != nil {
 		log.Fatalf("Error en el escaneo de Docker Scout: %v", err)
 	}
