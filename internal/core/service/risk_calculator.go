@@ -297,6 +297,14 @@ func AggregateInfrastructurePriority(scores []float64) float64 {
 	return AggregateRiskScores(scores)
 }
 
+// CalculatePathPriority pondera el riesgo de la ruta por la criticidad del activo
+// que alcanza: qué cadena cortar primero. Misma separación riesgo/prioridad que
+// CalculatePriorityScore hace con los findings.
+func CalculatePathPriority(pathRisk, targetCriticality float64) float64 {
+	normalized := clamp(targetCriticality, minAssetCriticality, maxAssetCriticality) / maxAssetCriticality
+	return clamp(pathRisk*normalized, 0.0, 1.0)
+}
+
 // NormalizeSoftwareCriticalityLevel normaliza el nivel de criticidad de software a los valores esperados por el sistema.
 func NormalizeSoftwareCriticalityLevel(level string) string {
 	switch strings.ToUpper(strings.TrimSpace(level)) {

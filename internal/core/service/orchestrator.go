@@ -1839,7 +1839,58 @@ func (o *Orchestrator) ComputeAllProjectsRisk(ctx context.Context) error {
 // GenerateExploitationPaths devuelve las rutas de explotación calculadas desde el motor de grafos,
 // filtradas por proyecto si se indica un projectID > 0.
 func (o *Orchestrator) GenerateExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error) {
-	return o.infraPort.GetExploitationPaths(ctx, projectID)
+	paths, err := o.infraPort.GetExploitationPaths(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	o.scorePathPriorities(ctx, paths)
+	return paths, nil
+}
+
+// scorePathPriorities pondera cada ruta por la criticidad de su activo final.
+// El repositorio ya deja PathRiskScore; aquí se añade el peso de negocio, que
+// necesita leer el endpoint. Si no se puede leer, queda criticidad neutra en vez
+// de descartar la ruta.
+func (o *Orchestrator) scorePathPriorities(ctx context.Context, paths []domain.ExploitationPath) {
+	criticalityCache := make(map[int64]float64)
+
+	for i := range paths {
+		path := &paths[i]
+		if len(path.Steps) == 0 {
+			continue
+		}
+
+		// El impacto lo marca el activo más valioso que toca la cadena, no el
+		// último: una ruta que atraviesa la BBDD de producción para acabar en un
+		// puesto ya ha hecho el daño al pasar por la BBDD.
+		peak := 0.0
+		var peakID int64
+		for _, step := range path.Steps {
+			criticality, cached := criticalityCache[step.TargetEndpointID]
+			if !cached {
+				criticality = minAssetCriticality
+				if endpoint, err := o.endpointPort.GetByID(ctx, step.TargetEndpointID); err == nil && endpoint != nil {
+					criticality = CalculateAssetCriticality(
+						endpoint.InternetExposed,
+						endpoint.Environment,
+						endpoint.ConfidentialityReq,
+						endpoint.IntegrityReq,
+						endpoint.AvailabilityReq,
+					)
+				}
+				criticalityCache[step.TargetEndpointID] = criticality
+			}
+
+			if criticality > peak {
+				peak, peakID = criticality, step.TargetEndpointID
+			}
+		}
+
+		path.TargetCriticality = peak
+		path.CriticalAssetID = peakID
+		path.PathPriorityScore = CalculatePathPriority(path.PathRiskScore, peak)
+	}
 }
 
 // IsAnalysisPending comprueba si hay enriquecimiento NVD activo en background.

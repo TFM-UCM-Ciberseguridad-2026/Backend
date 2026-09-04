@@ -1266,13 +1266,17 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 								Vulnerability:    vulnCVE,
 								SoftwareAffected: getStringLocal(softwareProps["install_path"]),
 								RiskScore:        risk,
+								RiskSource:       getStringLocal(findingProps["risk_source"]),
 								RCE:              isRCE,
 								RootObtained:     rootObtained,
 								Exploitable:      getBoolLocal(vulnProps["exploit"]) || getBoolLocal(vulnProps["kev"]),
 								CVSSVector:       cvss,
 							})
 
+							// TotalRiskScore se mantiene por compatibilidad con el front.
 							clonedPath.TotalRiskScore += risk
+							clonedPath.PathRiskScore = domain.CalculatePathRisk(clonedPath.StepRisks())
+							clonedPath.HasUncontextualizedSteps = clonedPath.HasUncontextualized()
 
 							// Si el contenedor es el origen, el siguiente paso parte del container name
 							nextPrev := targetName
@@ -1364,8 +1368,10 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 
 				targetKey := fmt.Sprintf("%s-VIA-%s-TO-%d-%s-VIA-%s", state.Path.InitialEndpoint, initialVectorType, lastStep.TargetEndpointID, lastStep.TargetEndpoint, vectorType)
 
+				// Por PathRiskScore y no por la suma: con la suma ganaba siempre la
+				// ruta más larga al mismo destino, cuando la corta es la más probable.
 				existing, ok := bestPathPerTarget[targetKey]
-				if !ok || state.Path.TotalRiskScore > existing.TotalRiskScore {
+				if !ok || state.Path.PathRiskScore > existing.PathRiskScore {
 					bestPathPerTarget[targetKey] = state.Path
 				}
 			}
