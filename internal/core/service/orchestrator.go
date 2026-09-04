@@ -805,6 +805,7 @@ func (o *Orchestrator) ComputeEndpointRisk(ctx context.Context, endpointID int64
 
 		if err := o.riskPort.UpdateFindingScores(
 			ctx, fc.FindingID, impactScore, likelihood, exposureFactor, fc.RemediationFactor, riskScore, assetCriticality, urgencyBoost, priorityScore,
+			ClassifyRiskTier(riskScore), ClassifyRiskTier(priorityScore),
 		); err != nil {
 			return fmt.Errorf("error actualizando scores del finding %d: %w", fc.FindingID, err)
 		}

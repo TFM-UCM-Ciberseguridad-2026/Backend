@@ -131,7 +131,7 @@ func main() {
 	fmt.Println("    ✓ Re-sincronizar reutiliza el Finding idéntico sin fragmentar secuencias de IDs.")
 
 	// Fijo scores de prioridad en el finding para probar GetPatchQueue
-	_ = riskRepo.UpdateFindingScores(ctx, idOriginal, 9.8, 0.5, 1.0, 1.0, 4.9, 1.75, 1.8, 0.95)
+	_ = riskRepo.UpdateFindingScores(ctx, idOriginal, 9.8, 0.5, 1.0, 1.0, 4.9, 1.75, 1.8, 0.95, service.ClassifyRiskTier(4.9), service.ClassifyRiskTier(0.95))
 
 	// ── 4. Verificar Bug #1 y Bug #2 (Inclusión de Contenedor y Deduplicación en Cola) ──
 	fmt.Println("\n[4/5] Verificando Bug #1 (Inclusión) y Bug #2 (Deduplicación) en GetPatchQueue...")
