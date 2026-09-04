@@ -113,6 +113,8 @@ func NewRouter(h *OrchestratorHandler, hub *WSHub) *http.ServeMux {
 
 	/* GET /api/installations/{id}/applied-patches: Histórico de parches aplicados sobre una instalación concreta. */
 	mux.HandleFunc("GET /api/installations/{id}/applied-patches", h.GetAppliedPatchHistory)
+	mux.HandleFunc("POST /api/containers/{id}/applied-patches", h.DeclareContainerPatchApplied)
+	mux.HandleFunc("GET /api/containers/{id}/applied-patches", h.GetContainerAppliedPatchHistory)
 
 	/* GET /api/endpoints/{id}/patch-history: Histórico de parches del endpoint agrupado por software instalado. */
 	mux.HandleFunc("GET /api/endpoints/{id}/patch-history", h.GetEndpointPatchHistory)

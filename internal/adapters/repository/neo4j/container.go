@@ -34,6 +34,17 @@ func (r *containerRepo) SaveContainerImage(ctx context.Context, image *domain.Co
 		    i.vuln_scan_total_available = coalesce($vuln_scan_total_available, i.vuln_scan_total_available),
 		    i.vuln_scan_processed = coalesce($vuln_scan_processed, i.vuln_scan_processed),
 		    i.vuln_scan_pages_fetched = coalesce($vuln_scan_pages_fetched, i.vuln_scan_pages_fetched)
+		WITH i
+		OPTIONAL MATCH (ci:ContainerImage) WHERE ci.image_id = $id OR ci.name = $id
+		SET ci.tag = $tag,
+		    ci.digest = $digest,
+		    ci.risk_score = $risk_score,
+		    ci.vuln_scan_started_at = coalesce($vuln_scan_started_at, ci.vuln_scan_started_at),
+		    ci.vuln_scan_completed_at = coalesce($vuln_scan_completed_at, ci.vuln_scan_completed_at),
+		    ci.vuln_scan_cache_hit = coalesce($vuln_scan_cache_hit, ci.vuln_scan_cache_hit),
+		    ci.vuln_scan_total_available = coalesce($vuln_scan_total_available, ci.vuln_scan_total_available),
+		    ci.vuln_scan_processed = coalesce($vuln_scan_processed, ci.vuln_scan_processed),
+		    ci.vuln_scan_pages_fetched = coalesce($vuln_scan_pages_fetched, ci.vuln_scan_pages_fetched)
 	`
 	params := map[string]any{
 		"id":                        image.ImageID,
@@ -193,12 +204,18 @@ func (r *containerRepo) SaveContainer(ctx context.Context, container *domain.Con
 
 	query := `
 		MERGE (c:Container {id: $id})
+		ON CREATE SET c.risk_score = 0.0,
+		              c.risk_tier = 'LOW',
+		              c.priority_score = 0.0,
+		              c.priority_tier = 'LOW',
+		              c.risky_asset_count = 0,
+		              c.direct_finding_count = 0,
+		              c.risky_installation_count = 0
 		SET c.name = $name,
 		    c.state = $state,
 		    c.image_id = $image_id,
 		    c.internet_exposed = $internet_exposed,
-		    c.privileged = $privileged,
-		    c.risk_score = $risk_score
+		    c.privileged = $privileged
 		
 		WITH c
 		// Asociar al host (obligatorio)
@@ -217,7 +234,6 @@ func (r *containerRepo) SaveContainer(ctx context.Context, container *domain.Con
 		"internet_exposed": container.InternetExposed,
 		"privileged":       container.Privileged,
 		"host_id":          container.HostID,
-		"risk_score":       container.RiskScore,
 	}
 
 	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
@@ -230,7 +246,7 @@ func (r *containerRepo) SaveContainer(ctx context.Context, container *domain.Con
 	// Desenlazar imagen anterior si ha cambiado o se ha vaciado
 	cleanQuery := `
 		MATCH (c:Container {id: $id})-[r:USES_IMAGE]->(old_i:ContainerImage)
-		WHERE old_i.id <> $image_id OR $image_id = ''
+		WHERE old_i.id <> ($id + '_' + $image_id) OR $image_id = ''
 		DELETE r
 		WITH old_i
 		WHERE NOT ()-[:USES_IMAGE]->(old_i)
@@ -243,8 +259,10 @@ func (r *containerRepo) SaveContainer(ctx context.Context, container *domain.Con
 	if container.ImageID != "" {
 		imgQuery := `
 			MATCH (c:Container {id: $id})
-			MERGE (i:ContainerImage {id: $image_id})
-			ON CREATE SET i.name = $image_id
+			WITH c, $id + '_' + $image_id AS img_node_id
+			MERGE (i:ContainerImage {id: img_node_id})
+			ON CREATE SET i.name = $image_id, i.image_id = $image_id
+			ON MATCH SET i.name = $image_id, i.image_id = $image_id
 			MERGE (c)-[:USES_IMAGE]->(i)
 		`
 		_, _ = session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
@@ -340,11 +358,11 @@ func (r *containerRepo) GetContainer(ctx context.Context, containerID string) (*
 				TechnicalDriverFindingID:    getInt(props["technical_driver_finding_id"]),
 				TechnicalDriverCVEID:        getString(props["technical_driver_cve_id"]),
 				TechnicalDriverRiskScore:    getFloat(props["technical_driver_risk_score"]),
-				PriorityDriverType:         getString(props["priority_driver_type"]),
-				PriorityDriverAssetID:      getString(props["priority_driver_asset_id"]),
-				PriorityDriverAssetName:    getString(props["priority_driver_asset_name"]),
-				PriorityDriverFindingID:    getInt(props["priority_driver_finding_id"]),
-				PriorityDriverCVEID:        getString(props["priority_driver_cve_id"]),
+				PriorityDriverType:          getString(props["priority_driver_type"]),
+				PriorityDriverAssetID:       getString(props["priority_driver_asset_id"]),
+				PriorityDriverAssetName:     getString(props["priority_driver_asset_name"]),
+				PriorityDriverFindingID:     getInt(props["priority_driver_finding_id"]),
+				PriorityDriverCVEID:         getString(props["priority_driver_cve_id"]),
 				PriorityDriverPriorityScore: getFloat(props["priority_driver_priority_score"]),
 				RiskyAssetCount:             int(getInt(props["risky_asset_count"])),
 				RiskComputedAt:              getTimePtr(props, "risk_computed_at"),
@@ -362,7 +380,7 @@ func (r *containerRepo) GetContainer(ctx context.Context, containerID string) (*
 		return nil, err
 	}
 	if res == nil {
-		return nil, fmt.Errorf("container not found")
+		return nil, domain.ErrNodeNotFound
 	}
 	return res.(*domain.Container), nil
 }
@@ -373,7 +391,8 @@ func (r *containerRepo) GetContainerIDsByImage(ctx context.Context, imageID stri
 	defer session.Close(ctx)
 
 	query := `
-		MATCH (c:Container)-[:USES_IMAGE]->(ci:ContainerImage {id: $image_id})
+		MATCH (c:Container)-[:USES_IMAGE]->(ci:ContainerImage)
+		WHERE ci.id = $image_id OR ci.image_id = $image_id OR ci.name = $image_id
 		RETURN c.id AS container_id
 	`
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
@@ -405,8 +424,9 @@ func (r *containerRepo) GetVulnerabilitiesByContainerImage(ctx context.Context, 
 	defer session.Close(ctx)
 
 	query := `
-		MATCH (ci:ContainerImage {id: $image_id})-[:HAS_VULNERABILITY]->(v:Vulnerability)
-		RETURN properties(v) AS props
+		MATCH (ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
+		WHERE ci.id = $image_id OR ci.image_id = $image_id OR ci.name = $image_id
+		RETURN DISTINCT properties(v) AS props
 	`
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		result, err := tx.Run(ctx, query, map[string]any{"image_id": imageID})
@@ -449,7 +469,7 @@ func (r *containerRepo) LinkVulnerabilityToImage(ctx context.Context, imageID st
 	defer session.Close(ctx)
 
 	query := `
-		MATCH (ci:ContainerImage {id: $image_id})
+		MATCH (ci:ContainerImage) WHERE ci.id = $image_id OR ci.image_id = $image_id OR ci.name = $image_id
 		MATCH (v:Vulnerability {cve_id: $cve_id})
 		MERGE (ci)-[:HAS_VULNERABILITY]->(v)
 	`

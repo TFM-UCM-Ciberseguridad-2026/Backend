@@ -21,6 +21,12 @@ type VulnerabilityFetchResult struct {
 	PagesFetched    int
 }
 
+type ContainerFindingSyncResult struct {
+	Processed int
+	Created   int
+	Existing  int
+}
+
 type VulnerabilityScanResult struct {
 	InstallationID       string     `json:"installation_id"`
 	SoftwareID           int64      `json:"software_id"`
@@ -37,4 +43,6 @@ type VulnerabilityScanResult struct {
 	ProviderPagesFetched int        `json:"provider_pages_fetched"`
 	ScanStartedAt        *time.Time `json:"scan_started_at,omitempty"`
 	ScanCompletedAt      *time.Time `json:"scan_completed_at,omitempty"`
+	Partial              bool       `json:"partial"`
+	Error                string     `json:"error,omitempty"`
 }

@@ -3,6 +3,7 @@ package neo4j
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
@@ -14,8 +15,39 @@ type findingRepo struct {
 }
 
 func (r *findingRepo) Save(ctx context.Context, f *domain.Finding) error {
+	if f == nil {
+		return fmt.Errorf("finding vacío")
+	}
+	if f.FindingID < 0 {
+		return fmt.Errorf("finding_id no puede ser negativo")
+	}
+
 	query := `
-		MERGE (n:Finding {id: $id})
+		MERGE (seq:Sequence {name: 'finding_id'})
+		ON CREATE SET seq.value = 0
+
+		FOREACH (
+			_ IN CASE
+				WHEN $id <= 0 THEN [1]
+				ELSE []
+			END |
+			SET seq.value = coalesce(seq.value, 0) + 1
+		)
+
+		FOREACH (
+			_ IN CASE
+				WHEN $id > coalesce(seq.value, 0) THEN [1]
+				ELSE []
+			END |
+			SET seq.value = $id
+		)
+
+		WITH CASE
+			WHEN $id > 0 THEN $id
+			ELSE seq.value
+		END AS assigned_id
+
+		MERGE (n:Finding {id: assigned_id})
 		ON CREATE SET n.status = $status,
 		    n.first_seen = $first_seen,
 		    n.last_seen = $last_seen,
@@ -29,6 +61,8 @@ func (r *findingRepo) Save(ctx context.Context, f *domain.Finding) error {
 			n.urgency_boost = $urgency_boost,
 		    n.priority_score = $priority_score,
 		    n.risk_computed_at = $risk_computed_at
+
+		RETURN n.id AS id
 	`
 
 	var lastSeen, resolvedAt, riskComputedAt any
@@ -58,7 +92,38 @@ func (r *findingRepo) Save(ctx context.Context, f *domain.Finding) error {
 		"priority_score":     f.PriorityScore,
 		"risk_computed_at":   riskComputedAt,
 	}
-	return executeWriteSaveHelper(ctx, r.driver, query, params)
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	result, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		res, err := tx.Run(ctx, query, params)
+		if err != nil {
+			return nil, err
+		}
+		if !res.Next(ctx) {
+			if err := res.Err(); err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("Neo4j no devolvió el ID del finding")
+		}
+
+		idRaw, ok := res.Record().Get("id")
+		if !ok {
+			return nil, fmt.Errorf("Neo4j no devolvió el campo id del finding")
+		}
+		return getInt64(map[string]any{"id": idRaw}, "id"), nil
+	})
+	if err != nil {
+		return fmt.Errorf("error guardando finding: %w", err)
+	}
+
+	assignedID, ok := result.(int64)
+	if !ok || assignedID <= 0 {
+		return fmt.Errorf("ID inválido asignado al finding")
+	}
+	f.FindingID = assignedID
+
+	return nil
 }
 
 func (r *findingRepo) Update(ctx context.Context, f *domain.Finding) error {
@@ -143,37 +208,93 @@ func (r *findingRepo) DeleteByID(ctx context.Context, id int64) error {
 // If the finding already exists, its last_seen timestamp will be updated to the current time.
 // The function returns the finding, a boolean indicating whether it was created (true) or already existed (false), and an error if any occurred.
 func (r *findingRepo) EnsureForInstallationAndCVE(ctx context.Context, installationID string, cveID string, f *domain.Finding) (*domain.Finding, bool, error) {
+	installationID = strings.TrimSpace(installationID)
+	cveID = strings.ToUpper(strings.TrimSpace(cveID))
+
+	if installationID == "" {
+		return nil, false, fmt.Errorf("installation_id vacío")
+	}
+	if cveID == "" {
+		return nil, false, fmt.Errorf("cve_id vacío")
+	}
+	if f == nil {
+		return nil, false, fmt.Errorf("finding vacío")
+	}
+
 	now := time.Now().UTC()
 	findingKey := installationID + "|" + cveID
 
 	query := `
-		MATCH (si:SoftwareInstallation {id: $installation_id})
-		MATCH (v:Vulnerability {cve_id: $cve_id})
-		MERGE (n:Finding {finding_key: $finding_key})
-		ON CREATE SET
-			n.id = $id,
-			n.status = $status,
-			n.first_seen = $first_seen,
-			n.last_seen = $last_seen,
-			n.resolved_at = $resolved_at,
-			n.impact_score = $impact_score,
-			n.likelihood = $likelihood,
-			n.exposure_factor = $exposure_factor,
-			n.remediation_factor = $remediation_factor,
-			n.risk_score = $risk_score,
-			n.asset_criticality = $asset_criticality,
-			n.urgency_boost = $urgency_boost,
-			n.priority_score = $priority_score,
-			n.risk_computed_at = $risk_computed_at,
-			n._ensure_created = true
-		ON MATCH SET
-			n.last_seen = $now,
-			n._ensure_created = false
-		MERGE (si)-[:HAS_FINDING]->(n)
-		MERGE (n)-[:OF_VULNERABILITY]->(v)
-		WITH n, n._ensure_created AS created
-		REMOVE n._ensure_created
-		RETURN properties(n) AS props, created
+			MATCH (si:SoftwareInstallation {id: $installation_id})
+			MATCH (v:Vulnerability {cve_id: $cve_id})
+
+			MERGE (n:Finding {finding_key: $finding_key})
+			ON CREATE SET
+					n._ensure_created = true
+			ON MATCH SET
+					n.last_seen = $now,
+					n._ensure_created = false
+
+			WITH
+					si,
+					v,
+					n,
+					coalesce(n._ensure_created, false) AS created
+
+			MERGE (seq:Sequence {name: 'finding_id'})
+			ON CREATE SET seq.value = 0
+
+			FOREACH (
+					_ IN CASE
+							WHEN created AND $id <= 0 THEN [1]
+							ELSE []
+					END |
+					SET seq.value = coalesce(seq.value, 0) + 1
+			)
+
+			FOREACH (
+					_ IN CASE
+							WHEN created
+							AND $id > 0
+							AND $id > coalesce(seq.value, 0)
+							THEN [1]
+							ELSE []
+					END |
+					SET seq.value = $id
+			)
+
+			FOREACH (
+					_ IN CASE
+							WHEN created THEN [1]
+							ELSE []
+					END |
+					SET
+							n.id = CASE
+									WHEN $id > 0 THEN $id
+									ELSE seq.value
+							END,
+							n.status = $status,
+							n.first_seen = $first_seen,
+							n.last_seen = $last_seen,
+							n.resolved_at = $resolved_at,
+							n.impact_score = $impact_score,
+							n.likelihood = $likelihood,
+							n.exposure_factor = $exposure_factor,
+							n.remediation_factor = $remediation_factor,
+							n.risk_score = $risk_score,
+							n.asset_criticality = $asset_criticality,
+							n.urgency_boost = $urgency_boost,
+							n.priority_score = $priority_score,
+							n.risk_computed_at = $risk_computed_at
+			)
+
+			MERGE (si)-[:HAS_FINDING]->(n)
+			MERGE (n)-[:OF_VULNERABILITY]->(v)
+
+			WITH n, created
+			REMOVE n._ensure_created
+
+			RETURN properties(n) AS props, created
 	`
 
 	var lastSeen, resolvedAt, riskComputedAt any
@@ -326,6 +447,47 @@ func (r *findingRepo) ApplyRemediationByInstallationAndCVE(ctx context.Context, 
 	return res.([]int64), nil
 }
 
+func (r *findingRepo) ApplyRemediationByContainerAndCVE(ctx context.Context, containerID, cveID string, findingID int64, remediationFactor float64, status string) ([]int64, error) {
+	query := `
+		MATCH (c:Container {id: $container_id})-[:USES_IMAGE]->(image:ContainerImage)
+		MATCH (image)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability {cve_id: $cve_id})
+		WHERE f.container_id = c.id AND f.image_id = image.id AND f.id = $finding_id
+		SET f.remediation_factor = $remediation_factor, f.status = $status, f.last_seen = $now
+		FOREACH (_ IN CASE WHEN $remediation_factor = 0.0 THEN [1] ELSE [] END |
+			SET f.risk_score = 0.0, f.priority_score = 0.0, f.resolved_at = $now
+		)
+		RETURN f.id AS finding_id
+	`
+	return r.applyRemediationFindingQuery(ctx, query, map[string]any{
+		"container_id": containerID, "cve_id": cveID, "finding_id": findingID,
+		"remediation_factor": remediationFactor, "status": status, "now": time.Now().UTC(),
+	})
+}
+
+func (r *findingRepo) applyRemediationFindingQuery(ctx context.Context, query string, params map[string]any) ([]int64, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+	res, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, params)
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]int64, 0)
+		for result.Next(ctx) {
+			id, _ := result.Record().Get("finding_id")
+			ids = append(ids, toInt64(id))
+		}
+		return ids, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []int64{}, nil
+	}
+	return res.([]int64), nil
+}
+
 func (r *findingRepo) GetVulnerabilitiesByFinding(ctx context.Context, findingID any) ([]domain.Vulnerability, error) {
 	query := `
 		MATCH (f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
@@ -404,47 +566,115 @@ func (r *findingRepo) GetVulnerabilitiesByFinding(ctx context.Context, findingID
 }
 
 // EnsureForContainerImageContextAndCVE crea o actualiza un finding contextual único para la combinación container_id + image_id + cve_id.
-func (r *findingRepo) EnsureForContainerImageContextAndCVE(ctx context.Context, containerID string, imageID string, cveID string, f *domain.Finding) (*domain.Finding, bool, error) {
+func (r *findingRepo) EnsureForContainerImageContextAndCVE(
+	ctx context.Context,
+	containerID string,
+	imageID string,
+	cveID string,
+	f *domain.Finding,
+) (*domain.Finding, bool, error) {
+	containerID = strings.TrimSpace(containerID)
+	imageID = strings.TrimSpace(imageID)
+	cveID = strings.ToUpper(strings.TrimSpace(cveID))
+
+	if containerID == "" {
+		return nil, false, fmt.Errorf("container_id vacío")
+	}
+	if imageID == "" {
+		return nil, false, fmt.Errorf("image_id vacío")
+	}
+	if cveID == "" {
+		return nil, false, fmt.Errorf("cve_id vacío")
+	}
+	if f == nil {
+		return nil, false, fmt.Errorf("finding vacío")
+	}
+
 	now := time.Now().UTC()
 	findingKey := containerID + "|" + imageID + "|" + cveID
 
 	query := `
-		MATCH (c:Container {id: $container_id})-[:USES_IMAGE]->(ci:ContainerImage {id: $image_id})
-		MATCH (v:Vulnerability {cve_id: $cve_id})
-		OPTIONAL MATCH (f_max:Finding)
-		WITH c, ci, v, coalesce(max(f_max.id), 0) + 1 AS auto_id
-		MERGE (n:Finding {finding_key: $finding_key})
-		ON CREATE SET
-			n.id = CASE WHEN $id > 0 THEN $id ELSE auto_id END,
-			n.status = $status,
-			n.first_seen = $first_seen,
-			n.last_seen = $last_seen,
-			n.resolved_at = $resolved_at,
-			n.impact_score = $impact_score,
-			n.likelihood = $likelihood,
-			n.exposure_factor = $exposure_factor,
-			n.remediation_factor = $remediation_factor,
-			n.risk_score = $risk_score,
-			n.asset_criticality = $asset_criticality,
-			n.urgency_boost = $urgency_boost,
-			n.priority_score = $priority_score,
-			n.risk_computed_at = $risk_computed_at,
-			n.context_type = 'CONTAINER_IMAGE',
-			n.container_id = $container_id,
-			n.image_id = $image_id,
-			n.source = 'DOCKER_SCOUT',
-			n._ensure_created = true
-		ON MATCH SET
-			n.last_seen = $now,
-			n._ensure_created = false
-		MERGE (c)-[:HAS_FINDING]->(n)
-		MERGE (n)-[:OF_VULNERABILITY]->(v)
-		WITH n, n._ensure_created AS created
-		REMOVE n._ensure_created
-		RETURN properties(n) AS props, created
+			MATCH (c:Container {id: $container_id})-[:USES_IMAGE]->(ci:ContainerImage)
+			MATCH (v:Vulnerability {cve_id: $cve_id})
+
+			MERGE (n:Finding {finding_key: $finding_key})
+			ON CREATE SET
+					n._ensure_created = true
+			ON MATCH SET
+					n.last_seen = $now,
+					n._ensure_created = false
+
+			WITH
+					c,
+					ci,
+					v,
+					n,
+					coalesce(n._ensure_created, false) AS created
+
+			MERGE (seq:Sequence {name: 'finding_id'})
+			ON CREATE SET seq.value = 0
+
+			FOREACH (
+					_ IN CASE
+							WHEN created AND $id <= 0 THEN [1]
+							ELSE []
+					END |
+					SET seq.value = coalesce(seq.value, 0) + 1
+			)
+
+			FOREACH (
+					_ IN CASE
+							WHEN created
+								AND $id > 0
+								AND $id > coalesce(seq.value, 0)
+							THEN [1]
+							ELSE []
+					END |
+					SET seq.value = $id
+			)
+
+			FOREACH (
+					_ IN CASE
+							WHEN created THEN [1]
+							ELSE []
+					END |
+					SET
+							n.id = CASE
+									WHEN $id > 0 THEN $id
+									ELSE seq.value
+							END,
+							n.status = $status,
+							n.first_seen = $first_seen,
+							n.last_seen = $last_seen,
+							n.resolved_at = $resolved_at,
+							n.impact_score = $impact_score,
+							n.likelihood = $likelihood,
+							n.exposure_factor = $exposure_factor,
+							n.remediation_factor = $remediation_factor,
+							n.risk_score = $risk_score,
+							n.asset_criticality = $asset_criticality,
+							n.urgency_boost = $urgency_boost,
+							n.priority_score = $priority_score,
+							n.risk_computed_at = $risk_computed_at,
+							n.context_type = 'CONTAINER_IMAGE',
+							n.container_id = $container_id,
+							n.image_id = $image_id,
+							n.source = 'DOCKER_SCOUT'
+			)
+
+			MERGE (ci)-[:HAS_FINDING]->(n)
+			MERGE (n)-[:OF_VULNERABILITY]->(v)
+
+			WITH n, created
+			REMOVE n._ensure_created
+
+			RETURN properties(n) AS props, created
 	`
 
-	var lastSeen, resolvedAt, riskComputedAt any
+	var lastSeen any
+	var resolvedAt any
+	var riskComputedAt any
+
 	if f.LastSeen != nil {
 		lastSeen = *f.LastSeen
 	}
@@ -477,33 +707,106 @@ func (r *findingRepo) EnsureForContainerImageContextAndCVE(ctx context.Context, 
 		"now":                now,
 	}
 
-	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	session := r.driver.NewSession(
+		ctx,
+		neo4j.SessionConfig{
+			AccessMode: neo4j.AccessModeWrite,
+		},
+	)
 	defer session.Close(ctx)
 
-	result, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		res, err := tx.Run(ctx, query, params)
-		if err != nil {
-			return nil, err
-		}
-		if res.Next(ctx) {
+	result, err := session.ExecuteWrite(
+		ctx,
+		func(tx neo4j.ManagedTransaction) (any, error) {
+			res, err := tx.Run(ctx, query, params)
+			if err != nil {
+				return nil, err
+			}
+
+			if !res.Next(ctx) {
+				if err := res.Err(); err != nil {
+					return nil, err
+				}
+
+				return nil, fmt.Errorf(
+					"no se pudo asegurar el finding para container_id=%s, image_id=%s y cve_id=%s",
+					containerID,
+					imageID,
+					cveID,
+				)
+			}
+
 			record := res.Record()
-			props, _ := record.Get("props")
-			created, _ := record.Get("created")
+
+			propsRaw, ok := record.Get("props")
+			if !ok {
+				return nil, fmt.Errorf(
+					"Neo4j no devolvió las propiedades del finding %s",
+					findingKey,
+				)
+			}
+
+			props, ok := propsRaw.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf(
+					"las propiedades del finding %s tienen un formato inválido",
+					findingKey,
+				)
+			}
+
+			createdRaw, ok := record.Get("created")
+			if !ok {
+				return nil, fmt.Errorf(
+					"Neo4j no devolvió el estado de creación del finding %s",
+					findingKey,
+				)
+			}
+
+			created, ok := createdRaw.(bool)
+			if !ok {
+				return nil, fmt.Errorf(
+					"el estado de creación del finding %s tiene un formato inválido",
+					findingKey,
+				)
+			}
+
 			return map[string]any{
 				"props":   props,
 				"created": created,
 			}, nil
-		}
-		return nil, fmt.Errorf("no se pudo asegurar/crear el finding para el contenedor %s e imagen %s", containerID, imageID)
-	})
-
+		},
+	)
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf(
+			"error asegurando finding contextual %s: %w",
+			findingKey,
+			err,
+		)
 	}
 
-	resMap := result.(map[string]any)
-	props := resMap["props"].(map[string]any)
-	created := resMap["created"].(bool)
+	resultMap, ok := result.(map[string]any)
+	if !ok {
+		return nil, false, fmt.Errorf(
+			"resultado inesperado asegurando finding contextual %s",
+			findingKey,
+		)
+	}
+
+	props, ok := resultMap["props"].(map[string]any)
+	if !ok {
+		return nil, false, fmt.Errorf(
+			"propiedades inesperadas asegurando finding contextual %s",
+			findingKey,
+		)
+	}
+
+	created, ok := resultMap["created"].(bool)
+	if !ok {
+		return nil, false, fmt.Errorf(
+			"estado de creación inesperado para finding contextual %s",
+			findingKey,
+		)
+	}
 
 	return &domain.Finding{
 		FindingID:         getInt64(props, "id"),
@@ -624,4 +927,71 @@ func (r *findingRepo) CloseResolvedFindingsBatch(ctx context.Context, installati
 		return []int64{}, nil
 	}
 	return res.([]int64), nil
+}
+
+// SupersedeContainerImageFindings invalida los findings contextuales asociados a
+// la imagen anterior de un contenedor sin eliminarlos, preservando su histórico.
+func (r *findingRepo) SupersedeContainerImageFindings(
+	ctx context.Context,
+	containerID string,
+	oldImageID string,
+	changedAt time.Time,
+) (int, error) {
+	containerID = strings.TrimSpace(containerID)
+	oldImageID = strings.TrimSpace(oldImageID)
+	if containerID == "" {
+		return 0, fmt.Errorf("container_id vacío")
+	}
+	if oldImageID == "" {
+		return 0, fmt.Errorf("old_image_id vacío")
+	}
+	if changedAt.IsZero() {
+		return 0, fmt.Errorf("changed_at vacío")
+	}
+
+	query := `
+		MATCH (c:Container {id: $container_id})-[:HAS_FINDING]->(f:Finding)
+		WHERE f.container_id = $container_id
+		  AND f.image_id = $old_image_id
+		  AND toUpper(coalesce(f.status, 'OPEN')) <> 'SUPERSEDED'
+		SET f.status = 'SUPERSEDED',
+		    f.remediation_factor = 0.0,
+		    f.risk_score = 0.0,
+		    f.priority_score = 0.0,
+		    f.resolved_at = $changed_at
+		RETURN count(f) AS affected
+	`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	result, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		res, err := tx.Run(ctx, query, map[string]any{
+			"container_id": containerID,
+			"old_image_id": oldImageID,
+			"changed_at":   changedAt.UTC(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		if !res.Next(ctx) {
+			if err := res.Err(); err != nil {
+				return nil, err
+			}
+			return int64(0), nil
+		}
+
+		affected, _ := res.Record().Get("affected")
+		return affected, res.Err()
+	})
+	if err != nil {
+		return 0, fmt.Errorf(
+			"error invalidando findings de container_id=%s e image_id=%s: %w",
+			containerID,
+			oldImageID,
+			err,
+		)
+	}
+
+	return int(getInt64(map[string]any{"affected": result}, "affected")), nil
 }

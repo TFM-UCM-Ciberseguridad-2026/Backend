@@ -47,7 +47,12 @@ func (r RemediationLevel) RemediationStatus() string {
 
 type AppliedPatch struct {
 	PatchID           int64             `json:"patch_id"`
-	InstallationID    string            `json:"installation_id"`
+	AssetType         string            `json:"asset_type,omitempty"`
+	AssetID           string            `json:"asset_id,omitempty"`
+	InstallationID    string            `json:"installation_id,omitempty"`
+	ContainerID       string            `json:"container_id,omitempty"`
+	ImageID           string            `json:"image_id,omitempty"`
+	FindingID         int64             `json:"finding_id,omitempty"`
 	CVEID             string            `json:"cve_id"`
 	AppliedAt         time.Time         `json:"applied_at"`
 	AppliedBy         string            `json:"applied_by"`

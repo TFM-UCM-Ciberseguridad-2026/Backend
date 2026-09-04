@@ -6,13 +6,17 @@ package domain
 // PatchQueueItem es una entrada de la cola. Lleva el activo y el software además del
 // finding para que la respuesta se pueda leer sin consultar el grafo por cada línea.
 type PatchQueueItem struct {
-	Position int `json:"position"`
+	Position  int    `json:"position"`
+	AssetType string `json:"asset_type"`
+	AssetID   string `json:"asset_id"`
 
 	FindingID int64  `json:"finding_id"`
 	CVEID     string `json:"cve_id"`
 	Status    string `json:"status"`
 
-	InstallationID  string `json:"installation_id"`
+	InstallationID  string `json:"installation_id,omitempty"`
+	ContainerID     string `json:"container_id,omitempty"`
+	ImageID         string `json:"image_id,omitempty"`
 	SoftwareName    string `json:"software_name"`
 	SoftwareVersion string `json:"software_version"`
 	SoftwareVendor  string `json:"software_vendor,omitempty"`
