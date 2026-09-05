@@ -30,11 +30,6 @@ func (r *patchRepo) SaveApplication(ctx context.Context, a *domain.AppliedPatch)
 		    rel.verification_reason     = $verification_reason,
 		    rel.installed_version       = $installed_version,
 		    rel.expected_version        = $expected_version,
-		    rel.matched_package         = $matched_package
-		    rel.verification_conclusive = $verification_conclusive,
-		    rel.verification_reason     = $verification_reason,
-		    rel.installed_version       = $installed_version,
-		    rel.expected_version        = $expected_version,
 		    rel.matched_package         = $matched_package,
 		    rel.asset_type              = CASE WHEN $asset_type = '' THEN CASE WHEN target:Container THEN 'CONTAINER' ELSE 'SOFTWARE_INSTALLATION' END ELSE $asset_type END,
 		    rel.asset_id                = CASE WHEN $asset_id = '' THEN target.id ELSE $asset_id END,
