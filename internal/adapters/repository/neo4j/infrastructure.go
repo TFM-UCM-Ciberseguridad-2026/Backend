@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -1482,10 +1483,36 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 
 			// Seleccionar la clave canónica de MERGE según el tipo de nodo,
 			// para respetar las constraints UNIQUE existentes en la BD.
+			//
+			// matchProps admite clave compuesta porque no todos los nodos se identifican por
+			// una sola propiedad: SLAConfig no tiene `id` y su identidad es el par
+			// (category, severity).
 			var matchKey string
 			var matchVal interface{}
+			var matchProps map[string]interface{}
 
 			switch primaryLabel {
+			case "SLAConfig":
+				// Sin `id`: la identidad es el par (categoría de activo, severidad). Si se
+				// tratara con la clave por defecto se crearía un `id` sintético con el
+				// elementId de origen y, al reimportar en otra base, saldrían duplicados en
+				// lugar de reutilizar la configuración existente.
+				cat, hasCat := props["category"]
+				sev, hasSev := props["severity"]
+				if hasCat && hasSev && cat != nil && sev != nil {
+					matchProps = map[string]interface{}{"category": cat, "severity": sev}
+				}
+			case "IPAddress":
+				// Mismo caso que SLAConfig: SaveIPs las crea como {ip, vlan_id} y sin `id`,
+				// así que esa pareja es su identidad. Sin esto, cada importación duplicaba
+				// las direcciones del inventario en vez de reutilizarlas.
+				ip, hasIP := props["ip"]
+				if hasIP && ip != nil {
+					matchProps = map[string]interface{}{"ip": ip}
+					if vlan, ok := props["vlan_id"]; ok && vlan != nil {
+						matchProps["vlan_id"] = vlan
+					}
+				}
 			case "Vulnerability":
 				if cveVal, exists := props["cve_id"]; exists && cveVal != nil {
 					matchKey = "cve_id"
@@ -1533,10 +1560,15 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 				}
 			}
 
-			if matchKey == "" {
-				matchKey = "id"
-				matchVal = node.ID
-				props["id"] = node.ID
+			// Los nodos de clave simple se normalizan al mismo mapa que los de clave compuesta,
+			// para que la construcción del MERGE sea única.
+			if matchProps == nil {
+				if matchKey == "" {
+					matchKey = "id"
+					matchVal = node.ID
+					props["id"] = node.ID
+				}
+				matchProps = map[string]interface{}{matchKey: matchVal}
 			}
 
 			// Construir query MERGE dinámico y aplicar todas las etiquetas del nodo
@@ -1546,18 +1578,36 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 				labelStr.WriteString(l)
 			}
 
+			// Patrón de MERGE y parámetros, con las claves ordenadas para que la consulta sea
+			// determinista y el plan de ejecución se reutilice entre nodos del mismo tipo.
+			matchKeys := make([]string, 0, len(matchProps))
+			for k := range matchProps {
+				matchKeys = append(matchKeys, k)
+			}
+			sort.Strings(matchKeys)
+
+			var patron strings.Builder
+			params := map[string]interface{}{"properties": props}
+			for i, k := range matchKeys {
+				if i > 0 {
+					patron.WriteString(", ")
+				}
+				alias := fmt.Sprintf("m_%d", i)
+				patron.WriteString(k)
+				patron.WriteString(": $")
+				patron.WriteString(alias)
+				params[alias] = matchProps[k]
+			}
+
 			query := fmt.Sprintf(`
-				MERGE (n:%s {%s: $matchVal})
+				MERGE (n:%s {%s})
 				SET n%s, n += $properties
 				RETURN elementId(n) AS elemId
-			`, primaryLabel, matchKey, labelStr.String())
+			`, primaryLabel, patron.String(), labelStr.String())
 
-			res, err := tx.Run(ctx, query, map[string]interface{}{
-				"matchVal":   matchVal,
-				"properties": props,
-			})
+			res, err := tx.Run(ctx, query, params)
 			if err != nil {
-				return nil, fmt.Errorf("error al importar nodo %s (%v): %w", primaryLabel, matchVal, err)
+				return nil, fmt.Errorf("error al importar nodo %s (%v): %w", primaryLabel, matchProps, err)
 			}
 
 			if res.Next(ctx) {
@@ -1566,8 +1616,12 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 					if node.ID != "" {
 						nodeLookup[node.ID] = elemIdStr
 					}
-					if matchValStr := fmt.Sprint(matchVal); matchValStr != "" {
-						nodeLookup[matchValStr] = elemIdStr
+					// Los nodos de clave simple se indexan además por su valor de clave, que es
+					// como los referencian las relaciones del fichero exportado.
+					if matchVal != nil {
+						if matchValStr := fmt.Sprint(matchVal); matchValStr != "" {
+							nodeLookup[matchValStr] = elemIdStr
+						}
 					}
 				}
 			}
@@ -1766,3 +1820,125 @@ func (r *infrastructureRepo) GetTTPMatrix(ctx context.Context, projectID *int64)
 
 	return res.([]domain.TTPMatrixItem), nil
 }
+
+// GetTTPStats devuelve las métricas agregadas para el dashboard de inteligencia de amenazas.
+func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (*domain.TTPStats, error) {
+	params := map[string]interface{}{"project_id": projectID}
+
+	baseWhere := `
+		MATCH (v:Vulnerability)
+		WHERE $project_id = 0 OR toString($project_id) = "0" OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
+		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) }
+	`
+
+	totalQuery := baseWhere + `
+		WITH v, 
+		  EXISTS { MATCH (v)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(:TTP) } AS has_t1,
+		  EXISTS { MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(:TTP) } AS has_t2,
+		  EXISTS { MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(:TTP) } AS has_t3
+		WITH v, (has_t1 OR has_t2 OR has_t3) AS is_mapped
+		RETURN 
+		  count(v) AS total,
+		  count(CASE WHEN is_mapped THEN 1 END) AS mapped,
+		  count(CASE WHEN NOT is_mapped THEN 1 END) AS unmapped
+	`
+
+	confidenceQuery := baseWhere + `
+		CALL {
+			WITH v
+			MATCH (v)-[r:MAPS_TO]->(t:TTP)
+			RETURN t, coalesce(r.confidence, 'medium') AS conf, coalesce(r.source, 'llm_enriched') AS src
+			UNION
+			WITH v
+			MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[r:MAPS_TO]->(t:TTP)
+			RETURN t, coalesce(r.confidence, 'medium') AS conf, coalesce(r.source, 'llm_enriched') AS src
+			UNION
+			WITH v
+			MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t:TTP)
+			RETURN t, 'high' AS conf, 'capec_static' AS src
+		}
+		// AQUI ESTA LA MAGIA: AGRUPAMOS POR TTP (t) en lugar de por (v, t)
+		WITH t, collect({conf: conf, src: src})[0] AS map_info
+		RETURN
+		  count(CASE WHEN map_info.conf = 'high' THEN 1 END) AS high_confidence,
+		  count(CASE WHEN map_info.conf = 'medium' THEN 1 END) AS medium_confidence,
+		  count(CASE WHEN map_info.src = 'capec_static' THEN 1 END) AS capec_static,
+		  count(CASE WHEN map_info.src = 'llm_enriched' THEN 1 END) AS llm_enriched
+	`
+
+	topTTPsQuery := baseWhere + `
+		CALL {
+			WITH v MATCH (v)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(t:TTP) RETURN t
+			UNION
+			WITH v MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t:TTP) RETURN t
+			UNION
+			WITH v MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t:TTP) RETURN t
+		}
+		WITH t, count(DISTINCT v) AS cnt
+		RETURN
+		  coalesce(t.ttp_id, t.id, '') AS id,
+		  coalesce(t.name, '')          AS name,
+		  coalesce(t.tactic, '')        AS tactic,
+		  cnt
+		ORDER BY cnt DESC
+		LIMIT 10
+	`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	stats := &domain.TTPStats{}
+
+	_, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		res1, err := tx.Run(ctx, totalQuery, params)
+		if err != nil { return nil, fmt.Errorf("ttp-stats totalQuery: %w", err) }
+		if res1.Next(ctx) {
+			rec := res1.Record()
+			if v, ok := rec.Get("total"); ok && v != nil { stats.TotalCVEs = int(v.(int64)) }
+			if v, ok := rec.Get("mapped"); ok && v != nil { stats.MappedCVEs = int(v.(int64)) }
+			if v, ok := rec.Get("unmapped"); ok && v != nil { stats.UnmappedCVEs = int(v.(int64)) }
+		}
+		_, _ = res1.Consume(ctx)
+
+		res2, err := tx.Run(ctx, confidenceQuery, params)
+		if err != nil { return nil, fmt.Errorf("ttp-stats confidenceQuery: %w", err) }
+		if res2.Next(ctx) {
+			rec := res2.Record()
+			if v, ok := rec.Get("high_confidence"); ok && v != nil { stats.HighConfidence = int(v.(int64)) }
+			if v, ok := rec.Get("medium_confidence"); ok && v != nil { stats.MediumConfidence = int(v.(int64)) }
+			if v, ok := rec.Get("capec_static"); ok && v != nil { stats.CapecStatic = int(v.(int64)) }
+			if v, ok := rec.Get("llm_enriched"); ok && v != nil { stats.LlmEnriched = int(v.(int64)) }
+		}
+		_, _ = res2.Consume(ctx)
+
+		res3, err := tx.Run(ctx, topTTPsQuery, params)
+		if err != nil { return nil, fmt.Errorf("ttp-stats topTTPsQuery: %w", err) }
+		for res3.Next(ctx) {
+			rec := res3.Record()
+			item := domain.TTPTopItem{}
+			if v, ok := rec.Get("id"); ok && v != nil { item.ID = fmt.Sprint(v) }
+			if v, ok := rec.Get("name"); ok && v != nil { item.Name = fmt.Sprint(v) }
+			if v, ok := rec.Get("tactic"); ok && v != nil { item.Tactic = fmt.Sprint(v) }
+			if v, ok := rec.Get("cnt"); ok && v != nil { item.Count = int(v.(int64)) }
+			if item.ID != "" { stats.TopTTPs = append(stats.TopTTPs, item) }
+		}
+		_, _ = res3.Consume(ctx)
+
+		return nil, nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if stats.TopTTPs == nil {
+		stats.TopTTPs = []domain.TTPTopItem{}
+	}
+	return stats, nil
+}
+

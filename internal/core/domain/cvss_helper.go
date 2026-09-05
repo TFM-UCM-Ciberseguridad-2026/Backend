@@ -10,6 +10,9 @@ import (
 CVSS4ToCVSS31 convierte una cadena de vector CVSS v4.0 a un vector CVSS v3.1 y calcula su puntuación base.
 */
 func CVSS4ToCVSS31(cvssv4Str string) (string, float64, error) {
+	if cvssv4Str == "" {
+		return "", 0.0, fmt.Errorf("empty CVSS vector")
+	}
 	m, err := parseCVSS4Vector(cvssv4Str)
 	if err != nil {
 		return "", 0, err
@@ -250,6 +253,23 @@ func parseCVSS2Vector(vectorStr string) (map[string]string, error) {
 	}
 
 	return metrics, nil
+}
+
+// ScoreToSeverity maps a CVSS BaseScore to a qualitative severity rating (CVSS 3.1 Qualitative Severity Rating Scale).
+// DEUDA TÉCNICA: Existe una discrepancia con el frontend en ExportVulnReportUseCase.js,
+// donde un score de 0.0 se clasifica como "LOW" en lugar de "None".
+// A futuro, el frontend debería consumir esta función vía API en lugar de reimplementar los cortes en JavaScript.
+func ScoreToSeverity(score float64) string {
+	if score >= 9.0 {
+		return "Critical"
+	} else if score >= 7.0 {
+		return "High"
+	} else if score >= 4.0 {
+		return "Medium"
+	} else if score > 0.0 {
+		return "Low"
+	}
+	return "None"
 }
 
 /*

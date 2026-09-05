@@ -14,10 +14,17 @@ Propósito arquitectónico y teórico:
 */
 
 // NewRouter crea y configura el multiplexor HTTP con las rutas de la aplicación.
-func NewRouter(h *OrchestratorHandler, hub *WSHub) *http.ServeMux {
+func NewRouter(h *OrchestratorHandler, hub *WSHub, govHandler *GovernanceHandler) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// Definición de las rutas RESTful (Go 1.22+)
+	if govHandler != nil {
+		govHandler.RegisterRoutes(mux)
+	}
+
+	// Definición de las rutas RESTful.
+	// Aprovecha el nuevo patrón de enrutamiento introducido en Go 1.22+
+
+	// Aprovecha el nuevo patrón de enrutamiento introducido en Go 1.22+
 
 	/* POST /api/projects: Crea y registra un nuevo proyecto de auditoría. */
 	mux.HandleFunc("POST /api/projects", h.CreateProject)
@@ -66,6 +73,9 @@ func NewRouter(h *OrchestratorHandler, hub *WSHub) *http.ServeMux {
 
 	/* GET /api/infrastructure/ttps: Obtiene la matriz de TTPs procesada, opcionalmente filtrada por project_id */
 	mux.HandleFunc("GET /api/infrastructure/ttps", h.GetTTPMatrix)
+
+	/* GET /api/infrastructure/ttp-stats: Métricas agregadas de TTPs para el dashboard (KPIs, top-10, distribución de fuentes). */
+	mux.HandleFunc("GET /api/infrastructure/ttp-stats", h.GetTTPStats)
 
 	/* GET /api/infrastructure/ttp-sync-status: Obtiene el estado actual del mapeo de TTPs en segundo plano. */
 	mux.HandleFunc("GET /api/infrastructure/ttp-sync-status", h.GetTTPSyncStatus)

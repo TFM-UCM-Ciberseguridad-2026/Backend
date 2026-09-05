@@ -275,6 +275,10 @@ func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64
 		endpoint.EndpointID = id
 	}
 
+	// La categoría de negocio (puesto o servidor) se congela en el activo al darlo de alta:
+	// es la que gobierna el SLA de parcheo y debe quedar fija aunque el mapeo cambie después.
+	endpoint.ApplyCategory()
+
 	if err := o.endpointPort.Save(ctx, endpoint); err != nil && !errors.Is(err, domain.ErrNodeAlreadyExists) {
 		return err
 	}
@@ -2532,6 +2536,10 @@ func (o *Orchestrator) UpdateContainer(ctx context.Context, container *domain.Co
 
 // UpdateEndpoint actualiza los datos y re-enlaza las IPs de un Endpoint en Neo4j.
 func (o *Orchestrator) UpdateEndpoint(ctx context.Context, endpoint *domain.Endpoint) error {
+	// Recalcular la categoría aquí es lo que permite reclasificar un activo mal dado de alta:
+	// al corregir su tipo, el bucket de SLA se recoloca en la misma operación.
+	endpoint.ApplyCategory()
+
 	if err := o.endpointPort.Update(ctx, endpoint); err != nil {
 		return fmt.Errorf("error actualizando endpoint: %w", err)
 	}
@@ -3189,6 +3197,7 @@ func (o *Orchestrator) GetTTPMatrix(ctx context.Context, projectID *int64) ([]do
 	return o.infraPort.GetTTPMatrix(ctx, projectID)
 }
 
+
 // Métodos auxiliares de consulta de estado previo para auditoría
 func (o *Orchestrator) GetEndpointByID(ctx context.Context, id int64) (*domain.Endpoint, error) {
 	return o.endpointPort.GetByID(ctx, id)
@@ -3216,6 +3225,11 @@ func (o *Orchestrator) GetContainerByID(ctx context.Context, id string) (*domain
 
 func (o *Orchestrator) GetProjectByID(ctx context.Context, id int64) (*domain.Project, error) {
 	return o.projectPort.GetByID(ctx, id)
+}
+// GetTTPStats devuelve las métricas agregadas para el dashboard de inteligencia de amenazas.
+func (o *Orchestrator) GetTTPStats(ctx context.Context, projectID int64) (*domain.TTPStats, error) {
+	return o.infraPort.GetTTPStats(ctx, projectID)
+
 }
 
 // PurgeRejectedVulnerabilities elimina de Neo4j todas las vulnerabilidades marcadas como REJECTED por NVD/MITRE,
