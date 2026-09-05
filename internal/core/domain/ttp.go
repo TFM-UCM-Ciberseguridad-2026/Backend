@@ -48,10 +48,18 @@ type TTPTopItem struct {
 // TTPStats agrupa las métricas de inteligencia de amenazas para el dashboard.
 // Nota MVP: duration_avg_capec_ms / duration_avg_llm_ms se omiten porque la relación
 // :MAPS_TO no persiste duración de procesamiento (solo confidence, source, updated_at).
+//
+// MappedCVEs cuenta únicamente las CVE para las que el pipeline ha escrito una
+// arista de mapeo. CapecPendingCVEs cuenta las que NO están mapeadas pero cuyo CWE
+// sí tiene cobertura en el catálogo CAPEC: son resolubles de forma determinista,
+// sin inferencia del LLM, y miden el trabajo que queda por delante. Son conceptos
+// distintos y se publican por separado; mezclarlos daba una cobertura del 100%
+// con el trabajo sin hacer.
 type TTPStats struct {
 	TotalCVEs        int          `json:"total_cves"`
 	MappedCVEs       int          `json:"mapped_cves"`
 	UnmappedCVEs     int          `json:"unmapped_cves"`
+	CapecPendingCVEs int          `json:"capec_pending_cves"`
 	HighConfidence   int          `json:"high_confidence"`
 	MediumConfidence int          `json:"medium_confidence"`
 	CapecStatic      int          `json:"capec_static"`

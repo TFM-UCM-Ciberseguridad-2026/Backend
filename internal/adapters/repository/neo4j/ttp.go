@@ -73,20 +73,6 @@ func (r *ttpRepo) DeleteByID(ctx context.Context, id string) error {
 	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
 }
 
-func (r *ttpRepo) RelateToVulnerability(ctx context.Context, cveID string, ttpID string) error {
-	query := `
-		MATCH (v:Vulnerability {cve_id: $cve_id})
-		MATCH (t:TTP {ttp_id: $ttp_id})
-		MERGE (v)-[r:EXPLOITS_VIA_TTP]->(t)
-		SET r.updated_at = timestamp()
-	`
-	params := map[string]any{
-		"cve_id": cveID,
-		"ttp_id": ttpID,
-	}
-	return executeWriteHelper(ctx, r.driver, query, params)
-}
-
 func (r *ttpRepo) SaveBatch(ctx context.Context, ttps []domain.TTP) error {
 	if len(ttps) == 0 {
 		return nil

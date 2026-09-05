@@ -35,9 +35,21 @@ type ProjectTTPSyncState struct {
 	QueuedCVEs map[string]bool
 }
 
+// maxTTPLogs acota el histórico de líneas que el servidor conserva por proyecto.
+// Es el mismo tope que ya aplicaba el cliente (.slice(-200)); sin él, el barrido
+// periódico —que se repite cada 10 minutos indefinidamente— hacía crecer el slice
+// sin límite y engordaba cada respuesta de estado, que además se sondea cada 1,5 s.
+const maxTTPLogs = 200
+
 type TTPBackgroundSyncManager struct {
 	mu            sync.RWMutex
 	projectStates map[int64]*ProjectTTPSyncState
+	// inFlight deduplica CVEs de forma GLOBAL, independientemente del proyecto.
+	// QueuedCVEs es por proyecto y sirve para informar del progreso, pero no vale
+	// como control de duplicados: el barrido periódico encola con projectID=0 y el
+	// disparo manual con projectID=N, así que la misma CVE podía estar en las dos
+	// colas y recibir dos inferencias del modelo.
+	inFlight map[string]bool
 }
 
 type TTPBackgroundSyncResponse struct {
@@ -131,6 +143,7 @@ func NewOrchestrator(
 		CapecReady:       make(chan struct{}),
 		ttpSync: TTPBackgroundSyncManager{
 			projectStates: make(map[int64]*ProjectTTPSyncState),
+			inFlight:      make(map[string]bool),
 		},
 	}
 }
@@ -254,7 +267,11 @@ func (o *Orchestrator) CreateProject(ctx context.Context, project *domain.Projec
 
 // DeleteProject elimina un proyecto y su infraestructura asociada en cascada.
 func (o *Orchestrator) DeleteProject(ctx context.Context, projectID int64) error {
-	return o.projectPort.DeleteByID(ctx, projectID)
+	if err := o.projectPort.DeleteByID(ctx, projectID); err != nil {
+		return err
+	}
+	o.ForgetProjectTTPState(projectID)
+	return nil
 }
 
 // RenameProject actualiza el nombre de un proyecto.
@@ -2790,10 +2807,13 @@ func (o *Orchestrator) EnqueueCVE(cveID string, projectID int64) {
 	state := o.getProjectState(projectID)
 
 	o.ttpSync.mu.Lock()
-	if state.QueuedCVEs[cveID] {
+	// La deduplicación es global (ver TTPBackgroundSyncManager.inFlight): una CVE
+	// solo se procesa una vez, venga del barrido global o del disparo manual.
+	if o.ttpSync.inFlight[cveID] {
 		o.ttpSync.mu.Unlock()
-		return // Ya está encolado o procesándose
+		return // Ya está encolado o procesándose en algún contexto
 	}
+	o.ttpSync.inFlight[cveID] = true
 	state.QueuedCVEs[cveID] = true
 	state.Processing = true
 	o.ttpSync.mu.Unlock()
@@ -2807,9 +2827,15 @@ func (o *Orchestrator) EnqueueCVE(cveID string, projectID int64) {
 	case queue <- ttpTask{cveID: cveID, projectID: projectID}:
 		// Encolado con éxito
 	default:
-		// Sacar del mapa si se descarta de la cola (para que pueda volver a re-encolarse en el barrido)
+		// Sacar de los mapas si se descarta de la cola (para que pueda volver a re-encolarse en el barrido)
 		o.ttpSync.mu.Lock()
+		delete(o.ttpSync.inFlight, cveID)
 		delete(state.QueuedCVEs, cveID)
+		// Revertir también la bandera. Si esta era la única CVE del estado, nadie
+		// volvería a llamar a endProcessingCVE y el proyecto quedaba "procesando"
+		// para siempre: el modal del frontend giraba sin fin y bloqueaba el botón
+		// de recalcular.
+		state.Processing = len(state.QueuedCVEs) > 0
 		o.ttpSync.mu.Unlock()
 		o.addTTPLog(fmt.Sprintf("Advertencia: Cola de mapeo TTP llena, descartado temporalmente: %s", cveID), projectID)
 	}
@@ -2829,6 +2855,7 @@ func (o *Orchestrator) endProcessingCVE(cveID string, projectID int64) {
 	defer o.ttpSync.mu.Unlock()
 	state.CurrentCVE = ""
 	delete(state.QueuedCVEs, cveID)
+	delete(o.ttpSync.inFlight, cveID)
 
 	if len(state.QueuedCVEs) == 0 {
 		state.Processing = false
@@ -2858,22 +2885,38 @@ func (o *Orchestrator) processSingleCVE(ctx context.Context, task ttpTask) error
 
 	start := time.Now()
 	if len(validCWEs) > 0 {
-		mappedCWE = validCWEs[0]
+		// Se recorren TODOS los CWE válidos, no solo el primero: la cobertura CAPEC
+		// puede estar en un CWE posterior, y quedarse con validCWEs[0] mandaba al
+		// LLM CVEs que tenían respuesta determinista disponible. Así el orden en que
+		// el NVD publica las debilidades deja de decidir el resultado.
 		var capecErr error
-		log.Printf("DEBUG HEX: mappedCWE=%q | len=%d | hex=%x", mappedCWE, len(mappedCWE), mappedCWE)
 		if o.capecPort != nil {
-			ttps, capecErr = o.capecPort.GetTTPsByCWE(ctx, mappedCWE)
+			for _, cwe := range validCWEs {
+				candidatas, errCWE := o.capecPort.GetTTPsByCWE(ctx, cwe)
+				if errCWE != nil {
+					capecErr = errCWE
+					continue
+				}
+				if len(candidatas) > 0 {
+					mappedCWE = cwe
+					ttps = candidatas
+					break
+				}
+			}
 		} else {
 			capecErr = fmt.Errorf("capecPort no inicializado")
 		}
-		if capecErr == nil && len(ttps) > 0 {
+
+		if len(ttps) > 0 {
 			confidence = "high"
 			source = "capec_static"
 		} else {
+			// Sin cobertura de catálogo en ninguno: el LLM trabaja sobre el primer CWE válido.
+			mappedCWE = validCWEs[0]
 			if capecErr != nil {
-				log.Printf("[CAPEC] Error consultando CAPEC para %s: %v — usando fallback LLM", mappedCWE, capecErr)
+				log.Printf("[CAPEC] Error consultando CAPEC para %s (%v): %v — usando fallback LLM", v.CVEID, validCWEs, capecErr)
 			} else {
-				log.Printf("[CAPEC] Sin cobertura para %s, usando fallback LLM", mappedCWE)
+				log.Printf("[CAPEC] Sin cobertura para %s en %v, usando fallback LLM", v.CVEID, validCWEs)
 			}
 			ttps, _, err = o.ttpMapper.MapEnrichedToTTPRaw(ctx, mappedCWE, v.Description, v.CVSSVector)
 			confidence = "medium"
@@ -2917,12 +2960,25 @@ func (o *Orchestrator) addTTPLog(msg string, projectID int64) {
 	defer o.ttpSync.mu.Unlock()
 	logLine := fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), msg)
 	state.Logs = append(state.Logs, logLine)
+	// Anillo acotado: conservamos solo las últimas maxTTPLogs líneas.
+	if len(state.Logs) > maxTTPLogs {
+		state.Logs = state.Logs[len(state.Logs)-maxTTPLogs:]
+	}
 
 	prefix := "[TTP-BG-GLOBAL]"
 	if projectID > 0 {
 		prefix = fmt.Sprintf("[TTP-PROJ-%d]", projectID)
 	}
-	fmt.Printf("%s %s\n", prefix, msg)
+	log.Printf("%s %s", prefix, msg)
+}
+
+// ForgetProjectTTPState descarta el estado de sincronización de TTPs de un
+// proyecto. Sin esto, projectStates solo crecía: los proyectos borrados seguían
+// ocupando su entrada (y su histórico de logs) mientras el proceso siguiera vivo.
+func (o *Orchestrator) ForgetProjectTTPState(projectID int64) {
+	o.ttpSync.mu.Lock()
+	defer o.ttpSync.mu.Unlock()
+	delete(o.ttpSync.projectStates, projectID)
 }
 
 func (o *Orchestrator) GetTTPSyncStatus(projectID int64) TTPBackgroundSyncResponse {
@@ -2942,10 +2998,10 @@ func (o *Orchestrator) GetTTPSyncStatus(projectID int64) TTPBackgroundSyncRespon
 	logsCopy := make([]string, len(state.Logs))
 	copy(logsCopy, state.Logs)
 
-	queueLen := len(o.ttpQueueHigh)
-	if projectID == 0 {
-		queueLen = len(o.ttpQueueLow)
-	}
+	// La ocupación que se informa es la del proyecto consultado, no la del canal
+	// compartido por todos los proyectos: es lo que el usuario espera leer dentro
+	// del estado de "su" proyecto.
+	queueLen := len(state.QueuedCVEs)
 
 	return TTPBackgroundSyncResponse{
 		Processing:  state.Processing,

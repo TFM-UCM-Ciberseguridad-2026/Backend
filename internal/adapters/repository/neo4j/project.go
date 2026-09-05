@@ -226,12 +226,21 @@ func (r *projectRepo) ExportGraph(ctx context.Context, id int64) (*domain.GraphD
 	//   · INVOLVES>    recoge la asignación RACI, que vive en la arista
 	//     (:RACIActivity)-[:INVOLVES {role_type}]->(:Role). Sin ella se exportarían las
 	//     actividades y los roles pero se perdería quién es R, A, C o I en cada una.
+	//
+	// HAS_WEAKNESS> y MAPS_TO> son las dos aristas que escribe realmente el
+	// pipeline de TTPs (LinkTTPsToVulnerability). Antes el filtro solo listaba
+	// EXPLOITS_VIA_TTP>, que nunca llegó a crearse, así que el mapeo de TTPs no
+	// viajaba en el export.
+	//
+	// <FIXES se recorre hacia atrás porque la arista va (:Patch)-[:FIXES]->(:Vulnerability):
+	// desde la vulnerabilidad hay que ir en sentido contrario para alcanzar el parche.
+	// Sin ella los nodos Patch no salían en el export y el informe no podía listarlos.
 	query := `
 		MATCH (p:Project)
 		WHERE toString(p.id) = toString($id) OR elementId(p) = toString($id)
 		CALL apoc.path.subgraphAll(p, {
 			maxLevel: 10,
-			relationshipFilter: "HAS_ENDPOINT>|CONTAINS_NETWORK>|HAS_IP>|HAS_HARDWARE>|CONNECTED_TO>|HAS_INSTALLATION>|INSTANCE_OF>|HOSTS>|USES_IMAGE>|HAS_FINDING>|OF_VULNERABILITY>|HAS_EXPLOIT>|HAS_REMEDIATION>|USES_PATCH>|FIXES>|HAS_CWE>|EXPLOITS_VIA_TTP>|<MAPS_TO_CWE|<MAPS_TO_TTP|<USES|<BELONGS_TO|INVOLVES>"
+			relationshipFilter: "HAS_ENDPOINT>|CONTAINS_NETWORK>|HAS_IP>|HAS_HARDWARE>|CONNECTED_TO>|HAS_INSTALLATION>|INSTANCE_OF>|HOSTS>|USES_IMAGE>|HAS_FINDING>|OF_VULNERABILITY>|HAS_EXPLOIT>|HAS_REMEDIATION>|USES_PATCH>|FIXES>|HAS_CWE>|HAS_WEAKNESS>|MAPS_TO>|<FIXES|<MAPS_TO_CWE|<MAPS_TO_TTP|<USES|<BELONGS_TO|INVOLVES>"
 		}) YIELD nodes, relationships
 		
 		WITH 

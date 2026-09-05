@@ -201,7 +201,6 @@ type TTPPort interface {
 	Update(ctx context.Context, ttp *domain.TTP) error
 	GetByID(ctx context.Context, id string) (*domain.TTP, error)
 	DeleteByID(ctx context.Context, id string) error
-	RelateToVulnerability(ctx context.Context, cveID string, ttpID string) error
 	SaveBatch(ctx context.Context, ttps []domain.TTP) error
 }
 

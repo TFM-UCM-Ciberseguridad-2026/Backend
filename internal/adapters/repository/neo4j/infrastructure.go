@@ -85,7 +85,7 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 	}
 
 	query := matchClause + `
-			OPTIONAL MATCH (n)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(t1:TTP)
+			OPTIONAL MATCH (n)-[:MAPS_TO]->(t1:TTP)
 			WHERE "Vulnerability" IN labels(n)
 			WITH n, collect(DISTINCT t1) AS t1List
 
@@ -551,7 +551,7 @@ func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context,
 		// Recoger TTPs por las tres rutas de mapeo posibles
 		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t1:TTP)
 		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t2:TTP)
-		OPTIONAL MATCH (v)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(t3:TTP)
+		OPTIONAL MATCH (v)-[:MAPS_TO]->(t3:TTP)
 
 		// Combinar TTPs de todas las rutas SIN coalesce (que descarta valores)
 		WITH v, [t IN [t1, t2, t3] WHERE t IS NOT NULL] AS ttps_raw
@@ -1747,16 +1747,23 @@ func (r *infrastructureRepo) GetTTPMatrix(ctx context.Context, projectID *int64)
 
 		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t1:TTP)
 		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t2:TTP)
-		OPTIONAL MATCH (v)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(t3:TTP)
+		OPTIONAL MATCH (v)-[:MAPS_TO]->(t3:TTP)
 
 		WITH v, [t IN [t1, t2, t3] WHERE t IS NOT NULL] AS ttps_raw
 		UNWIND (CASE WHEN size(ttps_raw) > 0 THEN ttps_raw ELSE [null] END) AS t
 		WITH v, t WHERE t IS NOT NULL
 
+		// La descripción se recorta a 160 caracteres: una misma CVE cuelga de
+		// varias técnicas, así que su texto completo viajaba repetido y suponía el
+		// 71% de una respuesta de ~1 MB que el frontend recarga con frecuencia.
 		WITH t, collect(DISTINCT {
 			id: coalesce(v.cve_id, v.id, ''),
 			cvss: coalesce(v.cvss_score, v.base_score, 'N/A'),
-			desc: coalesce(v.description, '')
+			desc: CASE
+			        WHEN v.description IS NULL THEN ''
+			        WHEN size(v.description) > 160 THEN left(v.description, 160) + '…'
+			        ELSE v.description
+			      END
 		}) AS cves
 
 		RETURN coalesce(t.ttp_id, t.id, '') AS ttp_id, 
@@ -1837,18 +1844,32 @@ func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (
 		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) }
 	`
 
+	// Una CVE está mapeada cuando el pipeline ha escrito una arista de mapeo para
+	// ella. Que su CWE sea alcanzable desde el catálogo CAPEC NO es un mapeo: se
+	// cumple sin que el sistema haya hecho nada, y contarlo como tal daba un KPI
+	// de cobertura del 100% con el trabajo sin hacer. Esa alcanzabilidad se
+	// publica ahora como métrica propia (capec_pending), que es justamente la
+	// cifra de trabajo determinista que queda por delante.
 	totalQuery := baseWhere + `
-		WITH v, 
-		  EXISTS { MATCH (v)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(:TTP) } AS has_t1,
-		  EXISTS { MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(:TTP) } AS has_t2,
-		  EXISTS { MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(:TTP) } AS has_t3
-		WITH v, (has_t1 OR has_t2 OR has_t3) AS is_mapped
-		RETURN 
+		WITH v,
+		  EXISTS { MATCH (v)-[:MAPS_TO]->(:TTP) } AS mapeo_directo,
+		  EXISTS { MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(:TTP) } AS mapeo_via_cwe,
+		  EXISTS { MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(:TTP) } AS capec_alcanzable
+		WITH v, (mapeo_directo OR mapeo_via_cwe) AS is_mapped, capec_alcanzable
+		RETURN
 		  count(v) AS total,
 		  count(CASE WHEN is_mapped THEN 1 END) AS mapped,
-		  count(CASE WHEN NOT is_mapped THEN 1 END) AS unmapped
+		  count(CASE WHEN NOT is_mapped THEN 1 END) AS unmapped,
+		  count(CASE WHEN NOT is_mapped AND capec_alcanzable THEN 1 END) AS capec_pending
 	`
 
+	// La procedencia y la confianza se leen de las propiedades que escribe
+	// LinkTTPsToVulnerability. No hay rama que las invente: la vía CAPEC aparece
+	// aquí porque el worker la ejecutó y dejó source='capec_static', no por el
+	// mero hecho de existir la ruta en el catálogo.
+	//
+	// Se cuenta por MAPEO (par CVE-técnica), no por técnica: "88 de alta
+	// confianza" son 88 mapeos, que es lo que la interfaz dice medir.
 	confidenceQuery := baseWhere + `
 		CALL {
 			WITH v
@@ -1858,23 +1879,25 @@ func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (
 			WITH v
 			MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[r:MAPS_TO]->(t:TTP)
 			RETURN t, coalesce(r.confidence, 'medium') AS conf, coalesce(r.source, 'llm_enriched') AS src
-			UNION
-			WITH v
-			MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t:TTP)
-			RETURN t, 'high' AS conf, 'capec_static' AS src
 		}
-		// AQUI ESTA LA MAGIA: AGRUPAMOS POR TTP (t) en lugar de por (v, t)
-		WITH t, collect({conf: conf, src: src})[0] AS map_info
+		// Un mismo par (CVE, técnica) puede llegar por las dos rutas. El empate se
+		// resuelve con una regla explícita —el determinista gana al inferido— en
+		// lugar de con collect(...)[0], que elegía un elemento arbitrario y hacía
+		// que dos ejecuciones sobre los mismos datos pudieran diferir.
+		WITH v, t, collect(DISTINCT {conf: conf, src: src}) AS candidatos
+		WITH
+		  CASE WHEN any(c IN candidatos WHERE c.src = 'capec_static') THEN 'capec_static' ELSE 'llm_enriched' END AS src,
+		  CASE WHEN any(c IN candidatos WHERE c.conf = 'high')        THEN 'high'         ELSE 'medium'        END AS conf
 		RETURN
-		  count(CASE WHEN map_info.conf = 'high' THEN 1 END) AS high_confidence,
-		  count(CASE WHEN map_info.conf = 'medium' THEN 1 END) AS medium_confidence,
-		  count(CASE WHEN map_info.src = 'capec_static' THEN 1 END) AS capec_static,
-		  count(CASE WHEN map_info.src = 'llm_enriched' THEN 1 END) AS llm_enriched
+		  count(CASE WHEN conf = 'high' THEN 1 END) AS high_confidence,
+		  count(CASE WHEN conf = 'medium' THEN 1 END) AS medium_confidence,
+		  count(CASE WHEN src = 'capec_static' THEN 1 END) AS capec_static,
+		  count(CASE WHEN src = 'llm_enriched' THEN 1 END) AS llm_enriched
 	`
 
 	topTTPsQuery := baseWhere + `
 		CALL {
-			WITH v MATCH (v)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(t:TTP) RETURN t
+			WITH v MATCH (v)-[:MAPS_TO]->(t:TTP) RETURN t
 			UNION
 			WITH v MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t:TTP) RETURN t
 			UNION
@@ -1903,6 +1926,7 @@ func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (
 			if v, ok := rec.Get("total"); ok && v != nil { stats.TotalCVEs = int(v.(int64)) }
 			if v, ok := rec.Get("mapped"); ok && v != nil { stats.MappedCVEs = int(v.(int64)) }
 			if v, ok := rec.Get("unmapped"); ok && v != nil { stats.UnmappedCVEs = int(v.(int64)) }
+			if v, ok := rec.Get("capec_pending"); ok && v != nil { stats.CapecPendingCVEs = int(v.(int64)) }
 		}
 		_, _ = res1.Consume(ctx)
 
