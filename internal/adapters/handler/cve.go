@@ -151,6 +151,8 @@ func (h *OrchestratorHandler) AddEndpointToProject(w http.ResponseWriter, r *htt
 	}
 
 	endpoint := payload.Endpoint
+	endpoint.Type = domain.NormalizeEndpointType(endpoint.Type)
+
 	if err := h.orchestrator.AddEndpointToProject(r.Context(), projectID, &endpoint); err != nil {
 		emitAuditLog("CREACION", "Endpoint", fmt.Sprint(endpoint.EndpointID), endpoint.Hostname, idStr, payload.Justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
@@ -1034,6 +1036,7 @@ func (h *OrchestratorHandler) UpdateEndpoint(w http.ResponseWriter, r *http.Requ
 
 	endpoint := req.Endpoint
 	endpoint.EndpointID = endpointID
+	endpoint.Type = domain.NormalizeEndpointType(endpoint.Type)
 
 	if err := h.orchestrator.UpdateEndpoint(r.Context(), &endpoint); err != nil {
 		emitAuditLog("MODIFICACION", "Endpoint", idStr, endpoint.Hostname, "", justification, nil, "ERROR", err.Error())
@@ -1823,6 +1826,7 @@ func (h *OrchestratorHandler) GetTTPMatrix(w http.ResponseWriter, r *http.Reques
 	_ = json.NewEncoder(w).Encode(matrix)
 }
 
+
 // GET /api/cpe/search?query=... o ?q=... o ?vendor=...&product=...&version=...
 func (h *OrchestratorHandler) SearchCPE(w http.ResponseWriter, r *http.Request) {
 	rawInput := r.URL.Query().Get("query")
@@ -1849,4 +1853,25 @@ func (h *OrchestratorHandler) SearchCPE(w http.ResponseWriter, r *http.Request) 
 	}
 
 	sendJSON(w, items, http.StatusOK)
+}
+// GetTTPStats devuelve métricas agregadas de TTPs para el dashboard (KPIs, top-10, distribución).
+func (h *OrchestratorHandler) GetTTPStats(w http.ResponseWriter, r *http.Request) {
+	var projectID int64
+	projectIDStr := r.URL.Query().Get("project_id")
+	if projectIDStr != "" {
+		parsedID, err := strconv.ParseInt(projectIDStr, 10, 64)
+		if err == nil {
+			projectID = parsedID
+		}
+	}
+
+	stats, err := h.orchestrator.GetTTPStats(r.Context(), projectID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	json.NewEncoder(w).Encode(stats)
 }
