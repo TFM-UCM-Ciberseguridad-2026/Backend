@@ -16,4 +16,8 @@ type Patch struct {
 	Description string     `json:"description"`
 	ReleaseDate *time.Time `json:"release_date"`
 	URL         string     `json:"url"`
+	Source        string `json:"source"`
+	ReferenceType string `json:"reference_type"`
+	Official      bool   `json:"official"`
+	FixedVersion  string `json:"fixed_version,omitempty"`
 }
