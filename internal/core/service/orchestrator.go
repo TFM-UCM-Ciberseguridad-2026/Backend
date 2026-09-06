@@ -809,6 +809,7 @@ func (o *Orchestrator) ComputeEndpointRisk(ctx context.Context, endpointID int64
 
 		if err := o.riskPort.UpdateFindingScores(
 			ctx, fc.FindingID, impactScore, likelihood, exposureFactor, fc.RemediationFactor, riskScore, assetCriticality, urgencyBoost, priorityScore,
+			ClassifyRiskTier(riskScore), ClassifyRiskTier(priorityScore),
 		); err != nil {
 			return fmt.Errorf("error actualizando scores del finding %d: %w", fc.FindingID, err)
 		}
@@ -1216,7 +1217,12 @@ func (o *Orchestrator) RegisterPatchesForVulnerability(ctx context.Context, cveI
 		if pCopy.URL != "" {
 			existing, err := o.patchPort.GetByURL(ctx, pCopy.URL)
 			if err == nil && existing != nil {
-				// El parche ya está en el grafo: reutilizamos su nodo y solo garantizamos el enlace.
+				// El parche ya está en el grafo: reutilizamos su nodo y actualizamos
+				// la clasificación para corregir registros creados antes de estos campos.
+				pCopy.PatchID = existing.PatchID
+				if err := o.patchPort.Update(ctx, &pCopy); err != nil {
+					continue
+				}
 				_ = o.relationshipPort.LinkPatchToVulnerability(ctx, existing.PatchID, cveID)
 				continue
 			}
@@ -1243,6 +1249,51 @@ func (o *Orchestrator) GetPatchesForVulnerability(ctx context.Context, cveID str
 		return nil, fmt.Errorf("cve_id vacío")
 	}
 	return o.patchPort.GetByVulnerability(ctx, cveID)
+}
+
+// resolvePatchLevel valida el patch seleccionado y evita que el cliente fuerce un nivel
+// de remediación incompatible con la evidencia almacenada del patch.
+func (o *Orchestrator) resolvePatchLevel(ctx context.Context, cveID string, patchID int64) (domain.RemediationLevel, error) {
+	patch, err := o.patchPort.GetByID(ctx, patchID)
+	if err != nil {
+		return "", fmt.Errorf("error recuperando el patch %d: %w", patchID, err)
+	}
+	if patch == nil {
+		return "", fmt.Errorf("no existe el patch %d", patchID)
+	}
+
+	patches, err := o.patchPort.GetByVulnerability(ctx, cveID)
+	if err != nil {
+		return "", fmt.Errorf("error comprobando el patch %d para la CVE %s: %w", patchID, cveID, err)
+	}
+
+	belongsToCVE := false
+	for _, candidate := range patches {
+		if candidate.PatchID == patchID {
+			belongsToCVE = true
+			break
+		}
+	}
+	if !belongsToCVE {
+		return "", fmt.Errorf("el patch %d no está asociado a la CVE %s", patchID, cveID)
+	}
+
+	if patch.Official && fixedVersionIsValid(patch.FixedVersion) {
+		return domain.RemediationLevelOfficialFix, nil
+	}
+	return domain.RemediationLevelWorkaround, nil
+}
+
+func fixedVersionIsValid(raw string) bool {
+	for _, fixedVersion := range domain.ParseFixedVersions(raw) {
+		version := strings.TrimSpace(fixedVersion.Version)
+		if version != "" {
+			if _, comparable := domain.CompareVersions(version, version); comparable {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // DeclarePatchApplied registra un parche aplicado, cierra en cascada todos los findings
@@ -1294,6 +1345,11 @@ func (o *Orchestrator) DeclarePatchApplied(
 		} else {
 			patchID, _ = o.nextNodeID(ctx, "Patch")
 		}
+	}
+
+	level, err := o.resolvePatchLevel(ctx, cveID, patchID)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	remediationFactor := RemediationFactorForLevel(level)
@@ -1474,6 +1530,12 @@ func (o *Orchestrator) DeclarePatchAppliedToContainer(
 		}
 		patchID = patches[0].PatchID
 	}
+
+	level, err := o.resolvePatchLevel(ctx, cveID, patchID)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	factor := RemediationFactorForLevel(level)
 	status := "OPEN"
 	if level == domain.RemediationLevelOfficialFix {
@@ -1924,7 +1986,58 @@ func (o *Orchestrator) ComputeAllProjectsRisk(ctx context.Context) error {
 // GenerateExploitationPaths devuelve las rutas de explotación calculadas desde el motor de grafos,
 // filtradas por proyecto si se indica un projectID > 0.
 func (o *Orchestrator) GenerateExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error) {
-	return o.infraPort.GetExploitationPaths(ctx, projectID)
+	paths, err := o.infraPort.GetExploitationPaths(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	o.scorePathPriorities(ctx, paths)
+	return paths, nil
+}
+
+// scorePathPriorities pondera cada ruta por la criticidad de su activo final.
+// El repositorio ya deja PathRiskScore; aquí se añade el peso de negocio, que
+// necesita leer el endpoint. Si no se puede leer, queda criticidad neutra en vez
+// de descartar la ruta.
+func (o *Orchestrator) scorePathPriorities(ctx context.Context, paths []domain.ExploitationPath) {
+	criticalityCache := make(map[int64]float64)
+
+	for i := range paths {
+		path := &paths[i]
+		if len(path.Steps) == 0 {
+			continue
+		}
+
+		// El impacto lo marca el activo más valioso que toca la cadena, no el
+		// último: una ruta que atraviesa la BBDD de producción para acabar en un
+		// puesto ya ha hecho el daño al pasar por la BBDD.
+		peak := 0.0
+		var peakID int64
+		for _, step := range path.Steps {
+			criticality, cached := criticalityCache[step.TargetEndpointID]
+			if !cached {
+				criticality = minAssetCriticality
+				if endpoint, err := o.endpointPort.GetByID(ctx, step.TargetEndpointID); err == nil && endpoint != nil {
+					criticality = CalculateAssetCriticality(
+						endpoint.InternetExposed,
+						endpoint.Environment,
+						endpoint.ConfidentialityReq,
+						endpoint.IntegrityReq,
+						endpoint.AvailabilityReq,
+					)
+				}
+				criticalityCache[step.TargetEndpointID] = criticality
+			}
+
+			if criticality > peak {
+				peak, peakID = criticality, step.TargetEndpointID
+			}
+		}
+
+		path.TargetCriticality = peak
+		path.CriticalAssetID = peakID
+		path.PathPriorityScore = CalculatePathPriority(path.PathRiskScore, peak)
+	}
 }
 
 // IsAnalysisPending comprueba si hay enriquecimiento NVD activo en background.
@@ -3181,6 +3294,17 @@ func (o *Orchestrator) RefreshProjectPatches(ctx context.Context, projectID int6
 	return result, nil
 }
 
+
+// fixedVersionText genera un texto con las versiones fijas separadas por comas.
+func fixedVersionText(fixedVersions []domain.FixedVersion) string {
+    values := make([]string, 0, len(fixedVersions))
+    for _, fixedVersion := range fixedVersions {
+        values = append(values, fixedVersion.String())
+    }
+    return strings.Join(values, ", ")
+}
+
+
 // SyntheticPatchFromFixedVersions genera un objeto Patch sintético basado en la existencia de versiones fijas para un CVE dado.
 func syntheticPatchFromFixedVersions(cveID string, fixedVersions []domain.FixedVersion) *domain.Patch {
 	if strings.TrimSpace(cveID) == "" || len(fixedVersions) == 0 {
@@ -3188,8 +3312,12 @@ func syntheticPatchFromFixedVersions(cveID string, fixedVersions []domain.FixedV
 	}
 
 	return &domain.Patch{
-		Description: fmt.Sprintf("Mitigación por actualización de versión (%s)", cveID),
-		URL:         fmt.Sprintf("fixed-version://%s", cveID),
+		Description:   fmt.Sprintf("Actualización recomendada según OSV (%s)", cveID),
+		URL:           fmt.Sprintf("https://osv.dev/vulnerability/%s", cveID),
+		Source:        "OSV",
+		ReferenceType: "FIXED_VERSION",
+		Official:      false,
+		FixedVersion:  fixedVersionText(fixedVersions),
 	}
 }
 

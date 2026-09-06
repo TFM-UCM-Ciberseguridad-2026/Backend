@@ -219,7 +219,9 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 }
 
 // UpdateFindingScores persiste los scores calculados en el nodo Finding.
-func (r *riskRepo) UpdateFindingScores(ctx context.Context, findingID int64, impactScore, likelihood, exposureFactor, remediationFactor, riskScore, assetCriticality, urgencyBoost, priorityScore float64) error {
+// Los tiers se guardan aquí igual que en Endpoint, Installation y Project: sin ellos
+// el finding tenía score pero no etiqueta, y el front mostraba UNKNOWN.
+func (r *riskRepo) UpdateFindingScores(ctx context.Context, findingID int64, impactScore, likelihood, exposureFactor, remediationFactor, riskScore, assetCriticality, urgencyBoost, priorityScore float64, riskTier, priorityTier string) error {
 	query := `
 		MATCH (f:Finding {id: $id})
 		SET f.impact_score       = $impact_score,
@@ -227,9 +229,11 @@ func (r *riskRepo) UpdateFindingScores(ctx context.Context, findingID int64, imp
 			f.exposure_factor     = $exposure_factor,
 		    f.remediation_factor = $remediation_factor,
 		    f.risk_score         = $risk_score,
+		    f.risk_tier          = $risk_tier,
 		    f.asset_criticality  = $asset_criticality,
 		    f.urgency_boost      = $urgency_boost,
 		    f.priority_score     = $priority_score,
+		    f.priority_tier      = $priority_tier,
 		    f.risk_computed_at   = $now
 	`
 	return executeWriteHelper(ctx, r.driver, query, map[string]any{
@@ -239,9 +243,11 @@ func (r *riskRepo) UpdateFindingScores(ctx context.Context, findingID int64, imp
 		"exposure_factor":    exposureFactor,
 		"remediation_factor": remediationFactor,
 		"risk_score":         riskScore,
+		"risk_tier":          riskTier,
 		"asset_criticality":  assetCriticality,
 		"urgency_boost":      urgencyBoost,
 		"priority_score":     priorityScore,
+		"priority_tier":      priorityTier,
 		"now":                time.Now().UTC(),
 	})
 }

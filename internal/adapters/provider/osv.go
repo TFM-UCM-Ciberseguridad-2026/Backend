@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -54,14 +55,82 @@ type osvReferenceDTO struct {
 	URL  string `json:"url"`
 }
 
+type osvDatabaseSpecificDTO struct {
+	CNAAssigner string `json:"cna_assigner"`
+}
+
 type osvVulnerabilityDTO struct {
-	ID         string            `json:"id"`
-	Aliases    []string          `json:"aliases"`
-	Summary    string            `json:"summary"`
-	Published  string            `json:"published"`
-	Modified   string            `json:"modified"`
-	Affected   []osvAffectedDTO  `json:"affected"`
-	References []osvReferenceDTO `json:"references"`
+	ID               string                 `json:"id"`
+	Aliases          []string               `json:"aliases"`
+	Summary          string                 `json:"summary"`
+	Published        string                 `json:"published"`
+	Modified         string                 `json:"modified"`
+	Affected         []osvAffectedDTO       `json:"affected"`
+	References       []osvReferenceDTO      `json:"references"`
+	DatabaseSpecific osvDatabaseSpecificDTO `json:"database_specific"`
+}
+
+func normalizedHost(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimPrefix(parsed.Hostname(), "www."))
+}
+
+func sameUpstreamReference(referenceURL, upstreamURL string) bool {
+	reference, err := url.Parse(strings.TrimSpace(referenceURL))
+	if err != nil || (reference.Scheme != "http" && reference.Scheme != "https") {
+		return false
+	}
+	upstream, err := url.Parse(strings.TrimSpace(upstreamURL))
+	if err != nil || upstream.Hostname() == "" {
+		return false
+	}
+	if !strings.EqualFold(reference.Hostname(), upstream.Hostname()) {
+		return false
+	}
+
+	upstreamPath := strings.TrimRight(upstream.Path, "/")
+	referencePath := strings.TrimRight(reference.Path, "/")
+	return upstreamPath == "" || strings.HasPrefix(referencePath, upstreamPath)
+}
+
+func officialHostForAssigner(host, assigner string) bool {
+	host = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(host), "www."))
+	assigner = strings.ToLower(strings.TrimSpace(assigner))
+	if host == "" || assigner == "" {
+		return false
+	}
+	for _, label := range strings.FieldsFunc(host, func(r rune) bool {
+		return r == '.' || r == '-'
+	}) {
+		if label == assigner {
+			return true
+		}
+	}
+	return false
+}
+
+func isOfficialReference(referenceURL, referenceType, cnaAssigner string, upstreamRepos []string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(referenceURL))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+
+	host := normalizedHost(referenceURL)
+	if host == "osv.dev" || host == "api.osv.dev" || host == "nvd.nist.gov" {
+		return false
+	}
+
+	for _, repo := range upstreamRepos {
+		if sameUpstreamReference(referenceURL, repo) {
+			return true
+		}
+	}
+
+	return (strings.EqualFold(referenceType, "ADVISORY") || strings.EqualFold(referenceType, "WEB")) &&
+		officialHostForAssigner(host, cnaAssigner)
 }
 
 // OSVAdapter implementa ports.PatchProvider consumiendo la API pública de OSV.dev.
@@ -139,6 +208,14 @@ func (a *OSVAdapter) FetchPatchInfo(ctx context.Context, cveID string) (*domain.
 		}
 	}
 
+	// Una referencia oficial puede estar en el registro CVE y la versión corregida
+	// en uno de sus avisos enlazados. Se propaga la evidencia de versión al patch.
+	for i := range info.Patches {
+		if info.Patches[i].Official && strings.TrimSpace(info.Patches[i].FixedVersion) == "" {
+			info.Patches[i].FixedVersion = fixedVersionText(info.FixedVersions)
+		}
+	}
+
 	return info, nil
 }
 
@@ -208,20 +285,46 @@ func (a *OSVAdapter) toDomain(cveID string, dto osvVulnerabilityDTO) *domain.Pat
 		}
 	}
 
-	// Parches: OSV tipa explícitamente las referencias, así que nos quedamos con las
-	// marcadas como FIX. Es bastante más preciso que el tag "Patch" del NVD, que se
-	// aplica de forma inconsistente.
+	// Parches: conservar FIX del upstream y advisories del fabricante identificables
+	// por el repositorio o por el CNA del registro OSV.
 	patches := make([]domain.Patch, 0)
 	seenURLs := make(map[string]bool)
+	upstreamRepos := make([]string, 0)
+	for _, affected := range dto.Affected {
+		for _, affectedRange := range affected.Ranges {
+			if repo := strings.TrimSpace(affectedRange.Repo); repo != "" {
+				upstreamRepos = append(upstreamRepos, repo)
+			}
+		}
+	}
+
 	for _, ref := range dto.References {
-		if !strings.EqualFold(ref.Type, "FIX") || ref.URL == "" || seenURLs[ref.URL] {
+		referenceURL := strings.TrimSpace(ref.URL)
+		referenceType := strings.ToUpper(strings.TrimSpace(ref.Type))
+		if referenceURL == "" || seenURLs[referenceURL] {
 			continue
 		}
-		seenURLs[ref.URL] = true
+		if referenceType != "FIX" && referenceType != "ADVISORY" && referenceType != "WEB" {
+			continue
+		}
+		if !isOfficialReference(
+			referenceURL,
+			referenceType,
+			dto.DatabaseSpecific.CNAAssigner,
+			upstreamRepos,
+		) {
+			continue
+		}
+
+		seenURLs[referenceURL] = true
 		patches = append(patches, domain.Patch{
-			Description: fmt.Sprintf("Corrección publicada (%s, vía OSV)", cveID),
-			URL:         ref.URL,
+			Description: fmt.Sprintf("Corrección oficial del fabricante según OSV (%s)", cveID),
+			URL:         referenceURL,
 			ReleaseDate: published,
+			Source:        "OSV",
+			ReferenceType: referenceType,
+			Official:      true,
+			FixedVersion:  fixedVersionText(fixedVersions),
 		})
 	}
 
@@ -232,6 +335,14 @@ func (a *OSVAdapter) toDomain(cveID string, dto osvVulnerabilityDTO) *domain.Pat
 		Published:     published,
 		Source:        "OSV",
 	}
+}
+
+func fixedVersionText(fixedVersions []domain.FixedVersion) string {
+	values := make([]string, 0, len(fixedVersions))
+	for _, fixedVersion := range fixedVersions {
+		values = append(values, fixedVersion.String())
+	}
+	return strings.Join(values, ", ")
 }
 
 // dedupeFixedVersions devuelve las versiones de candidates que no están ya en existing,

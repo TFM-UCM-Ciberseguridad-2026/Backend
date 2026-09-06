@@ -369,7 +369,7 @@ func (r *patchRepo) GetApplicationsByContainer(ctx context.Context, containerID 
 }
 
 func (r *patchRepo) Save(ctx context.Context, p *domain.Patch) error {
-	query := `MERGE (n:Patch {id: $id}) ON CREATE SET n.description = $desc, n.url = $url, n.release_date = $release_date`
+	query := `MERGE (n:Patch {id: $id}) ON CREATE SET n.description = $desc, n.url = $url, n.release_date = $release_date, n.source = $source, n.reference_type = $reference_type, n.official = $official, n.fixed_version = $fixed_version`
 
 	var releaseDate any
 	if p.ReleaseDate != nil {
@@ -381,12 +381,16 @@ func (r *patchRepo) Save(ctx context.Context, p *domain.Patch) error {
 		"desc":         p.Description,
 		"url":          p.URL,
 		"release_date": releaseDate,
+		"source":         p.Source,
+		"reference_type": p.ReferenceType,
+		"official":       p.Official,
+		"fixed_version":  p.FixedVersion,
 	}
 	return executeWriteSaveHelper(ctx, r.driver, query, params)
 }
 
 func (r *patchRepo) Update(ctx context.Context, p *domain.Patch) error {
-	query := `MATCH (n:Patch {id: $id}) SET n.description = $desc, n.url = $url, n.release_date = $release_date`
+	query := `MATCH (n:Patch {id: $id}) SET n.description = $desc, n.url = $url, n.release_date = $release_date, n.source = $source, n.reference_type = $reference_type, n.official = $official, n.fixed_version = $fixed_version`
 
 	var releaseDate any
 	if p.ReleaseDate != nil {
@@ -398,6 +402,10 @@ func (r *patchRepo) Update(ctx context.Context, p *domain.Patch) error {
 		"desc":         p.Description,
 		"url":          p.URL,
 		"release_date": releaseDate,
+		"source":         p.Source,
+		"reference_type": p.ReferenceType,
+		"official":       p.Official,
+		"fixed_version":  p.FixedVersion,
 	}
 	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
@@ -413,6 +421,10 @@ func (r *patchRepo) GetByID(ctx context.Context, id int64) (*domain.Patch, error
 		Description: getString(props, "description"),
 		URL:         getString(props, "url"),
 		ReleaseDate: getTimePtr(props, "release_date"),
+		Source:        getString(props, "source"),
+		ReferenceType: getString(props, "reference_type"),
+		Official:      getBool(props, "official"),
+		FixedVersion:  getString(props, "fixed_version"),
 	}, nil
 }
 
@@ -432,47 +444,68 @@ func (r *patchRepo) GetByURL(ctx context.Context, url string) (*domain.Patch, er
 		Description: getString(props, "description"),
 		URL:         getString(props, "url"),
 		ReleaseDate: getTimePtr(props, "release_date"),
+		Source:        getString(props, "source"),
+		ReferenceType: getString(props, "reference_type"),
+		Official:      getBool(props, "official"),
+		FixedVersion:  getString(props, "fixed_version"),
 	}, nil
 }
 
+// GetByVulnerability recupera todos los parches que corrigen un CVE concreto.
 func (r *patchRepo) GetByVulnerability(ctx context.Context, cveID string) ([]domain.Patch, error) {
 	query := `
-		MATCH (p:Patch)-[:FIXES]->(:Vulnerability {cve_id: $cve_id})
-		RETURN p.id           AS id,
-		       p.description  AS description,
-		       p.url          AS url,
-		       p.release_date AS release_date
-		ORDER BY id
+			MATCH (p:Patch)-[:FIXES]->(:Vulnerability {cve_id: $cve_id})
+			RETURN p.id AS id,
+					p.description AS description,
+					p.url AS url,
+					p.release_date AS release_date,
+					coalesce(p.source, '') AS source,
+					coalesce(p.reference_type, '') AS reference_type,
+					coalesce(p.official, false) AS official,
+					coalesce(p.fixed_version, '') AS fixed_version
+			ORDER BY id
 	`
 
-	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{
+			AccessMode: neo4j.AccessModeRead,
+	})
 	defer session.Close(ctx)
 
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		result, err := tx.Run(ctx, query, map[string]any{"cve_id": cveID})
-		if err != nil {
-			return nil, err
-		}
-
-		patches := make([]domain.Patch, 0)
-		for result.Next(ctx) {
-			props := result.Record().AsMap()
-			patches = append(patches, domain.Patch{
-				PatchID:     getInt64(props, "id"),
-				Description: getString(props, "description"),
-				URL:         getString(props, "url"),
-				ReleaseDate: getTimePtr(props, "release_date"),
+			result, err := tx.Run(ctx, query, map[string]any{
+					"cve_id": cveID,
 			})
-		}
+			if err != nil {
+					return nil, err
+			}
 
-		return patches, result.Err()
+			patches := make([]domain.Patch, 0)
+
+			for result.Next(ctx) {
+					props := result.Record().AsMap()
+
+					patches = append(patches, domain.Patch{
+							PatchID:       getInt64(props, "id"),
+							Description:   getString(props, "description"),
+							URL:           getString(props, "url"),
+							ReleaseDate:   getTimePtr(props, "release_date"),
+							Source:        getString(props, "source"),
+							ReferenceType: getString(props, "reference_type"),
+							Official:      getBool(props, "official"),
+							FixedVersion:  getString(props, "fixed_version"),
+					})
+			}
+
+			return patches, result.Err()
 	})
 
 	if err != nil {
-		return nil, err
+			return nil, err
 	}
+
 	if res == nil {
-		return []domain.Patch{}, nil
+			return []domain.Patch{}, nil
 	}
+
 	return res.([]domain.Patch), nil
 }
