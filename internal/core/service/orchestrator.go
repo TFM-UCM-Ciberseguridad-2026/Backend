@@ -1343,7 +1343,7 @@ func (o *Orchestrator) DeclarePatchApplied(
 		}
 	}
 
-	level, err = o.resolvePatchLevel(ctx, cveID, patchID)
+	level, err := o.resolvePatchLevel(ctx, cveID, patchID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1446,7 +1446,7 @@ func (o *Orchestrator) DeclarePatchAppliedToContainer(
 		patchID = patches[0].PatchID
 	}
 
-	level, err = o.resolvePatchLevel(ctx, cveID, patchID)
+	level, err := o.resolvePatchLevel(ctx, cveID, patchID)
 	if err != nil {
 		return nil, nil, err
 	}
