@@ -181,6 +181,25 @@ func (r *projectRepo) DeleteByID(ctx context.Context, id int64) error {
 	`
 	_ = executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
 
+	// El marco de gobierno cuelga del proyecto por [:BELONGS_TO], que no forma parte del
+	// recorrido anterior: sin esto, al borrar un proyecto sus políticas, procedimientos,
+	// roles, actividades RACI y configuración de SLA quedaban huérfanos en el grafo.
+	//
+	// Se borra solo lo que no pertenece a ningún OTRO proyecto: los identificadores de la
+	// semilla son los mismos para todos ("pol-1", "role-1"…), así que un nodo puede estar
+	// compartido y borrarlo dejaría al otro proyecto sin su marco normativo.
+	governanceQuery := `
+		MATCH (g)-[:BELONGS_TO]->(p:Project)
+		WHERE (toString(p.id) = toString($id) OR elementId(p) = toString($id))
+		  AND (g:PolicyDocument OR g:Procedure OR g:Role OR g:RACIActivity OR g:SLAConfig)
+		  AND NOT EXISTS {
+		      MATCH (g)-[:BELONGS_TO]->(otro:Project)
+		      WHERE toString(otro.id) <> toString($id) AND elementId(otro) <> toString($id)
+		  }
+		DETACH DELETE g
+	`
+	_ = executeWriteHelper(ctx, r.driver, governanceQuery, map[string]any{"id": id})
+
 	// Limpieza exhaustiva de cualquier nodo huérfano (redes sueltas, softwares, vulnerabilidades)
 	cleanupQuery := `
 		MATCH (n)
@@ -199,12 +218,20 @@ func (r *projectRepo) ExportGraph(ctx context.Context, id int64) (*domain.GraphD
 	// Utilizamos apoc.path.subgraphAll con relationshipFilter para extraer todo el grafo conexo desde el Proyecto,
 	// pero asegurando que NUNCA navega hacia atrás desde nodos compartidos (Vulnerabilities, TTPs, CWEs),
 	// evitando así que se fusione con otros proyectos.
+	//
+	// El filtro incluye dos aristas del marco de gobierno:
+	//   · <BELONGS_TO  recoge PolicyDocument, Procedure, Role, RACIActivity y SLAConfig, que
+	//     cuelgan del proyecto en sentido entrante. Solo se recorre hacia dentro, así que
+	//     desde un nodo de gobierno no se puede volver a salir a otro proyecto.
+	//   · INVOLVES>    recoge la asignación RACI, que vive en la arista
+	//     (:RACIActivity)-[:INVOLVES {role_type}]->(:Role). Sin ella se exportarían las
+	//     actividades y los roles pero se perdería quién es R, A, C o I en cada una.
 	query := `
 		MATCH (p:Project)
 		WHERE toString(p.id) = toString($id) OR elementId(p) = toString($id)
 		CALL apoc.path.subgraphAll(p, {
 			maxLevel: 10,
-			relationshipFilter: "HAS_ENDPOINT>|CONTAINS_NETWORK>|HAS_IP>|HAS_HARDWARE>|CONNECTED_TO>|HAS_INSTALLATION>|INSTANCE_OF>|HOSTS>|USES_IMAGE>|HAS_FINDING>|OF_VULNERABILITY>|HAS_EXPLOIT>|HAS_REMEDIATION>|USES_PATCH>|FIXES>|HAS_CWE>|EXPLOITS_VIA_TTP>|<MAPS_TO_CWE|<MAPS_TO_TTP|<USES"
+			relationshipFilter: "HAS_ENDPOINT>|CONTAINS_NETWORK>|HAS_IP>|HAS_HARDWARE>|CONNECTED_TO>|HAS_INSTALLATION>|INSTANCE_OF>|HOSTS>|USES_IMAGE>|HAS_FINDING>|OF_VULNERABILITY>|HAS_EXPLOIT>|HAS_REMEDIATION>|USES_PATCH>|FIXES>|HAS_CWE>|EXPLOITS_VIA_TTP>|<MAPS_TO_CWE|<MAPS_TO_TTP|<USES|<BELONGS_TO|INVOLVES>"
 		}) YIELD nodes, relationships
 		
 		WITH 

@@ -151,6 +151,8 @@ func (h *OrchestratorHandler) AddEndpointToProject(w http.ResponseWriter, r *htt
 	}
 
 	endpoint := payload.Endpoint
+	endpoint.Type = domain.NormalizeEndpointType(endpoint.Type)
+
 	if err := h.orchestrator.AddEndpointToProject(r.Context(), projectID, &endpoint); err != nil {
 		emitAuditLog("CREACION", "Endpoint", fmt.Sprint(endpoint.EndpointID), endpoint.Hostname, idStr, payload.Justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
@@ -725,6 +727,7 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 		AppliedAt        *time.Time `json:"applied_at"`
 		AppliedBy        string     `json:"applied_by"`
 		Notes            string     `json:"notes"`
+		TargetVersion    string     `json:"target_version"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendError(w, "Invalid JSON", http.StatusBadRequest)
@@ -739,7 +742,7 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 	application, affected, err := h.orchestrator.DeclarePatchApplied(
 		r.Context(), installationID, req.CVEID, req.PatchID,
 		domain.RemediationLevel(req.RemediationLevel),
-		appliedAt, req.AppliedBy, req.Notes,
+		appliedAt, req.AppliedBy, req.Notes, req.TargetVersion,
 	)
 	if err != nil {
 		emitAuditLog(
@@ -758,30 +761,13 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 	}
 
 	cambios := map[string]auditChange{
-		"cve_id": {
-			Antes:   nil,
-			Despues: req.CVEID,
-		},
-		"installation_id": {
-			Antes:   nil,
-			Despues: installationID,
-		},
-		"patch_id": {
-			Antes:   nil,
-			Despues: req.PatchID,
-		},
-		"remediation_level": {
-			Antes:   nil,
-			Despues: req.RemediationLevel,
-		},
-		"applied_by": {
-			Antes:   nil,
-			Despues: req.AppliedBy,
-		},
-		"affected_findings": {
-			Antes:   nil,
-			Despues: affected,
-		},
+		"cve_id":            {Despues: req.CVEID},
+		"installation_id":   {Despues: installationID},
+		"patch_id":          {Despues: req.PatchID},
+		"remediation_level": {Despues: req.RemediationLevel},
+		"applied_by":        {Despues: req.AppliedBy},
+		"target_version":    {Despues: req.TargetVersion},
+		"affected_findings": {Despues: affected},
 	}
 
 	emitAuditLog(
@@ -796,10 +782,28 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 		"",
 	)
 	sendJSON(w, map[string]any{
-		"status":            "parche declarado como aplicado",
+		"status":            "parche declarado y aplicado con éxito",
 		"application":       application,
 		"affected_findings": affected,
 	}, http.StatusCreated)
+}
+
+// GET /api/endpoints/{id}/patch-history
+func (h *OrchestratorHandler) GetEndpointPatchHistory(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	endpointID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		sendError(w, "ID de endpoint inválido", http.StatusBadRequest)
+		return
+	}
+
+	history, err := h.orchestrator.GetAppliedPatchHistoryByEndpoint(r.Context(), endpointID)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, history, http.StatusOK)
 }
 
 // POST /api/containers/{id}/applied-patches
@@ -822,27 +826,51 @@ func (h *OrchestratorHandler) DeclareContainerPatchApplied(w http.ResponseWriter
 		sendError(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
+
 	appliedAt := time.Time{}
 	if req.AppliedAt != nil {
 		appliedAt = *req.AppliedAt
 	}
+
 	level := domain.RemediationLevel(req.RemediationLevel)
-	application, affected, err := h.orchestrator.DeclarePatchAppliedToContainer(r.Context(), containerID, req.CVEID, req.FindingID, req.PatchID, level, appliedAt, req.AppliedBy, req.Notes)
+	application, affected, err := h.orchestrator.DeclarePatchAppliedToContainer(
+		r.Context(),
+		containerID,
+		req.CVEID,
+		req.FindingID,
+		req.PatchID,
+		level,
+		appliedAt,
+		req.AppliedBy,
+		req.Notes,
+	)
+
 	auditID := fmt.Sprintf("%s:%s:%d", containerID, req.CVEID, req.FindingID)
 	changes := map[string]auditChange{
-		"asset_type": {Antes: nil, Despues: "CONTAINER"}, "asset_id": {Antes: nil, Despues: containerID},
-		"container_id": {Antes: nil, Despues: containerID}, "image_id": {Antes: nil, Despues: applicationImageID(application)},
-		"finding_id": {Antes: nil, Despues: req.FindingID}, "cve_id": {Antes: nil, Despues: req.CVEID},
-		"patch_id": {Antes: nil, Despues: req.PatchID}, "remediation_level": {Antes: nil, Despues: req.RemediationLevel},
-		"applied_by": {Antes: nil, Despues: req.AppliedBy}, "affected_findings": {Antes: nil, Despues: affected},
+		"asset_type":        {Antes: nil, Despues: "CONTAINER"},
+		"asset_id":          {Antes: nil, Despues: containerID},
+		"container_id":      {Antes: nil, Despues: containerID},
+		"image_id":          {Antes: nil, Despues: applicationImageID(application)},
+		"finding_id":        {Antes: nil, Despues: req.FindingID},
+		"cve_id":            {Antes: nil, Despues: req.CVEID},
+		"patch_id":          {Antes: nil, Despues: req.PatchID},
+		"remediation_level": {Antes: nil, Despues: req.RemediationLevel},
+		"applied_by":        {Antes: nil, Despues: req.AppliedBy},
+		"affected_findings": {Antes: nil, Despues: affected},
 	}
+
 	if err != nil {
 		emitAuditLog("CREACION", "AppliedPatch", auditID, req.CVEID, "", req.Notes, changes, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
 	emitAuditLog("CREACION", "AppliedPatch", auditID, req.CVEID, "", req.Notes, changes, "SUCCESS", "")
-	sendJSON(w, map[string]any{"status": "parche declarado como aplicado", "application": application, "affected_findings": affected}, http.StatusCreated)
+	sendJSON(w, map[string]any{
+		"status":            "parche declarado como aplicado",
+		"application":       application,
+		"affected_findings": affected,
+	}, http.StatusCreated)
 }
 
 func applicationImageID(application *domain.AppliedPatch) string {
@@ -1034,6 +1062,7 @@ func (h *OrchestratorHandler) UpdateEndpoint(w http.ResponseWriter, r *http.Requ
 
 	endpoint := req.Endpoint
 	endpoint.EndpointID = endpointID
+	endpoint.Type = domain.NormalizeEndpointType(endpoint.Type)
 
 	if err := h.orchestrator.UpdateEndpoint(r.Context(), &endpoint); err != nil {
 		emitAuditLog("MODIFICACION", "Endpoint", idStr, endpoint.Hostname, "", justification, nil, "ERROR", err.Error())
@@ -1823,6 +1852,7 @@ func (h *OrchestratorHandler) GetTTPMatrix(w http.ResponseWriter, r *http.Reques
 	_ = json.NewEncoder(w).Encode(matrix)
 }
 
+
 // GET /api/cpe/search?query=... o ?q=... o ?vendor=...&product=...&version=...
 func (h *OrchestratorHandler) SearchCPE(w http.ResponseWriter, r *http.Request) {
 	rawInput := r.URL.Query().Get("query")
@@ -1849,4 +1879,25 @@ func (h *OrchestratorHandler) SearchCPE(w http.ResponseWriter, r *http.Request) 
 	}
 
 	sendJSON(w, items, http.StatusOK)
+}
+// GetTTPStats devuelve métricas agregadas de TTPs para el dashboard (KPIs, top-10, distribución).
+func (h *OrchestratorHandler) GetTTPStats(w http.ResponseWriter, r *http.Request) {
+	var projectID int64
+	projectIDStr := r.URL.Query().Get("project_id")
+	if projectIDStr != "" {
+		parsedID, err := strconv.ParseInt(projectIDStr, 10, 64)
+		if err == nil {
+			projectID = parsedID
+		}
+	}
+
+	stats, err := h.orchestrator.GetTTPStats(r.Context(), projectID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	json.NewEncoder(w).Encode(stats)
 }

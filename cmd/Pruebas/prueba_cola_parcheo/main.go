@@ -33,6 +33,7 @@ var activos = []struct {
 	endpointID  int64
 	hostname    string
 	etiqueta    string
+	tipo        string    // rol técnico: de él se deriva la categoría que fija el SLA
 	cia         [3]string // CR, IR, AR
 	internet    bool
 	environment string
@@ -41,11 +42,14 @@ var activos = []struct {
 	findingID   int64
 	remID       int64
 }{
-	{9802, "db-prod", "BBDD producción, expuesta", [3]string{"High", "High", "High"}, true, "prod",
+	{9802, "db-prod", "BBDD producción, expuesta", domain.EndpointTypeServer,
+		[3]string{"High", "High", "High"}, true, "prod",
 		9810, "inst-cola-prod", 9820, 9830},
-	{9803, "app-staging", "App staging, interna", [3]string{"Medium", "Medium", "Medium"}, false, "staging",
+	{9803, "app-staging", "App staging, interna", domain.EndpointTypeServer,
+		[3]string{"Medium", "Medium", "Medium"}, false, "staging",
 		9811, "inst-cola-staging", 9821, 9831},
-	{9804, "workstation", "Puesto de trabajo", [3]string{"Low", "Low", "Low"}, false, "dev",
+	{9804, "workstation", "Puesto de trabajo", domain.EndpointTypeWorkstation,
+		[3]string{"Low", "Low", "Low"}, false, "dev",
 		9812, "inst-cola-work", 9822, 9832},
 }
 
@@ -102,7 +106,7 @@ func main() {
 
 	for _, a := range activos {
 		ep := &domain.Endpoint{
-			EndpointID: a.endpointID, Hostname: a.hostname, Type: "Linux", Status: "ACTIVE",
+			EndpointID: a.endpointID, Hostname: a.hostname, Type: a.tipo, Status: "ACTIVE",
 			InternetExposed: a.internet, Environment: a.environment,
 			ConfidentialityReq: a.cia[0], IntegrityReq: a.cia[1], AvailabilityReq: a.cia[2],
 		}

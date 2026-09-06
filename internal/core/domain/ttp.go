@@ -36,3 +36,25 @@ type TTPMatrixItem struct {
 	Desc   string         `json:"desc"`
 	CVEs   []TTPMatrixCVE `json:"cves"`
 }
+
+// TTPTopItem representa una TTP con su frecuencia de aparición, para el top-10 del dashboard.
+type TTPTopItem struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Tactic string `json:"tactic"`
+	Count  int    `json:"count"`
+}
+
+// TTPStats agrupa las métricas de inteligencia de amenazas para el dashboard.
+// Nota MVP: duration_avg_capec_ms / duration_avg_llm_ms se omiten porque la relación
+// :MAPS_TO no persiste duración de procesamiento (solo confidence, source, updated_at).
+type TTPStats struct {
+	TotalCVEs        int          `json:"total_cves"`
+	MappedCVEs       int          `json:"mapped_cves"`
+	UnmappedCVEs     int          `json:"unmapped_cves"`
+	HighConfidence   int          `json:"high_confidence"`
+	MediumConfidence int          `json:"medium_confidence"`
+	CapecStatic      int          `json:"capec_static"`
+	LlmEnriched      int          `json:"llm_enriched"`
+	TopTTPs          []TTPTopItem `json:"top_ttps"`
+}

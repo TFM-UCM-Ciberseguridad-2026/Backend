@@ -3,6 +3,7 @@ package neo4j
 import (
 	"context"
 	"net"
+	"fmt"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
@@ -85,9 +86,8 @@ func (r *networkRepo) DeleteByID(ctx context.Context, id int64) error {
 	return executeWriteHelper(ctx, r.driver, cleanupQuery, nil)
 }
 
-// LinkMatchingEndpoints recorre todos los endpoints con IPs registradas y conecta
-// los que caen dentro del CIDR de la red y, si la red define VLAN,
-// comparten esa misma VLAN. Devuelve cuántos endpoints se enlazaron.
+// LinkMatchingEndpoints recorre todos los Endpoints y Contenedores con IPs registradas y conecta
+// los que caen dentro del CIDR y coinciden en VLAN con la red. Devuelve cuántos activos se enlazaron.
 func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64, cidr string, vlanID int64) (int, error) {
 	var ipNet *net.IPNet
 	if cidr != "" {
@@ -101,35 +101,46 @@ func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64
 	defer readSession.Close(ctx)
 
 	type candidate struct {
-		endpointID int64
+		nodeID  any
+		isCont  bool
 	}
 
 	res, err := readSession.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		result, err := tx.Run(ctx, `
-			MATCH (e:Endpoint)-[:HAS_IP]->(ip:IPAddress)
-			RETURN e.id AS endpoint_id, ip.ip AS ip, ip.vlan_id AS vlan_id
+			MATCH (e)-[:HAS_IP]->(ip:IPAddress)
+			WHERE e:Endpoint OR e:Container
+			RETURN e.id AS node_id, labels(e) AS labels, ip.ip AS ip, ip.vlan_id AS vlan_id
 		`, nil)
 		if err != nil {
 			return nil, err
 		}
 
 		var matches []candidate
+		seen := make(map[string]bool)
+
 		for result.Next(ctx) {
 			rec := result.Record()
-			endpointIDVal, _ := rec.Get("endpoint_id")
+			nodeIDVal, _ := rec.Get("node_id")
+			labelsVal, _ := rec.Get("labels")
 			ipVal, _ := rec.Get("ip")
 			vlanVal, _ := rec.Get("vlan_id")
 			epVlan := getInt64Any(vlanVal)
 
-			// Evaluamos con condición AND estricta:
-			matched := true
+			isContainer := false
+			if lList, ok := labelsVal.([]any); ok {
+				for _, l := range lList {
+					if lStr, ok := l.(string); ok && lStr == "Container" {
+						isContainer = true
+						break
+					}
+				}
+			}
 
-			// Condición 1: Si se especificó VLAN (> 0), DEBE coincidir
+			matched := true
 			if vlanID > 0 && epVlan != vlanID {
 				matched = false
 			}
 
-			// Condición 2: Si se especificó CIDR, la IP DEBE estar dentro del rango
 			if ipNet != nil {
 				parsedIP := net.ParseIP(getStringAny(ipVal))
 				if parsedIP == nil || !ipNet.Contains(parsedIP) {
@@ -137,8 +148,10 @@ func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64
 				}
 			}
 
-			if matched {
-				matches = append(matches, candidate{endpointID: getInt64Any(endpointIDVal)})
+			key := fmt.Sprintf("%v", nodeIDVal)
+			if matched && !seen[key] {
+				seen[key] = true
+				matches = append(matches, candidate{nodeID: nodeIDVal, isCont: isContainer})
 			}
 		}
 		return matches, result.Err()
@@ -152,10 +165,11 @@ func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64
 	defer writeSession.Close(ctx)
 
 	_, err = writeSession.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		// 1. Desconectar a los endpoints antiguos, reteniendo la red en el proyecto
+		// 1. Desconectar los activos antiguos manteniendo relaciones de proyecto
 		_, err := tx.Run(ctx, `
-			MATCH (e:Endpoint)-[r:CONNECTED_TO]->(n:Network)
-			WHERE toInteger(n.id) = toInteger($network_id) OR toString(n.id) = toString($network_id) OR elementId(n) = toString($network_id)
+			MATCH (e)-[r:CONNECTED_TO]->(n:Network)
+			WHERE (e:Endpoint OR e:Container)
+			  AND (toInteger(n.id) = toInteger($network_id) OR toString(n.id) = toString($network_id) OR elementId(n) = toString($network_id))
 			WITH e, r, n
 			OPTIONAL MATCH (p:Project)-[:HAS_ENDPOINT]->(e)
 			WITH e, r, n, p
@@ -173,12 +187,13 @@ func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64
 			return nil, nil
 		}
 
-		// 2. Conectar los matches (si los hay)
+		// 2. Conectar los matches (Endpoints y Contenedores)
 		for _, m := range matches {
 			if _, err := tx.Run(ctx, `
-				MATCH (e:Endpoint), (n:Network)
-				WHERE (toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id))
-				  AND (toInteger(n.id) = toInteger($network_id) OR toString(n.id) = toString($network_id))
+				MATCH (e), (n:Network)
+				WHERE (e:Endpoint OR e:Container)
+				  AND (toInteger(e.id) = toInteger($node_id) OR toString(e.id) = toString($node_id) OR e.id = $node_id)
+				  AND (toInteger(n.id) = toInteger($network_id) OR toString(n.id) = toString($network_id) OR elementId(n) = toString($network_id))
 				MERGE (e)-[:CONNECTED_TO]->(n)
 				WITH e, n
 				OPTIONAL MATCH (p:Project)-[:HAS_ENDPOINT]->(e)
@@ -186,10 +201,9 @@ func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64
 				FOREACH (proj IN CASE WHEN p IS NOT NULL THEN [p] ELSE [] END |
 					MERGE (proj)-[:CONTAINS_NETWORK]->(n)
 				)
-				RETURN n
 			`, map[string]any{
-				"endpoint_id": m.endpointID,
-				"network_id":  networkID,
+				"node_id":    m.nodeID,
+				"network_id": networkID,
 			}); err != nil {
 				return nil, err
 			}
@@ -203,14 +217,10 @@ func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64
 	return len(matches), nil
 }
 
-// LinkEndpointToMatchingNetworks recorre las redes existentes en la base de datos y, si alguna
-// IP del endpoint cae dentro de su CIDR (y coincide en VLAN si la red lo especifica), conecta
-// automáticamente el endpoint a la red via (:Endpoint)-[:CONNECTED_TO]->(:Network).
 func (r *networkRepo) LinkEndpointToMatchingNetworks(ctx context.Context, endpointID int64, ips []domain.EndpointIP) (int, error) {
 	writeSession := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer writeSession.Close(ctx)
 
-	// 1. Desconectar de redes previas por si se alteró o borró la VLAN / IP
 	_, _ = writeSession.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		_, err := tx.Run(ctx, `
 			MATCH (e:Endpoint)-[r:CONNECTED_TO]->(n:Network)
@@ -279,12 +289,10 @@ func (r *networkRepo) LinkEndpointToMatchingNetworks(ctx context.Context, endpoi
 		for _, ipEntry := range ips {
 			ipMatch := true
 
-			// 1. Si la red exige VLAN, la IP debe coincidir en VLAN
 			if cand.vlanID > 0 && ipEntry.VLANID != cand.vlanID {
 				ipMatch = false
 			}
 
-			// 2. Si la red exige CIDR, la IP debe estar en el rango CIDR
 			if cand.cidr != "" {
 				_, ipNet, err := net.ParseCIDR(cand.cidr)
 				parsedIP := net.ParseIP(ipEntry.IP)
@@ -339,13 +347,13 @@ func (r *networkRepo) LinkEndpointToMatchingNetworks(ctx context.Context, endpoi
 	return len(matchingNetworkIDs), nil
 }
 
-// LinkNetworkToProjectIfOrphan ver comentario en ports.NetworkPort.
 func (r *networkRepo) LinkNetworkToProjectIfOrphan(ctx context.Context, networkID int64, projectID int64) error {
 	query := `
 		MATCH (n:Network)
 		WHERE (toInteger(n.id) = toInteger($network_id) OR toString(n.id) = toString($network_id) OR elementId(n) = toString($network_id))
 		  AND NOT EXISTS((:Project)-[:CONTAINS_NETWORK]->(n))
 		  AND NOT EXISTS((:Endpoint)-[:CONNECTED_TO]->(n))
+		  AND NOT EXISTS((:Container)-[:CONNECTED_TO]->(n))
 		WITH n
 		MATCH (p:Project)
 		WHERE toInteger(p.id) = toInteger($project_id) OR toString(p.id) = toString($project_id) OR elementId(p) = toString($project_id)
@@ -357,12 +365,10 @@ func (r *networkRepo) LinkNetworkToProjectIfOrphan(ctx context.Context, networkI
 	})
 }
 
-// LinkContainerToMatchingNetworks vincula un contenedor a las redes compatibles con sus IPs.
 func (r *networkRepo) LinkContainerToMatchingNetworks(ctx context.Context, containerID string, ips []domain.EndpointIP) (int, error) {
 	writeSession := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer writeSession.Close(ctx)
 
-	// 1. Desconectar de redes previas por si se alteró o borró la VLAN / IP
 	_, _ = writeSession.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		_, err := tx.Run(ctx, `
 			MATCH (c:Container)-[r:CONNECTED_TO]->(n:Network)
@@ -426,12 +432,9 @@ func (r *networkRepo) LinkContainerToMatchingNetworks(ctx context.Context, conta
 	for _, cand := range candidates {
 		matched := false
 		for _, ipEntry := range ips {
-			// Coincidencia estricta por VLAN
-			if cand.vlanID > 0 && ipEntry.VLANID == cand.vlanID {
-				matched = true
-				break
+			if cand.vlanID > 0 && ipEntry.VLANID != cand.vlanID {
+				continue
 			}
-			// Coincidencia por CIDR
 			if cand.cidr != "" {
 				if _, ipNet, err := net.ParseCIDR(cand.cidr); err == nil {
 					if parsedIP := net.ParseIP(ipEntry.IP); parsedIP != nil && ipNet.Contains(parsedIP) {

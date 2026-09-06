@@ -12,23 +12,20 @@ type patchRepo struct {
 	driver neo4j.DriverWithContext
 }
 
-// SaveApplication declara un parche como aplicado sobre una instalación. MERGE sobre la
-// relación: una instalación tiene una única situación actual respecto a un parche, así que
-// redeclarar actualiza la arista en vez de duplicarla.
+// SaveApplication declara un parche como aplicado distinguiendo por cve_id para no sobrescribir relaciones.
 func (r *patchRepo) SaveApplication(ctx context.Context, a *domain.AppliedPatch) error {
 	query := `
-		MATCH (p:Patch {id: $patch_id})
+		MATCH (p:Patch) WHERE p.id = $patch_id OR toInteger(p.id) = toInteger($patch_id) OR toString(p.id) = toString($patch_id)
 		MATCH (target)
-		WHERE ($asset_type = 'CONTAINER' AND target:Container AND target.id = $container_id)
-		   OR ($asset_type <> 'CONTAINER' AND target:SoftwareInstallation AND target.id = $installation_id)
-		MERGE (p)-[rel:APPLIED_TO]->(target)
-		SET rel.applied_at         = $applied_at,
-		    rel.applied_by         = $applied_by,
-		    rel.remediation_level  = $remediation_level,
-		    rel.remediation_factor = $remediation_factor,
-		    rel.cve_id             = $cve_id,
-		    rel.notes              = $notes,
-		    rel.verified           = $verified,
+		WHERE ($asset_type = 'CONTAINER' AND target:Container AND (target.id = $container_id OR toString(target.id) = toString($container_id)))
+		   OR ($asset_type <> 'CONTAINER' AND target:SoftwareInstallation AND (target.id = $installation_id OR toString(target.id) = toString($installation_id)))
+		MERGE (p)-[rel:APPLIED_TO {cve_id: $cve_id}]->(target)
+		SET rel.applied_at              = $applied_at,
+		    rel.applied_by              = $applied_by,
+		    rel.remediation_level       = $remediation_level,
+		    rel.remediation_factor      = $remediation_factor,
+		    rel.notes                   = $notes,
+		    rel.verified                = $verified,
 		    rel.verification_conclusive = $verification_conclusive,
 		    rel.verification_reason     = $verification_reason,
 		    rel.installed_version       = $installed_version,
@@ -40,8 +37,6 @@ func (r *patchRepo) SaveApplication(ctx context.Context, a *domain.AppliedPatch)
 		    rel.image_id                = CASE WHEN $image_id = '' AND target:Container THEN coalesce(target.image_id, '') ELSE $image_id END,
 		    rel.finding_id              = $finding_id
 	`
-	// Sin RETURN propio: executeWriteUpdateHelper añade el suyo y dos seguidos son
-	// error de sintaxis.
 
 	params := map[string]any{
 		"patch_id":                a.PatchID,
@@ -65,25 +60,195 @@ func (r *patchRepo) SaveApplication(ctx context.Context, a *domain.AppliedPatch)
 		"matched_package":         a.Verification.MatchedPackage,
 	}
 
-	// El helper falla si el MATCH no encuentra parche o instalación, que es lo deseado:
-	// declarar sobre algo inexistente no debe pasar en silencio.
 	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
-// GetApplicationsByInstallation devuelve el histórico de una instalación, del más
-// reciente al más antiguo.
+// GetAppliedPatchHistoryByEndpoint recupera el histórico de parches y findings resueltos agrupado por software.
+func (r *patchRepo) GetAppliedPatchHistoryByEndpoint(ctx context.Context, endpointID int64) (*domain.EndpointPatchHistory, error) {
+	query := `
+		MATCH (e:Endpoint)
+		WHERE e.id = $endpoint_id OR toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id) OR elementId(e) = toString($endpoint_id)
+		OPTIONAL MATCH (e)-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
+		OPTIONAL MATCH (si)-[:INSTANCE_OF]->(s:Software)
+		OPTIONAL MATCH (p:Patch)-[rel:APPLIED_TO]->(si)
+		OPTIONAL MATCH (si)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE (toUpper(coalesce(f.status, '')) IN ['PATCHED', 'RESOLVED', 'CLOSED', 'MITIGATED'] OR f.remediation_factor = 0.0)
+		  AND (rel.cve_id = v.cve_id OR (p IS NOT NULL AND (p)-[:FIXES]->(v)) OR rel IS NOT NULL)
+		
+		WITH e, si, s,
+		     collect(DISTINCT CASE WHEN p IS NOT NULL AND rel IS NOT NULL THEN {
+		         patch_id: p.id,
+		         patch_url: coalesce(p.url, ''),
+		         patch_description: coalesce(p.description, ''),
+		         cve_id: coalesce(rel.cve_id, ''),
+		         applied_at: rel.applied_at,
+		         applied_by: coalesce(rel.applied_by, ''),
+		         remediation_level: coalesce(rel.remediation_level, 'OFFICIAL_FIX'),
+		         remediation_factor: coalesce(rel.remediation_factor, 0.0),
+		         notes: coalesce(rel.notes, ''),
+		         verified: coalesce(rel.verified, false),
+		         verification_conclusive: coalesce(rel.verification_conclusive, false),
+		         verification_reason: coalesce(rel.verification_reason, ''),
+		         installed_version: coalesce(rel.installed_version, ''),
+		         expected_version: coalesce(rel.expected_version, '')
+		     } ELSE null END) AS raw_patches,
+		     collect(DISTINCT CASE WHEN f IS NOT NULL AND v IS NOT NULL THEN {
+		         finding_id: f.id,
+		         cve_id: v.cve_id,
+		         status: coalesce(f.status, 'PATCHED'),
+		         patch_id: coalesce(p.id, 0),
+		         patch_description: coalesce(p.description, rel.notes, 'Parche oficial aplicado'),
+		         patch_url: coalesce(p.url, ''),
+		         remediation_level: coalesce(rel.remediation_level, 'OFFICIAL_FIX'),
+		         applied_at: coalesce(rel.applied_at, f.resolved_at, f.last_seen),
+		         applied_by: coalesce(rel.applied_by, 'operator'),
+		         notes: coalesce(rel.notes, ''),
+		         expected_version: coalesce(rel.expected_version, s.version, '')
+		     } ELSE null END) AS raw_findings
+		WHERE si IS NOT NULL
+		RETURN e.id AS endpoint_id,
+		       coalesce(e.hostname, '') AS hostname,
+		       collect({
+		           installation_id: si.id,
+		           software_id: coalesce(s.id, 0),
+		           software_name: coalesce(s.name, si.install_path, si.id),
+		           current_version: coalesce(s.version, 'N/A'),
+		           applied_patches: [p IN raw_patches WHERE p IS NOT NULL],
+		           resolved_findings: [f IN raw_findings WHERE f IS NOT NULL]
+		       }) AS software_groups
+	`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"endpoint_id": endpointID})
+		if err != nil {
+			return nil, err
+		}
+		if !result.Next(ctx) {
+			return nil, nil
+		}
+
+		rec := result.Record()
+		epID := getInt64Any(rec.Values[0])
+		hostname := getStringAny(rec.Values[1])
+		groupsRaw, _ := rec.Get("software_groups")
+
+		var groups []domain.SoftwarePatchHistoryGroup
+		if list, ok := groupsRaw.([]any); ok {
+			for _, item := range list {
+				m, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+
+				instID := getString(m, "installation_id")
+				swID := getInt64(m, "software_id")
+				swName := getString(m, "software_name")
+				currVer := getString(m, "current_version")
+
+				var patches []domain.AppliedPatch
+				if pList, ok := m["applied_patches"].([]any); ok {
+					for _, pItem := range pList {
+						pMap, ok := pItem.(map[string]any)
+						if !ok {
+							continue
+						}
+						appliedAt := time.Time{}
+						if t, ok := pMap["applied_at"].(time.Time); ok {
+							appliedAt = t
+						}
+						patches = append(patches, domain.AppliedPatch{
+							PatchID:           getInt64(pMap, "patch_id"),
+							InstallationID:    instID,
+							CVEID:             getString(pMap, "cve_id"),
+							AppliedAt:         appliedAt,
+							AppliedBy:         getString(pMap, "applied_by"),
+							RemediationLevel:  domain.RemediationLevel(getString(pMap, "remediation_level")),
+							RemediationFactor: getFloat64(pMap, "remediation_factor"),
+							Notes:             getString(pMap, "notes"),
+							PatchURL:          getString(pMap, "patch_url"),
+							PatchDescription:  getString(pMap, "patch_description"),
+							Verification: domain.PatchVerification{
+								Verified:         getBool(pMap, "verified"),
+								Conclusive:       getBool(pMap, "verification_conclusive"),
+								Reason:           getString(pMap, "verification_reason"),
+								InstalledVersion: getString(pMap, "installed_version"),
+								ExpectedVersion:  getString(pMap, "expected_version"),
+							},
+						})
+					}
+				}
+
+				var findings []domain.ResolvedFindingInfo
+				if fList, ok := m["resolved_findings"].([]any); ok {
+					for _, fItem := range fList {
+						fMap, ok := fItem.(map[string]any)
+						if !ok {
+							continue
+						}
+						appliedAt := time.Time{}
+						if t, ok := fMap["applied_at"].(time.Time); ok {
+							appliedAt = t
+						}
+						findings = append(findings, domain.ResolvedFindingInfo{
+							FindingID:          getInt64(fMap, "finding_id"),
+							CVEID:              getString(fMap, "cve_id"),
+							Status:             getString(fMap, "status"),
+							PatchID:            getInt64(fMap, "patch_id"),
+							PatchDescription:   getString(fMap, "patch_description"),
+							PatchURL:           getString(fMap, "patch_url"),
+							RemediationLevel:   getString(fMap, "remediation_level"),
+							AppliedAt:          appliedAt,
+							AppliedBy:          getString(fMap, "applied_by"),
+							Notes:              getString(fMap, "notes"),
+							ExpectedVersion:    getString(fMap, "expected_version"),
+						})
+					}
+				}
+
+				groups = append(groups, domain.SoftwarePatchHistoryGroup{
+					InstallationID:   instID,
+					SoftwareID:       swID,
+					SoftwareName:     swName,
+					CurrentVersion:   currVer,
+					AppliedPatches:   patches,
+					ResolvedFindings: findings,
+				})
+			}
+		}
+
+		return &domain.EndpointPatchHistory{
+			EndpointID:     epID,
+			Hostname:       hostname,
+			SoftwareGroups: groups,
+		}, nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return &domain.EndpointPatchHistory{EndpointID: endpointID, SoftwareGroups: []domain.SoftwarePatchHistoryGroup{}}, nil
+	}
+	return res.(*domain.EndpointPatchHistory), nil
+}
+
+// GetApplicationsByInstallation devuelve el histórico de una instalación concreta.
 func (r *patchRepo) GetApplicationsByInstallation(ctx context.Context, installationID string) ([]domain.AppliedPatch, error) {
 	query := `
-		MATCH (p:Patch)-[rel:APPLIED_TO]->(:SoftwareInstallation {id: $installation_id})
-		RETURN p.id                AS patch_id,
-		       p.url               AS patch_url,
-		       p.description       AS patch_description,
-		       rel.applied_at         AS applied_at,
-		       rel.applied_by         AS applied_by,
-		       rel.remediation_level  AS remediation_level,
-		       rel.remediation_factor AS remediation_factor,
-		       rel.cve_id             AS cve_id,
-		       rel.notes              AS notes,
+		MATCH (p:Patch)-[rel:APPLIED_TO]->(si:SoftwareInstallation)
+		WHERE si.id = $installation_id OR toString(si.id) = toString($installation_id)
+		RETURN p.id                        AS patch_id,
+		       p.url                       AS patch_url,
+		       p.description               AS patch_description,
+		       rel.applied_at              AS applied_at,
+		       rel.applied_by              AS applied_by,
+		       rel.remediation_level       AS remediation_level,
+		       rel.remediation_factor      AS remediation_factor,
+		       rel.cve_id                  AS cve_id,
+		       rel.notes                   AS notes,
 		       rel.verified                AS verified,
 		       rel.verification_conclusive AS verification_conclusive,
 		       rel.verification_reason     AS verification_reason,
@@ -268,9 +433,6 @@ func (r *patchRepo) DeleteByID(ctx context.Context, id int64) error {
 	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
 }
 
-// GetByURL recupera un parche a partir de su URL, que identifica de forma única al
-// parche publicado por el fabricante. Permite deduplicar antes de crear un nodo nuevo.
-// Devuelve (nil, nil) si no existe.
 func (r *patchRepo) GetByURL(ctx context.Context, url string) (*domain.Patch, error) {
 	query := `MATCH (n:Patch {url: $url}) RETURN properties(n) AS props`
 	props, err := executeReadHelper(ctx, r.driver, query, map[string]any{"url": url})
