@@ -1251,9 +1251,10 @@ func (o *Orchestrator) GetPatchesForVulnerability(ctx context.Context, cveID str
 	return o.patchPort.GetByVulnerability(ctx, cveID)
 }
 
-// resolvePatchLevel valida el patch seleccionado y evita que el cliente fuerce un nivel
-// de remediación incompatible con la evidencia almacenada del patch.
-func (o *Orchestrator) resolvePatchLevel(ctx context.Context, cveID string, patchID int64) (domain.RemediationLevel, error) {
+// resolvePatchLevel deriva el nivel de la evidencia del patch. Manda que haya versión
+// corregida, no que el aviso sea del fabricante. Es un techo: el cliente puede declarar
+// menos, nunca más.
+func (o *Orchestrator) resolvePatchLevel(ctx context.Context, installationID, cveID string, patchID int64, targetVersion string, requested domain.RemediationLevel) (domain.RemediationLevel, error) {
 	patch, err := o.patchPort.GetByID(ctx, patchID)
 	if err != nil {
 		return "", fmt.Errorf("error recuperando el patch %d: %w", patchID, err)
@@ -1278,10 +1279,68 @@ func (o *Orchestrator) resolvePatchLevel(ctx context.Context, cveID string, patc
 		return "", fmt.Errorf("el patch %d no está asociado a la CVE %s", patchID, cveID)
 	}
 
-	if patch.Official && fixedVersionIsValid(patch.FixedVersion) {
-		return domain.RemediationLevelOfficialFix, nil
+	ceiling := domain.RemediationLevelUnavailable
+	switch {
+	case patch.Official && fixedVersionIsValid(patch.FixedVersion):
+		ceiling = domain.RemediationLevelOfficialFix
+
+	// Sin aval del fabricante la versión no cierra el finding salvo que se compruebe.
+	case fixedVersionIsValid(patch.FixedVersion):
+		if o.versionSatisfiesFix(ctx, installationID, targetVersion, patch.FixedVersion) {
+			ceiling = domain.RemediationLevelOfficialFix
+		} else {
+			ceiling = domain.RemediationLevelWorkaround
+		}
+
+	case strings.EqualFold(strings.TrimSpace(patch.ReferenceType), "MITIGATION"):
+		ceiling = domain.RemediationLevelWorkaround
 	}
-	return domain.RemediationLevelWorkaround, nil
+
+	return weakerRemediationLevel(requested, ceiling), nil
+}
+
+// versionSatisfiesFix comprueba si la versión destino, o la instalada si no se declara,
+// alcanza alguna de las corregidas.
+func (o *Orchestrator) versionSatisfiesFix(ctx context.Context, installationID, targetVersion, rawFixedVersion string) bool {
+	candidate := strings.TrimSpace(targetVersion)
+	if idx := strings.LastIndex(candidate, "@"); idx >= 0 {
+		candidate = candidate[idx+1:]
+	}
+
+	if candidate == "" {
+		if strings.TrimSpace(installationID) == "" || o.softwareInstPort == nil {
+			return false
+		}
+		software, err := o.softwareInstPort.GetInstalledSoftware(ctx, installationID)
+		if err != nil || software == nil {
+			return false
+		}
+		candidate = strings.TrimSpace(software.Version)
+	}
+	if candidate == "" {
+		return false
+	}
+
+	for _, fv := range domain.ParseFixedVersions(rawFixedVersion) {
+		if strings.TrimSpace(fv.Version) == "" {
+			continue
+		}
+		if cmp, comparable := domain.CompareVersions(candidate, fv.Version); comparable && cmp >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// weakerRemediationLevel devuelve el de mayor factor, es decir el que menos riesgo retira.
+func weakerRemediationLevel(a, b domain.RemediationLevel) domain.RemediationLevel {
+	if !a.IsValid() {
+		return b
+	}
+	if RemediationFactorForLevel(a) >= RemediationFactorForLevel(b) {
+		return a
+	}
+	return b
 }
 
 func fixedVersionIsValid(raw string) bool {
@@ -1347,7 +1406,7 @@ func (o *Orchestrator) DeclarePatchApplied(
 		}
 	}
 
-	level, err := o.resolvePatchLevel(ctx, cveID, patchID)
+	level, err := o.resolvePatchLevel(ctx, installationID, cveID, patchID, targetVersion, level)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1531,7 +1590,8 @@ func (o *Orchestrator) DeclarePatchAppliedToContainer(
 		patchID = patches[0].PatchID
 	}
 
-	level, err := o.resolvePatchLevel(ctx, cveID, patchID)
+	// El contenedor no expone instalación ni versión destino: sin comprobación de versión.
+	level, err := o.resolvePatchLevel(ctx, "", cveID, patchID, "", level)
 	if err != nil {
 		return nil, nil, err
 	}
