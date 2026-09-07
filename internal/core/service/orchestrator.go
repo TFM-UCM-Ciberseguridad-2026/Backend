@@ -2670,24 +2670,42 @@ func (o *Orchestrator) SyncATTACKCatalog(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("los componentes de MITRE ATT&CK (ttpPort, threatActorPort y mitreAttackProvider) no han sido inyectados en el orquestador")
 	}
 
-	ttps, actors, relations, err := o.mitreAttackProvider.FetchATTACKBundle(ctx)
+	catalogo, err := o.mitreAttackProvider.FetchATTACKBundle(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("error obteniendo el catálogo STIX MITRE ATT&CK: %w", err)
 	}
 
-	if err := o.ttpPort.SaveBatch(ctx, ttps); err != nil {
+	if err := o.ttpPort.SaveBatch(ctx, catalogo.TTPs); err != nil {
 		return 0, fmt.Errorf("error guardando el catálogo MITRE ATT&CK TTPs en Neo4j: %w", err)
 	}
 
-	if err := o.threatActorPort.SaveBatch(ctx, actors); err != nil {
+	if err := o.threatActorPort.SaveBatch(ctx, catalogo.Actors); err != nil {
 		return 0, fmt.Errorf("error guardando el catálogo MITRE ATT&CK Threat Actors en Neo4j: %w", err)
 	}
 
-	if err := o.threatActorPort.SaveRelationshipsBatch(ctx, relations); err != nil {
+	if err := o.threatActorPort.SaveRelationshipsBatch(ctx, catalogo.Relations); err != nil {
 		return 0, fmt.Errorf("error guardando las relaciones MITRE ATT&CK USES en Neo4j: %w", err)
 	}
 
-	return len(ttps), nil
+	// La versión se registra al final, cuando el contenido ya está escrito: así
+	// nunca queda anunciada una versión que el grafo no contiene.
+	if err := o.ttpPort.SaveCatalogInfo(ctx, domain.ATTACKCatalogInfo{
+		Version:     catalogo.Version,
+		SpecVersion: catalogo.SpecVersion,
+		TotalTTPs:   len(catalogo.TTPs),
+	}); err != nil {
+		return 0, fmt.Errorf("error guardando la versión del catálogo MITRE ATT&CK en Neo4j: %w", err)
+	}
+	log.Printf("[MITRE] Catálogo ATT&CK v%s (spec %s) sincronizado: %d técnicas",
+		catalogo.Version, catalogo.SpecVersion, len(catalogo.TTPs))
+
+	return len(catalogo.TTPs), nil
+}
+
+// GetATTACKCatalogInfo publica la versión del catálogo MITRE ATT&CK cargada, para
+// que el frontend no tenga que fijarla a mano al exportar capas del Navigator.
+func (o *Orchestrator) GetATTACKCatalogInfo(ctx context.Context) (*domain.ATTACKCatalogInfo, error) {
+	return o.infraPort.GetATTACKCatalogInfo(ctx)
 }
 
 func (o *Orchestrator) StartBackgroundTTPMapping(projectID int64) int {
@@ -2909,23 +2927,28 @@ func (o *Orchestrator) processSingleCVE(ctx context.Context, task ttpTask) error
 
 		if len(ttps) > 0 {
 			confidence = "high"
-			source = "capec_static"
+			source = domain.FuenteCAPECStatic
 		} else {
 			// Sin cobertura de catálogo en ninguno: el LLM trabaja sobre el primer CWE válido.
+			//
+			// mappedCWE viaja solo como CONTEXTO de la inferencia (se guarda en
+			// rel.cwe_context). No decide dónde se escribe la arista: el mapeo del
+			// LLM es específico de esta CVE y se persiste en (CVE)-[:MAPS_TO]->(TTP).
+			// Ver queryMapeoTTP en el repositorio de vulnerabilidades.
 			mappedCWE = validCWEs[0]
 			if capecErr != nil {
 				log.Printf("[CAPEC] Error consultando CAPEC para %s (%v): %v — usando fallback LLM", v.CVEID, validCWEs, capecErr)
 			} else {
 				log.Printf("[CAPEC] Sin cobertura para %s en %v, usando fallback LLM", v.CVEID, validCWEs)
 			}
-			ttps, _, err = o.ttpMapper.MapEnrichedToTTPRaw(ctx, mappedCWE, v.Description, v.CVSSVector)
+			ttps, _, err = o.ttpMapper.MapEnrichedToTTPRaw(ctx, o.peticionDeMapeo(ctx, mappedCWE, v))
 			confidence = "medium"
-			source = "llm_enriched"
+			source = domain.FuenteLLMEnriched
 		}
 	} else {
-		ttps, _, err = o.ttpMapper.MapEnrichedToTTPRaw(ctx, "", v.Description, v.CVSSVector)
+		ttps, _, err = o.ttpMapper.MapEnrichedToTTPRaw(ctx, o.peticionDeMapeo(ctx, "", v))
 		confidence = "medium"
-		source = "llm_enriched"
+		source = domain.FuenteLLMEnriched
 	}
 	duration := time.Since(start)
 
@@ -2933,25 +2956,107 @@ func (o *Orchestrator) processSingleCVE(ctx context.Context, task ttpTask) error
 		return err
 	}
 
-	o.addTTPLog(fmt.Sprintf("CVE %s mapeado a TTPs %v en %v (Confianza: %s)", v.CVEID, ttps, duration.Round(time.Millisecond), confidence), task.projectID)
+	// Red de seguridad: aunque la lista de candidatas ya excluye las técnicas
+	// incompatibles con el vector, se vuelve a comprobar sobre el resultado. Así
+	// la garantía se mantiene también por la vía CAPEC y si el catálogo no
+	// estuviera disponible y no hubiera habido lista que ofrecer.
+	ttps = o.filtrarIncoherentesConCVSS(ttps, v)
+
 	if len(ttps) > 0 {
-		err = o.vulnPort.LinkTTPsToVulnerability(ctx, v.CVEID, mappedCWE, ttps, confidence, source)
+		// El registro se emite DESPUÉS de escribir, y con las técnicas realmente
+		// enlazadas. Antes se anunciaba lo que el modelo había propuesto, de modo
+		// que un registro podía decir "mapeado a [T1078 T1079 T1562]" mientras en
+		// el grafo entraba una sola: las otras dos no existen en el catálogo.
+		aceptadas, err := o.vulnPort.LinkTTPsToVulnerability(ctx, v.CVEID, mappedCWE, ttps, confidence, source)
 		if err != nil {
 			return err
 		}
+
+		mensaje := fmt.Sprintf("CVE %s mapeado a TTPs %v en %v (Confianza: %s)",
+			v.CVEID, aceptadas, duration.Round(time.Millisecond), confidence)
+		if descartadas := len(ttps) - len(aceptadas); descartadas > 0 {
+			mensaje += fmt.Sprintf(" — %d de %d propuestas descartadas por no estar en el catálogo",
+				descartadas, len(ttps))
+		}
+		o.addTTPLog(mensaje, task.projectID)
+
 		// Emitir evento WebSocket si el notificador está inyectado
 		if o.notifier != nil {
 			_ = o.notifier.NotifyTTPMapped(ctx, ports.TTPMappedEvent{
 				CVEID:      v.CVEID,
-				TTPs:       ttps,
+				TTPs:       aceptadas,
 				Confidence: confidence,
 				Source:     source,
 				ProjectID:  task.projectID,
-				Log:        fmt.Sprintf("CVE %s → TTPs %v (Confianza: %s)", v.CVEID, ttps, confidence),
+				Log:        fmt.Sprintf("CVE %s → TTPs %v (Confianza: %s)", v.CVEID, aceptadas, confidence),
 			})
 		}
+		return nil
 	}
+
+	o.addTTPLog(fmt.Sprintf("CVE %s no produjo ninguna TTP en %v (Confianza: %s)",
+		v.CVEID, duration.Round(time.Millisecond), confidence), task.projectID)
 	return nil
+}
+
+// peticionDeMapeo arma la petición para el LLM, incluyendo la lista cerrada de
+// técnicas entre las que puede elegir.
+//
+// Si el catálogo no se puede leer, la petición viaja sin candidatas y el modelo
+// responde de memoria: es peor, pero es preferible a no mapear nada. El aviso
+// queda registrado para que no pase inadvertido.
+func (o *Orchestrator) peticionDeMapeo(ctx context.Context, cwe string, v *domain.Vulnerability) domain.TTPMappingRequest {
+	req := domain.TTPMappingRequest{
+		CWE:         cwe,
+		Description: v.Description,
+		CVSSVector:  v.CVSSVector,
+	}
+
+	if o.ttpPort == nil {
+		log.Printf("[TTP-CANDIDATAS] ttpPort no inyectado: %s se mapeará sin lista cerrada", v.CVEID)
+		return req
+	}
+
+	catalogo, err := o.ttpPort.GetCatalog(ctx)
+	if err != nil || len(catalogo) == 0 {
+		log.Printf("[TTP-CANDIDATAS] no se pudo leer el catálogo (%v): %s se mapeará sin lista cerrada", err, v.CVEID)
+		return req
+	}
+
+	// Se ofrece el catálogo completo, subtécnicas incluidas: acotarlo a técnicas
+	// padre mejoraba la precisión pero dejaba 387 subtécnicas fuera de alcance de
+	// forma permanente, y la granularidad del mapeo es el valor del sistema.
+	//
+	// El adaptador se encarga de que la lista no abrume al modelo: elige primero
+	// entre padres y luego dentro de las ramas elegidas.
+	req.Candidatas = domain.CandidatasParaVulnerabilidad(catalogo, v.CVSSVector)
+	log.Printf("[TTP-CANDIDATAS] %s: %d técnicas ofrecidas de %d del catálogo",
+		v.CVEID, len(req.Candidatas), len(catalogo))
+	return req
+}
+
+// filtrarIncoherentesConCVSS descarta técnicas que exigen interacción del usuario
+// cuando el vector CVSS declara que no hace falta ninguna (UI:N).
+//
+// No es una cuestión de criterio: el propio dato de entrada contradice la
+// afirmación. Medido sobre 30 CVE reales, el 20,7% de las respuestas del modelo
+// incurrían en esta contradicción.
+func (o *Orchestrator) filtrarIncoherentesConCVSS(ttps []string, v *domain.Vulnerability) []string {
+	vector := domain.ParsearVectorCVSS(v.CVSSVector)
+	if !vector.Presente || vector.RequiereUsuario {
+		return ttps
+	}
+
+	conservadas := make([]string, 0, len(ttps))
+	for _, t := range ttps {
+		if motivo, coherente := vector.EsCoherenteConVector(t); !coherente {
+			log.Printf("[TTP-DESCARTE] cve=%s ttp=%s motivo=%s (%s, pero el vector declara UI:N)",
+				v.CVEID, t, domain.MotivoIncoherenteCVSS, motivo)
+			continue
+		}
+		conservadas = append(conservadas, t)
+	}
+	return conservadas
 }
 
 func (o *Orchestrator) addTTPLog(msg string, projectID int64) {

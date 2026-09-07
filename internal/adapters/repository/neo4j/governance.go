@@ -463,15 +463,21 @@ func (r *governanceRepository) GetSLABreaches(ctx context.Context, projectID int
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	// Vulnerabilidades activas (hallazgos OPEN de este proyecto), agrupadas por CVE Y por
-	// categoría del activo afectado: el plazo depende de dónde está la vulnerabilidad, así
-	// que la misma CVE presente en un servidor y en un puesto son dos compromisos distintos
-	// y se devuelven como dos filas.
+	// Vulnerabilidades activas de este proyecto, agrupadas por CVE Y por categoría del
+	// activo afectado: el plazo depende de dónde está la vulnerabilidad, así que la misma
+	// CVE presente en un servidor y en un puesto son dos compromisos distintos y se
+	// devuelven como dos filas.
+	//
+	// Una CVE ya parcheada no tiene plazo que incumplir, así que los hallazgos cerrados
+	// quedan fuera con el mismo criterio que usan la cola de parcheo y el motor de riesgo.
+	// Las MITIGADAS sí siguen contando: una mitigación temporal o un workaround dejan el
+	// software vulnerable instalado y el reloj del SLA tiene que seguir corriendo.
 	//
 	// La fecha de detección de cada grupo es la MÁS ANTIGUA de sus hallazgos: el reloj del
 	// SLA empieza a contar la primera vez que se supo, no la última.
 	query := `
-		MATCH (:Project {id: $projectID})-[:HAS_ENDPOINT]->(e:Endpoint)-[:HAS_INSTALLATION]->(s:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding {status: 'OPEN'})-[:OF_VULNERABILITY]->(v:Vulnerability)
+		MATCH (:Project {id: $projectID})-[:HAS_ENDPOINT]->(e:Endpoint)-[:HAS_INSTALLATION]->(s:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED']
 		WITH v, coalesce(e.category, '') AS category, e,
 		     coalesce(v.first_detected_at, timestamp()) AS detected
 		RETURN v.cve_id           AS cve_id,

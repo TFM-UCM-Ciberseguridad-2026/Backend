@@ -477,6 +477,57 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 	return graphData, nil
 }
 
+// GetATTACKCatalogInfo lee la versión del catálogo MITRE ATT&CK cargada.
+//
+// El recuento de técnicas se cuenta en vivo en lugar de leer el que se guardó al
+// sincronizar: si alguien purga o modifica nodos TTP, el valor almacenado se
+// queda obsoleto y el publicado dejaría de corresponderse con el grafo.
+//
+// Si no hay nodo de catálogo —grafo poblado antes de que existiera este
+// registro— se devuelve la versión vacía en vez de un error: quien consume debe
+// poder distinguir "no lo sé" y actuar en consecuencia, no recibir un fallo.
+func (r *infrastructureRepo) GetATTACKCatalogInfo(ctx context.Context) (*domain.ATTACKCatalogInfo, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		OPTIONAL MATCH (c:ATTACKCatalog {name: 'enterprise-attack'})
+		RETURN coalesce(c.version, '')      AS version,
+		       coalesce(c.spec_version, '') AS spec_version,
+		       coalesce(c.updated_at, 0)    AS updated_at,
+		       count { (t:TTP) }            AS total_ttps
+	`
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, query, nil)
+		if err != nil {
+			return nil, err
+		}
+		registro, err := result.Single(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		info := &domain.ATTACKCatalogInfo{}
+		datos := registro.AsMap()
+		info.Version, _ = datos["version"].(string)
+		info.SpecVersion, _ = datos["spec_version"].(string)
+		if v, ok := datos["updated_at"].(int64); ok {
+			info.UpdatedAt = v
+		}
+		if v, ok := datos["total_ttps"].(int64); ok {
+			info.TotalTTPs = int(v)
+		}
+		return info, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	info, _ := res.(*domain.ATTACKCatalogInfo)
+	return info, nil
+}
+
 func (r *infrastructureRepo) GetTotalMitreTTPs(ctx context.Context) (int, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
@@ -1913,12 +1964,53 @@ func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (
 		LIMIT 10
 	`
 
+	// La misma confianza contada por VULNERABILIDAD en lugar de por mapeo. Una
+	// CVE cuenta como de confianza alta si tiene AL MENOS una técnica deducida
+	// del catálogo; el resto de las mapeadas son de confianza media.
+	//
+	// Las dos lecturas divergen porque la vía determinista es mucho más densa
+	// (6,35 técnicas por CVE frente a 2,04), de modo que un 30% de las CVE
+	// aporta el 58% de las aristas. Sin esta cifra, el panel sugiere una
+	// fiabilidad que no se sostiene a nivel de vulnerabilidad.
+	confidenceCVEQuery := baseWhere + `
+		WITH DISTINCT v
+		WITH v,
+		  EXISTS {
+		    MATCH (v)-[r:MAPS_TO]->(:TTP) WHERE r.confidence = 'high'
+		    UNION
+		    MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[r2:MAPS_TO]->(:TTP) WHERE r2.confidence = 'high'
+		  } AS tieneAlta,
+		  EXISTS {
+		    MATCH (v)-[:MAPS_TO]->(:TTP)
+		    UNION
+		    MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(:TTP)
+		  } AS mapeada
+		RETURN
+		  count(CASE WHEN mapeada AND tieneAlta THEN 1 END)     AS high_cves,
+		  count(CASE WHEN mapeada AND NOT tieneAlta THEN 1 END) AS medium_cves
+	`
+
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
 	stats := &domain.TTPStats{}
 
 	_, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		resCVE, err := tx.Run(ctx, confidenceCVEQuery, params)
+		if err != nil {
+			return nil, fmt.Errorf("ttp-stats confidenceCVEQuery: %w", err)
+		}
+		if resCVE.Next(ctx) {
+			rec := resCVE.Record()
+			if v, ok := rec.Get("high_cves"); ok && v != nil {
+				stats.HighConfidenceCVEs = int(v.(int64))
+			}
+			if v, ok := rec.Get("medium_cves"); ok && v != nil {
+				stats.MediumConfidenceCVEs = int(v.(int64))
+			}
+		}
+		_, _ = resCVE.Consume(ctx)
+
 		res1, err := tx.Run(ctx, totalQuery, params)
 		if err != nil { return nil, fmt.Errorf("ttp-stats totalQuery: %w", err) }
 		if res1.Next(ctx) {

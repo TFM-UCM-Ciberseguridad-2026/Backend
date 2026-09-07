@@ -227,10 +227,15 @@ func (r *projectRepo) ExportGraph(ctx context.Context, id int64) (*domain.GraphD
 	//     (:RACIActivity)-[:INVOLVES {role_type}]->(:Role). Sin ella se exportarían las
 	//     actividades y los roles pero se perdería quién es R, A, C o I en cada una.
 	//
-	// HAS_WEAKNESS> y MAPS_TO> son las dos aristas que escribe realmente el
-	// pipeline de TTPs (LinkTTPsToVulnerability). Antes el filtro solo listaba
+	// HAS_CWE> y MAPS_TO> son las aristas que escribe realmente el pipeline de
+	// TTPs (LinkTTPsToVulnerability). Antes el filtro solo listaba
 	// EXPLOITS_VIA_TTP>, que nunca llegó a crearse, así que el mapeo de TTPs no
 	// viajaba en el export.
+	//
+	// HAS_WEAKNESS> se conserva en el filtro aunque el pipeline ya no la escriba:
+	// duplicaba a HAS_CWE y se eliminó (ver cmd/Pruebas/migrate_ttp_cve_scope).
+	// Mantenerla listada permite seguir importando exports generados antes de esa
+	// migración, y no tiene coste sobre un grafo donde ya no existe.
 	//
 	// <FIXES se recorre hacia atrás porque la arista va (:Patch)-[:FIXES]->(:Vulnerability):
 	// desde la vulnerabilidad hay que ir en sentido contrario para alcanzar el parche.
