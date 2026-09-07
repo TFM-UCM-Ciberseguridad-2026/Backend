@@ -157,6 +157,9 @@ type SoftwareInstallationPort interface {
 	// GetInstalledSoftware recorre (SoftwareInstallation)-[:INSTANCE_OF]->(Software).
 	// Devuelve (nil, nil) si la instalación no tiene software asociado.
 	GetInstalledSoftware(ctx context.Context, installationID string) (*domain.Software, error)
+
+	GetAllSoftwareInstallations(ctx context.Context) ([]domain.SoftwareInstallationItem, error)
+	GetSoftwareInstallationsByProject(ctx context.Context, projectID int64) ([]domain.SoftwareInstallationItem, error)
 }
 
 // RelationshipPort abstrae la creación de relaciones entre entidades del dominio
@@ -236,6 +239,10 @@ type InfrastructurePort interface {
 	IsAnalysisPending(ctx context.Context, projectID int64) (bool, error)
 	ImportGraphData(ctx context.Context, data *domain.GraphData) error
 	GetPaginatedInventory(ctx context.Context, query domain.InventoryQuery) (*domain.PaginatedInventoryResponse, error)
+	IsAssetNodeNameDuplicate(ctx context.Context, name string, excludeID any) (bool, error)
+	IsNetworkNameDuplicate(ctx context.Context, name string, excludeID any) (bool, error)
+	IsVlanIDDuplicate(ctx context.Context, vlanID int64, excludeID any) (bool, error)
+	IsProjectNameDuplicate(ctx context.Context, name string, excludeID any) (bool, error)
 }
 
 // ContainerPort define las operaciones para gestionar imágenes y contenedores.
@@ -243,6 +250,7 @@ type ContainerPort interface {
 	SaveContainerImage(ctx context.Context, image *domain.ContainerImage) error
 	GetContainerImage(ctx context.Context, imageID string) (*domain.ContainerImage, error)
 	GetAllContainerImages(ctx context.Context) ([]domain.ContainerImage, error)
+	GetContainerImagesByProject(ctx context.Context, projectID int64) ([]domain.ContainerImage, error)
 	SaveContainer(ctx context.Context, container *domain.Container) error
 	GetContainer(ctx context.Context, containerID string) (*domain.Container, error)
 	GetContainerIDsByImage(ctx context.Context, imageID string) ([]string, error)

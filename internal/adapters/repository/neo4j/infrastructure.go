@@ -54,14 +54,16 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 		matchClause = `
 			MATCH (proj:Project)
 			WHERE proj.id = $projectID OR toString(proj.id) = toString($projectID)
-			MATCH (proj)-[:HAS_ENDPOINT]->(e)
-			OPTIONAL MATCH (e)-[:CONNECTED_TO]->(net:Network)
+			OPTIONAL MATCH (proj)-[:CONTAINS_NETWORK]->(pnet:Network)
+			OPTIONAL MATCH (proj)-[:HAS_ENDPOINT]->(e)
+			OPTIONAL MATCH (e)-[:CONNECTED_TO]->(enet:Network)
 			OPTIONAL MATCH (e)-[:HAS_HARDWARE]->(hw:Hardware)
 			OPTIONAL MATCH (e)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
 			OPTIONAL MATCH (si)-[:INSTANCE_OF]->(sw:Software)
 			OPTIONAL MATCH (si)-[:HAS_FINDING]->(f1:Finding)
 			OPTIONAL MATCH (f1)-[:OF_VULNERABILITY]->(v1:Vulnerability)
-			OPTIONAL MATCH (e)-[:HOSTS]->(c:Container)
+			OPTIONAL MATCH (e)-[:HOSTS]->(c)
+			OPTIONAL MATCH (c)-[:CONNECTED_TO]->(cnet:Network)
 			OPTIONAL MATCH (c)-[:USES_IMAGE]-(ci:ContainerImage)
 			OPTIONAL MATCH (c)-[:HAS_INSTALLATION]->(csi:SoftwareInstallation)
 			OPTIONAL MATCH (csi)-[:INSTANCE_OF]->(csw:Software)
@@ -72,8 +74,8 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 			OPTIONAL MATCH (ci)-[:HAS_FINDING]->(cif:Finding)
 			OPTIONAL MATCH (cif)-[:OF_VULNERABILITY]->(civ:Vulnerability)
 			OPTIONAL MATCH (ci)-[:HAS_VULNERABILITY]->(iv1:Vulnerability)
-			WITH DISTINCT proj, e, net, hw, si, sw, f1, v1, c, ci, csi, csw, cf1, cv1, cf2, cv2, cif, civ, iv1
-			UNWIND [proj, e, net, hw, si, sw, f1, v1, c, ci, csi, csw, cf1, cv1, cf2, cv2, cif, civ, iv1] AS nodeItem
+			WITH DISTINCT proj, e, pnet, enet, cnet, hw, si, sw, f1, v1, c, ci, csi, csw, cf1, cv1, cf2, cv2, cif, civ, iv1
+			UNWIND [proj, e, pnet, enet, cnet, hw, si, sw, f1, v1, c, ci, csi, csw, cf1, cv1, cf2, cv2, cif, civ, iv1] AS nodeItem
 			WITH nodeItem AS n WHERE n IS NOT NULL
 			WITH DISTINCT n
 		`
@@ -1947,4 +1949,174 @@ func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (
 	}
 	return stats, nil
 }
+
+func (r *infrastructureRepo) IsAssetNodeNameDuplicate(ctx context.Context, name string, excludeID any) (bool, error) {
+	nameTrimmed := strings.TrimSpace(strings.ToLower(name))
+	if nameTrimmed == "" {
+		return false, nil
+	}
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (n)
+		WHERE (n:Endpoint OR n:Container) 
+		  AND toLower(trim(coalesce(n.hostname, n.name, ''))) = $name
+		  AND ($excludeID IS NULL OR $excludeID = '' OR $excludeID = '0' OR toString(n.id) <> toString($excludeID))
+		RETURN count(n) > 0 AS exists
+	`
+
+	exStr := ""
+	if excludeID != nil {
+		exStr = fmt.Sprintf("%v", excludeID)
+	}
+
+	params := map[string]any{
+		"name":      nameTrimmed,
+		"excludeID": exStr,
+	}
+
+	res, err := session.Run(ctx, query, params)
+	if err != nil {
+		return false, fmt.Errorf("error verificando nombre duplicado: %w", err)
+	}
+
+	if res.Next(ctx) {
+		if b, ok := res.Record().Get("exists"); ok {
+			if exists, isBool := b.(bool); isBool {
+				return exists, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+func (r *infrastructureRepo) IsNetworkNameDuplicate(ctx context.Context, name string, excludeID any) (bool, error) {
+	nameTrimmed := strings.TrimSpace(strings.ToLower(name))
+	if nameTrimmed == "" {
+		return false, nil
+	}
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (n:Network)
+		WHERE toLower(trim(coalesce(n.nombre, n.name, ''))) = $name
+		  AND ($excludeID IS NULL OR $excludeID = '' OR $excludeID = '0' OR toString(n.id) <> toString($excludeID))
+		RETURN count(n) > 0 AS exists
+	`
+
+	exStr := ""
+	if excludeID != nil {
+		exStr = fmt.Sprintf("%v", excludeID)
+	}
+
+	params := map[string]any{
+		"name":      nameTrimmed,
+		"excludeID": exStr,
+	}
+
+	res, err := session.Run(ctx, query, params)
+	if err != nil {
+		return false, fmt.Errorf("error verificando nombre duplicado de red: %w", err)
+	}
+
+	if res.Next(ctx) {
+		if b, ok := res.Record().Get("exists"); ok {
+			if exists, isBool := b.(bool); isBool {
+				return exists, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+func (r *infrastructureRepo) IsVlanIDDuplicate(ctx context.Context, vlanID int64, excludeID any) (bool, error) {
+	if vlanID <= 0 {
+		return false, nil
+	}
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (n:Network)
+		WHERE n.vlan_id = $vlanID
+		  AND ($excludeID IS NULL OR $excludeID = '' OR $excludeID = '0' OR toString(n.id) <> toString($excludeID))
+		RETURN count(n) > 0 AS exists
+	`
+
+	exStr := ""
+	if excludeID != nil {
+		exStr = fmt.Sprintf("%v", excludeID)
+	}
+
+	params := map[string]any{
+		"vlanID":    vlanID,
+		"excludeID": exStr,
+	}
+
+	res, err := session.Run(ctx, query, params)
+	if err != nil {
+		return false, fmt.Errorf("error verificando VLAN ID duplicado: %w", err)
+	}
+
+	if res.Next(ctx) {
+		if b, ok := res.Record().Get("exists"); ok {
+			if exists, isBool := b.(bool); isBool {
+				return exists, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+func (r *infrastructureRepo) IsProjectNameDuplicate(ctx context.Context, name string, excludeID any) (bool, error) {
+	nameTrimmed := strings.TrimSpace(strings.ToLower(name))
+	if nameTrimmed == "" {
+		return false, nil
+	}
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (p:Project)
+		WHERE toLower(trim(coalesce(p.nombre, p.name, ''))) = $name
+		  AND ($excludeID IS NULL OR $excludeID = '' OR $excludeID = '0' OR toString(p.id) <> toString($excludeID))
+		RETURN count(p) > 0 AS exists
+	`
+
+	exStr := ""
+	if excludeID != nil {
+		exStr = fmt.Sprintf("%v", excludeID)
+	}
+
+	params := map[string]any{
+		"name":      nameTrimmed,
+		"excludeID": exStr,
+	}
+
+	res, err := session.Run(ctx, query, params)
+	if err != nil {
+		return false, fmt.Errorf("error verificando nombre duplicado de proyecto: %w", err)
+	}
+
+	if res.Next(ctx) {
+		if b, ok := res.Record().Get("exists"); ok {
+			if exists, isBool := b.(bool); isBool {
+				return exists, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+
 

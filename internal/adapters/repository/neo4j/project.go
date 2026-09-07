@@ -171,13 +171,29 @@ func (r *projectRepo) DeleteByID(ctx context.Context, id int64) error {
 	query := `
 		MATCH (p:Project)
 		WHERE toString(p.id) = toString($id) OR elementId(p) = toString($id)
+
+		// Endpoints del proyecto
 		OPTIONAL MATCH (p)-[:HAS_ENDPOINT]->(e:Endpoint)
-		OPTIONAL MATCH (e)-[:CONNECTED_TO|HAS_HARDWARE|HOSTS|HAS_INSTALLATION|HAS_IP]->(sub1)
-		OPTIONAL MATCH (sub1)-[:HAS_INSTALLATION|HAS_FINDING|USES_IMAGE|INSTANCE_OF]->(sub2)
-		OPTIONAL MATCH (sub2)-[:HAS_FINDING|OF_VULNERABILITY|HAS_REMEDIATION|HAS_EXPLOIT]->(sub3)
-		OPTIONAL MATCH (sub3)-[:HAS_REMEDIATION|HAS_EXPLOIT|HAS_PATCH]->(sub4)
-		WHERE NOT (sub1:ThreatActor OR sub1:TTP) AND NOT (sub2:ThreatActor OR sub2:TTP) AND NOT (sub3:ThreatActor OR sub3:TTP) AND NOT (sub4:ThreatActor OR sub4:TTP)
-		DETACH DELETE p, e, sub1, sub2, sub3, sub4
+
+		// Hardware, contenedores e instalaciones directas del endpoint
+		OPTIONAL MATCH (e)-[:HAS_HARDWARE]->(hw:Hardware)
+		OPTIONAL MATCH (e)-[:HOSTS]->(c:Container)
+		OPTIONAL MATCH (e)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
+
+		// Instalaciones en contenedores
+		OPTIONAL MATCH (c)-[:HAS_INSTALLATION]->(csi:SoftwareInstallation)
+
+		// Findings creados en instalaciones o contenedores
+		OPTIONAL MATCH (si)-[:HAS_FINDING]->(f1:Finding)
+		OPTIONAL MATCH (csi)-[:HAS_FINDING]->(cf1:Finding)
+		OPTIONAL MATCH (c)-[:HAS_FINDING]->(cf2:Finding)
+
+		// Remediaciones de esos findings
+		OPTIONAL MATCH (f1)-[:HAS_REMEDIATION]->(rem1:Remediation)
+		OPTIONAL MATCH (cf1)-[:HAS_REMEDIATION]->(rem2:Remediation)
+		OPTIONAL MATCH (cf2)-[:HAS_REMEDIATION]->(rem3:Remediation)
+
+		DETACH DELETE p, e, hw, c, si, csi, f1, cf1, cf2, rem1, rem2, rem3
 	`
 	_ = executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
 

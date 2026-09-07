@@ -241,6 +241,12 @@ func (o *Orchestrator) nextInstallationID() string {
 
 // CreateProject guarda el proyecto principal.
 func (o *Orchestrator) CreateProject(ctx context.Context, project *domain.Project) error {
+	if project.Nombre != "" && o.infraPort != nil {
+		if exists, err := o.infraPort.IsProjectNameDuplicate(ctx, project.Nombre, 0); err == nil && exists {
+			return fmt.Errorf("Ya existe un proyecto con este nombre. Por favor, elige un nombre único.")
+		}
+	}
+
 	if project.ProjectID == 0 {
 		id, err := o.nextNodeID(ctx, "Project")
 		if err != nil {
@@ -259,14 +265,28 @@ func (o *Orchestrator) DeleteProject(ctx context.Context, projectID int64) error
 
 // RenameProject actualiza el nombre de un proyecto.
 func (o *Orchestrator) RenameProject(ctx context.Context, projectID int64, newName string) error {
-	if newName == "" {
+	newNameTrimmed := strings.TrimSpace(newName)
+	if newNameTrimmed == "" {
 		return fmt.Errorf("el nombre del proyecto no puede estar vacío")
 	}
-	return o.projectPort.RenameProject(ctx, projectID, newName)
+
+	if o.infraPort != nil {
+		if exists, err := o.infraPort.IsProjectNameDuplicate(ctx, newNameTrimmed, projectID); err == nil && exists {
+			return fmt.Errorf("Ya existe un proyecto con este nombre. Por favor, elige un nombre único.")
+		}
+	}
+
+	return o.projectPort.RenameProject(ctx, projectID, newNameTrimmed)
 }
 
 // AddEndpointToProject guarda un nuevo endpoint y lo vincula a un proyecto.
 func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64, endpoint *domain.Endpoint) error {
+	if endpoint.Hostname != "" && o.infraPort != nil {
+		if exists, err := o.infraPort.IsAssetNodeNameDuplicate(ctx, endpoint.Hostname, 0); err == nil && exists {
+			return fmt.Errorf("Ya existe un activo con este nombre. Por favor, elige un nombre único.")
+		}
+	}
+
 	if endpoint.EndpointID == 0 {
 		id, err := o.nextNodeID(ctx, "Endpoint")
 		if err != nil {
@@ -324,6 +344,17 @@ func (o *Orchestrator) AssociateHardwareToEndpoint(ctx context.Context, endpoint
 // indicado como nodo huérfano de ese proyecto en concreto (no aparece en el resto).
 // Devuelve el ID de la red creada y cuántos endpoints se enlazaron.
 func (o *Orchestrator) CreateNetwork(ctx context.Context, network *domain.Network, projectID int64) (int64, int, error) {
+	if network.Nombre != "" && o.infraPort != nil {
+		if exists, err := o.infraPort.IsNetworkNameDuplicate(ctx, network.Nombre, 0); err == nil && exists {
+			return 0, 0, fmt.Errorf("Ya existe una red con este nombre. Por favor, elige un nombre único.")
+		}
+	}
+	if network.VLANID > 0 && o.infraPort != nil {
+		if exists, err := o.infraPort.IsVlanIDDuplicate(ctx, network.VLANID, 0); err == nil && exists {
+			return 0, 0, fmt.Errorf("El VLAN ID ya está asignado a otra red. Por favor, elige un VLAN ID único.")
+		}
+	}
+
 	if network.NetworkID == 0 {
 		id, err := o.nextNodeID(ctx, "Network")
 		if err != nil {
@@ -2603,8 +2634,133 @@ func (o *Orchestrator) SyncScoutDaily(ctx context.Context) error {
 	return nil
 }
 
+// RunDailyPipeline ejecuta la canalización nocturna completa a las 03:00 AM (o bajo demanda):
+// 1. Obtiene los identificadores de todos los proyectos registrados en el sistema.
+// 2. Ejecuta el análisis automático de vulnerabilidades para TODAS las instalaciones de software en todos los proyectos (equivalente al botón del frontend).
+// 3. Escanea TODAS las imágenes de contenedores mediante Docker Scout (SyncScoutDaily), registrando hallazgos e imágenes.
+// 4. Sincroniza las vulnerabilidades NVD/NIST globales recientes (SyncNistDaily).
+// 5. Recalcula el riesgo global y niveles de prioridad para todos los proyectos y sus activos (ComputeAllProjectsRisk).
+func (o *Orchestrator) RunDailyPipeline(ctx context.Context) error {
+	log.Println("[CRON 03:00 AM] Iniciando canalización diaria unificada de análisis de vulnerabilidades y recálculo de riesgo...")
+
+	// 1. Obtener todos los IDs de proyectos
+	var projectIDs []int64
+	if o.riskPort != nil {
+		pIDs, err := o.riskPort.GetAllProjectIDs(ctx)
+		if err == nil {
+			projectIDs = pIDs
+		}
+	}
+
+	log.Printf("[CRON 03:00 AM] Proyectos a analizar: %d %v", len(projectIDs), projectIDs)
+
+	// 2. Fase 1/4: Análisis de vulnerabilidades de Software (cruce CPE -> NVD)
+	log.Println("[CRON 03:00 AM] Fase 1/4: Escaneando vulnerabilidades de instalaciones de software...")
+	if o.softwareInstPort != nil {
+		var installations []domain.SoftwareInstallationItem
+		if len(projectIDs) > 0 {
+			for _, pid := range projectIDs {
+				items, pErr := o.softwareInstPort.GetSoftwareInstallationsByProject(ctx, pid)
+				if pErr == nil && len(items) > 0 {
+					installations = append(installations, items...)
+				}
+			}
+		}
+		// Fallback o complemento: si la búsqueda por proyecto devuelve 0 o para asegurar cobertura completa
+		if len(installations) == 0 {
+			items, allErr := o.softwareInstPort.GetAllSoftwareInstallations(ctx)
+			if allErr == nil {
+				installations = items
+			}
+		}
+
+		log.Printf("[CRON 03:00 AM] Iniciando análisis automático de %d instalaciones de software...", len(installations))
+		var scanErrs []error
+		for _, inst := range installations {
+			log.Printf("[CRON 03:00 AM] Analizando vulnerabilidades de instalación: %s (Software ID: %d)", inst.InstallationID, inst.SoftwareID)
+			_, scanErr := o.AutoScanAndRegisterVulnerabilities(ctx, inst.InstallationID, inst.SoftwareID, domain.VulnerabilityScanOptions{ForceRefresh: true})
+			if scanErr != nil {
+				scanErrs = append(scanErrs, scanErr)
+			}
+		}
+		if len(scanErrs) > 0 {
+			log.Printf("[CRON 03:00 AM] Análisis de software completado con %d advertencias/errores.", len(scanErrs))
+		} else {
+			log.Println("[CRON 03:00 AM] Análisis de vulnerabilidades de instalaciones de software completado con éxito.")
+		}
+	}
+
+	// 3. Fase 2/4: Escaneo de imágenes Docker con Scout
+	if o.scoutPort != nil {
+		log.Println("[CRON 03:00 AM] Fase 2/4: Escaneando imágenes de contenedores con Docker Scout...")
+		var containerImages []domain.ContainerImage
+		if len(projectIDs) > 0 && o.containerPort != nil {
+			for _, pid := range projectIDs {
+				imgs, pErr := o.containerPort.GetContainerImagesByProject(ctx, pid)
+				if pErr == nil && len(imgs) > 0 {
+					containerImages = append(containerImages, imgs...)
+				}
+			}
+		}
+		if len(containerImages) == 0 && o.containerPort != nil {
+			imgs, allErr := o.containerPort.GetAllContainerImages(ctx)
+			if allErr == nil {
+				containerImages = imgs
+			}
+		}
+
+		log.Printf("[CRON 03:00 AM] Escaneando %d imágenes de contenedores...", len(containerImages))
+		var scoutErrs []error
+		for _, img := range containerImages {
+			imageName := img.ImageID
+			if imageName == "" {
+				imageName = img.Name
+			}
+			log.Printf("[CRON 03:00 AM] Escaneando imagen Docker Scout: %s", imageName)
+			_, err := o.ScanAndSaveContainerImage(ctx, imageName, img.ImageID, domain.VulnerabilityScanOptions{ForceRefresh: true})
+			if err != nil {
+				scoutErrs = append(scoutErrs, err)
+			}
+		}
+		if len(scoutErrs) > 0 {
+			log.Printf("[CRON 03:00 AM] Escaneo Docker Scout completado con %d errores.", len(scoutErrs))
+		} else {
+			log.Println("[CRON 03:00 AM] Escaneo de imágenes Docker Scout completado con éxito.")
+		}
+	} else {
+		log.Println("[CRON 03:00 AM] Fase 2/4: Docker Scout no está configurado, omitiendo escaneo de imágenes.")
+	}
+
+	// 4. Fase 3/4: Sincronización diaria con NIST/NVD para vulnerabilidades globales
+	log.Println("[CRON 03:00 AM] Fase 3/4: Sincronizando vulnerabilidades globales con NIST/NVD...")
+	if err := o.SyncNistDaily(ctx); err != nil {
+		log.Printf("[CRON 03:00 AM] Advertencia en sincronización NIST: %v", err)
+	} else {
+		log.Println("[CRON 03:00 AM] Sincronización de vulnerabilidades NIST/NVD completada.")
+	}
+
+	// 5. Fase 4/4: Recálculo global del riesgo de todos los proyectos
+	if o.riskPort != nil {
+		log.Println("[CRON 03:00 AM] Fase 4/4: Recalculando riesgo global de todos los proyectos...")
+		if err := o.ComputeAllProjectsRisk(ctx); err != nil {
+			log.Printf("[CRON 03:00 AM] Error recalculando riesgo global de proyectos: %v", err)
+			return err
+		}
+		log.Println("[CRON 03:00 AM] Recálculo global de riesgo completado con éxito.")
+	}
+
+	log.Println("[CRON 03:00 AM] Canalización diaria de las 03:00 AM finalizada correctamente.")
+	return nil
+}
+
 // AddContainerToEndpoint guarda un contenedor y lo vincula a un host (endpoint)
 func (o *Orchestrator) AddContainerToEndpoint(ctx context.Context, hostID int64, container *domain.Container) error {
+	if container.Name != "" && o.infraPort != nil {
+		if exists, err := o.infraPort.IsAssetNodeNameDuplicate(ctx, container.Name, ""); err == nil && exists {
+			return fmt.Errorf("Ya existe un activo con este nombre. Por favor, elige un nombre único.")
+		}
+	}
+
 	if container.ContainerID == "" {
 		// En principio el frontend genera UUID, pero si no...
 		container.ContainerID = fmt.Sprintf("container-%d", time.Now().UnixNano())
@@ -2630,6 +2786,12 @@ func (o *Orchestrator) AddContainerToEndpoint(ctx context.Context, hostID int64,
 
 // UpdateContainer actualiza los datos de un contenedor y sus IPs.
 func (o *Orchestrator) UpdateContainer(ctx context.Context, container *domain.Container) error {
+	if container.Name != "" && o.infraPort != nil {
+		if exists, err := o.infraPort.IsAssetNodeNameDuplicate(ctx, container.Name, container.ContainerID); err == nil && exists {
+			return fmt.Errorf("Ya existe un activo con este nombre. Por favor, elige un nombre único.")
+		}
+	}
+
 	if err := o.SaveContainer(ctx, container); err != nil {
 		return err
 	}
@@ -2649,6 +2811,12 @@ func (o *Orchestrator) UpdateContainer(ctx context.Context, container *domain.Co
 
 // UpdateEndpoint actualiza los datos y re-enlaza las IPs de un Endpoint en Neo4j.
 func (o *Orchestrator) UpdateEndpoint(ctx context.Context, endpoint *domain.Endpoint) error {
+	if endpoint.Hostname != "" && o.infraPort != nil {
+		if exists, err := o.infraPort.IsAssetNodeNameDuplicate(ctx, endpoint.Hostname, endpoint.EndpointID); err == nil && exists {
+			return fmt.Errorf("Ya existe un activo con este nombre. Por favor, elige un nombre único.")
+		}
+	}
+
 	// Recalcular la categoría aquí es lo que permite reclasificar un activo mal dado de alta:
 	// al corregir su tipo, el bucket de SLA se recoloca en la misma operación.
 	endpoint.ApplyCategory()
@@ -2702,6 +2870,17 @@ func (o *Orchestrator) GetEndpointIPs(ctx context.Context, endpointID int64) ([]
 // Si tras la actualización ningún endpoint coincide, ancla la red al proyecto indicado
 // como huérfana de ese proyecto (ver LinkNetworkToProjectIfOrphan).
 func (o *Orchestrator) UpdateNetwork(ctx context.Context, network *domain.Network, projectID int64) (int, error) {
+	if network.Nombre != "" && o.infraPort != nil {
+		if exists, err := o.infraPort.IsNetworkNameDuplicate(ctx, network.Nombre, network.NetworkID); err == nil && exists {
+			return 0, fmt.Errorf("Ya existe una red con este nombre. Por favor, elige un nombre único.")
+		}
+	}
+	if network.VLANID > 0 && o.infraPort != nil {
+		if exists, err := o.infraPort.IsVlanIDDuplicate(ctx, network.VLANID, network.NetworkID); err == nil && exists {
+			return 0, fmt.Errorf("El VLAN ID ya está asignado a otra red. Por favor, elige un VLAN ID único.")
+		}
+	}
+
 	if err := o.networkPort.Update(ctx, network); err != nil {
 		return 0, err
 	}

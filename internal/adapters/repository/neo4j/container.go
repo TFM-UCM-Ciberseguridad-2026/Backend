@@ -184,6 +184,61 @@ func (r *containerRepo) GetAllContainerImages(ctx context.Context) ([]domain.Con
 	return res.([]domain.ContainerImage), nil
 }
 
+// GetContainerImagesByProject devuelve las imágenes de contenedor pertenecientes a un proyecto específico
+func (r *containerRepo) GetContainerImagesByProject(ctx context.Context, projectID int64) ([]domain.ContainerImage, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (p:Project)
+		WHERE p.id = $projectID OR toString(p.id) = toString($projectID)
+		MATCH (p)-[:HAS_ENDPOINT]->(e)-[:HOSTS*0..1]->(asset)
+		MATCH (asset)-[:USES_IMAGE]-(ci:ContainerImage)
+		RETURN DISTINCT coalesce(ci.id, elementId(ci)) AS id, coalesce(ci.image_id, ci.id, ci.name) AS image_id, ci.name AS name, ci.tag AS tag
+	`
+	params := map[string]any{"projectID": projectID}
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, params)
+		if err != nil {
+			return nil, err
+		}
+
+		var images []domain.ContainerImage
+		for result.Next(ctx) {
+			record := result.Record()
+			imgID, _ := record.Get("id")
+			canonicalImageID, _ := record.Get("image_id")
+			name, _ := record.Get("name")
+			tag, _ := record.Get("tag")
+
+			idStr, _ := imgID.(string)
+			canStr, _ := canonicalImageID.(string)
+			nameStr, _ := name.(string)
+			tagStr, _ := tag.(string)
+
+			if canStr == "" {
+				canStr = idStr
+			}
+
+			images = append(images, domain.ContainerImage{
+				ImageID: canStr,
+				Name:    nameStr,
+				Tag:     tagStr,
+			})
+		}
+		return images, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.ContainerImage{}, nil
+	}
+	return res.([]domain.ContainerImage), nil
+}
+
 // normalizeContainerImageID limpia nombres de imagen malformados como "nginx:1.19:latest" → "nginx:1.19".
 func normalizeContainerImageID(name string) string {
 	parts := strings.Split(name, ":")
