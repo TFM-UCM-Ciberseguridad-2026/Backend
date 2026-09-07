@@ -1259,30 +1259,18 @@ func (o *Orchestrator) resolvePatchLevel(ctx context.Context, cveID string, patc
 		return "", fmt.Errorf("error recuperando el patch %d: %w", patchID, err)
 	}
 	if patch == nil {
-		return "", fmt.Errorf("no existe el patch %d", patchID)
-	}
-
-	patches, err := o.patchPort.GetByVulnerability(ctx, cveID)
-	if err != nil {
-		return "", fmt.Errorf("error comprobando el patch %d para la CVE %s: %w", patchID, cveID, err)
-	}
-
-	belongsToCVE := false
-	for _, candidate := range patches {
-		if candidate.PatchID == patchID {
-			belongsToCVE = true
-			break
-		}
-	}
-	if !belongsToCVE {
-		return "", fmt.Errorf("el patch %d no está asociado a la CVE %s", patchID, cveID)
-	}
-
-	if patch.Official && fixedVersionIsValid(patch.FixedVersion) {
 		return domain.RemediationLevelOfficialFix, nil
 	}
+
+	// Es OFFICIAL_FIX cuando el parche esté marcado como oficial o tenga tipo FIXED_VERSION
+	if patch.Official || patch.ReferenceType == "FIXED_VERSION" {
+		return domain.RemediationLevelOfficialFix, nil
+	}
+
+	// Es WORKAROUND cuando el parche no sea oficial
 	return domain.RemediationLevelWorkaround, nil
 }
+
 
 func fixedVersionIsValid(raw string) bool {
 	for _, fixedVersion := range domain.ParseFixedVersions(raw) {
@@ -1327,9 +1315,6 @@ func (o *Orchestrator) DeclarePatchApplied(
 	if cveID == "" {
 		return nil, nil, fmt.Errorf("cve_id vacío")
 	}
-	if !level.IsValid() {
-		return nil, nil, fmt.Errorf("nivel de remediación no reconocido: %q", level)
-	}
 	if appliedAt.IsZero() {
 		appliedAt = time.Now().UTC()
 	}
@@ -1337,7 +1322,7 @@ func (o *Orchestrator) DeclarePatchApplied(
 	// 1. Obtener TODOS los findings actualmente ABIERTOS en esta instalación
 	initialOpenFindings, _ := o.findingPort.GetOpenFindingsByInstallation(ctx, installationID)
 
-	// 2. Resolver o generar patchID
+	// 2. Resolver o generar patchID si no viene dado
 	if patchID == 0 {
 		patches, err := o.patchPort.GetByVulnerability(ctx, cveID)
 		if err == nil && len(patches) > 0 {
@@ -1347,9 +1332,39 @@ func (o *Orchestrator) DeclarePatchApplied(
 		}
 	}
 
-	level, err := o.resolvePatchLevel(ctx, cveID, patchID)
-	if err != nil {
-		return nil, nil, err
+	// Determinar el nivel según lo que marque el parche
+	if patchID > 0 {
+		if patchObj, err := o.patchPort.GetByID(ctx, patchID); err == nil && patchObj != nil {
+			if patchObj.Official || patchObj.ReferenceType == "FIXED_VERSION" {
+				level = domain.RemediationLevelOfficialFix
+			} else {
+				level = domain.RemediationLevelWorkaround
+			}
+		}
+	}
+	if !level.IsValid() {
+		resolvedLevel, err := o.resolvePatchLevel(ctx, cveID, patchID)
+		if err == nil {
+			level = resolvedLevel
+		} else {
+			level = domain.RemediationLevelOfficialFix
+		}
+	}
+
+	// Normalizar versión objetivo (quitar prefijo paquete@ si existe)
+	cleanTargetVer := strings.TrimSpace(targetVersion)
+	if idx := strings.LastIndex(cleanTargetVer, "@"); idx >= 0 {
+		cleanTargetVer = cleanTargetVer[idx+1:]
+	}
+
+	// Si targetVersion no venía en la petición, extraerlo de la información del parche
+	if cleanTargetVer == "" && patchID > 0 {
+		if p, pErr := o.patchPort.GetByID(ctx, patchID); pErr == nil && p != nil && p.FixedVersion != "" {
+			fvs := domain.ParseFixedVersions(p.FixedVersion)
+			if len(fvs) > 0 && fvs[0].Version != "" {
+				cleanTargetVer = fvs[0].Version
+			}
+		}
 	}
 
 	remediationFactor := RemediationFactorForLevel(level)
@@ -1358,14 +1373,9 @@ func (o *Orchestrator) DeclarePatchApplied(
 	resolvedCVEsMap := make(map[string]bool)
 	resolvedCVEsMap[cveID] = true
 
-	// Normalizar versión objetivo (quitar prefijo paquete@)
-	cleanTargetVer := strings.TrimSpace(targetVersion)
-	if idx := strings.LastIndex(cleanTargetVer, "@"); idx >= 0 {
-		cleanTargetVer = cleanTargetVer[idx+1:]
-	}
-
 	// 3. Regla A: Comparación de versión semántica (cleanTargetVer >= fixed_version)
-	if cleanTargetVer != "" && (level == domain.RemediationLevelOfficialFix || level == domain.RemediationLevelTemporaryFix) {
+	// Se ejecuta siempre que haya una nueva versión, sea oficial o workaround
+	if cleanTargetVer != "" {
 		for _, oldF := range initialOpenFindings {
 			if oldF.FixedVersion != "" {
 				fvs := domain.ParseFixedVersions(oldF.FixedVersion)
@@ -1383,14 +1393,15 @@ func (o *Orchestrator) DeclarePatchApplied(
 	}
 
 	// 4. Actualizar versión en el nodo Software y consultar nuevo CPE en NVD
-	if cleanTargetVer != "" && (level == domain.RemediationLevelOfficialFix || level == domain.RemediationLevelTemporaryFix) {
+	// Se ejecuta siempre que haya cleanTargetVer (eliminada la condición que exigía OfficialFix)
+	if cleanTargetVer != "" {
 		software, err := o.softwareInstPort.GetInstalledSoftware(ctx, installationID)
 		if err == nil && software != nil {
 			software.Version = cleanTargetVer
 			software.CPE = domain.GenerateCPE23(software.Type, software.Vendor, software.Name, cleanTargetVer)
 
 			if updateErr := o.softwarePort.Update(ctx, software); updateErr == nil {
-				// Regla B: Comparación negativa contra el nuevo escaneo de NVD
+				// Regla B: Comparación diferencial contra el nuevo escaneo de NVD
 				fetchResult, fetchErr := o.vulnScannerPort.FetchByCPE(ctx, software.CPE, domain.VulnerabilityFetchOptions{
 					ForceRefresh: true,
 				})
@@ -1401,7 +1412,7 @@ func (o *Orchestrator) DeclarePatchApplied(
 						newScanCVEs[v.CVEID] = true
 					}
 
-					// Cualquier CVE anterior que ya NO esté en el nuevo escaneo de 2.4.50 se considera solucionada
+					// Cualquier CVE anterior que ya NO esté en el nuevo escaneo se considera resuelto
 					for _, oldF := range initialOpenFindings {
 						if !newScanCVEs[oldF.CVEID] {
 							resolvedCVEsMap[oldF.CVEID] = true
@@ -1643,6 +1654,11 @@ func (o *Orchestrator) recomputeRiskForInstallation(ctx context.Context, install
 	for _, endpointID := range endpointIDs {
 		if err := o.ComputeEndpointRisk(ctx, endpointID); err != nil {
 			return fmt.Errorf("error recalculando el riesgo del endpoint %d: %w", endpointID, err)
+		}
+		// Recalcular también el riesgo agregado del proyecto
+		projectID, pErr := o.riskPort.GetProjectIDByEndpoint(ctx, endpointID)
+		if pErr == nil && projectID != 0 {
+			_ = o.AggregateProjectRiskFromCurrentEndpointScores(ctx, projectID)
 		}
 	}
 
@@ -3316,7 +3332,7 @@ func syntheticPatchFromFixedVersions(cveID string, fixedVersions []domain.FixedV
 		URL:           fmt.Sprintf("https://osv.dev/vulnerability/%s", cveID),
 		Source:        "OSV",
 		ReferenceType: "FIXED_VERSION",
-		Official:      false,
+		Official:      true,
 		FixedVersion:  fixedVersionText(fixedVersions),
 	}
 }
