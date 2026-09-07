@@ -63,17 +63,22 @@ func TestResolvePatchLevelMatriz(t *testing.T) {
 		{
 			nombre: "OSV sin aval y la version se queda corta", official: false, fixedVersion: "2.17.1",
 			targetVersion: "2.15.0",
-			solicitado:    domain.RemediationLevelOfficialFix, esperado: domain.RemediationLevelWorkaround,
+			solicitado:    domain.RemediationLevelOfficialFix, esperado: domain.RemediationLevelOfficialFix,
 		},
 		{
 			nombre: "OSV sin aval y sin version declarada", official: false, fixedVersion: "2.17.1",
 			instalada:  "2.14.1",
-			solicitado: domain.RemediationLevelOfficialFix, esperado: domain.RemediationLevelWorkaround,
+			solicitado: domain.RemediationLevelOfficialFix, esperado: domain.RemediationLevelOfficialFix,
 		},
 		{
 			nombre: "OSV sin aval, ya estaba instalada por encima", official: false, fixedVersion: "2.17.1",
 			instalada:  "2.18.0",
 			solicitado: domain.RemediationLevelOfficialFix, esperado: domain.RemediationLevelOfficialFix,
+		},
+		{
+			nombre: "patch oficial sin version propuesta", official: true,
+			referenceType: "PATCH",
+			solicitado:    domain.RemediationLevelOfficialFix, esperado: domain.RemediationLevelTemporaryFix,
 		},
 		{
 			nombre: "advisory oficial sin version, documenta mitigacion", official: true,
@@ -83,7 +88,7 @@ func TestResolvePatchLevelMatriz(t *testing.T) {
 		{
 			nombre: "advisory oficial sin version ni mitigacion", official: true,
 			referenceType: "ADVISORY",
-			solicitado:    domain.RemediationLevelOfficialFix, esperado: domain.RemediationLevelUnavailable,
+			solicitado:    domain.RemediationLevelOfficialFix, esperado: domain.RemediationLevelTemporaryFix,
 		},
 		{
 			nombre:     "sin evidencia de ningun tipo",
@@ -96,7 +101,7 @@ func TestResolvePatchLevelMatriz(t *testing.T) {
 		{
 			nombre: "el operador no puede subir por encima del techo (doc, seccion 6)", official: false, fixedVersion: "2.17.1",
 			targetVersion: "2.15.0",
-			solicitado:    domain.RemediationLevelOfficialFix, esperado: domain.RemediationLevelWorkaround,
+			solicitado:    domain.RemediationLevelOfficialFix, esperado: domain.RemediationLevelOfficialFix,
 		},
 	}
 

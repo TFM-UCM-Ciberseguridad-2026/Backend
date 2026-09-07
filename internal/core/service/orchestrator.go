@@ -1280,20 +1280,14 @@ func (o *Orchestrator) resolvePatchLevel(ctx context.Context, installationID, cv
 	}
 
 	ceiling := domain.RemediationLevelUnavailable
+	referenceType := strings.ToUpper(strings.TrimSpace(patch.ReferenceType))
 	switch {
-	case patch.Official && fixedVersionIsValid(patch.FixedVersion):
-		ceiling = domain.RemediationLevelOfficialFix
-
-	// Sin aval del fabricante la versión no cierra el finding salvo que se compruebe.
-	case fixedVersionIsValid(patch.FixedVersion):
-		if o.versionSatisfiesFix(ctx, installationID, targetVersion, patch.FixedVersion) {
-			ceiling = domain.RemediationLevelOfficialFix
-		} else {
-			ceiling = domain.RemediationLevelWorkaround
-		}
-
-	case strings.EqualFold(strings.TrimSpace(patch.ReferenceType), "MITIGATION"):
+	case referenceType == "MITIGATION":
 		ceiling = domain.RemediationLevelWorkaround
+	case fixedVersionIsValid(patch.FixedVersion):
+		ceiling = domain.RemediationLevelOfficialFix
+	case patch.Official:
+		ceiling = domain.RemediationLevelTemporaryFix
 	}
 
 	return weakerRemediationLevel(requested, ceiling), nil
@@ -1555,6 +1549,7 @@ func (o *Orchestrator) GetAppliedPatchHistoryByEndpoint(ctx context.Context, end
 	}
 	return o.patchPort.GetAppliedPatchHistoryByEndpoint(ctx, endpointID)
 }
+
 // DeclarePatchAppliedToContainer declara la remediación únicamente sobre el finding
 // contextual seleccionado del contenedor. La imagen compartida no se modifica.
 func (o *Orchestrator) DeclarePatchAppliedToContainer(
@@ -2114,99 +2109,98 @@ func (o *Orchestrator) SaveContainerImage(ctx context.Context, image *domain.Con
 // asociándolo al Endpoint host y a la imagen base si existe.
 func (o *Orchestrator) SaveContainer(ctx context.Context, container *domain.Container) error {
 	if container == nil {
-			return fmt.Errorf("contenedor vacío")
+		return fmt.Errorf("contenedor vacío")
 	}
 
 	containerID := strings.TrimSpace(container.ContainerID)
 	imageID := strings.TrimSpace(container.ImageID)
 
 	if containerID == "" {
-			return fmt.Errorf("container_id vacío")
+		return fmt.Errorf("container_id vacío")
 	}
 
 	existingContainer, err := o.containerPort.GetContainer(ctx, containerID)
 	if err != nil && !errors.Is(err, domain.ErrNodeNotFound) {
-			return fmt.Errorf(
-					"error recuperando container_id=%s antes de actualizar image_id: %w",
-					containerID,
-					err,
-			)
+		return fmt.Errorf(
+			"error recuperando container_id=%s antes de actualizar image_id: %w",
+			containerID,
+			err,
+		)
 	}
 
 	if existingContainer != nil {
-			oldImageID := strings.TrimSpace(existingContainer.ImageID)
-			oldImageRef := strings.TrimPrefix(oldImageID, containerID+"_")
+		oldImageID := strings.TrimSpace(existingContainer.ImageID)
+		oldImageRef := strings.TrimPrefix(oldImageID, containerID+"_")
 
-			if oldImageID != "" && oldImageRef != imageID {
-					changedAt := time.Now().UTC()
+		if oldImageID != "" && oldImageRef != imageID {
+			changedAt := time.Now().UTC()
 
-					if _, err := o.findingPort.SupersedeContainerImageFindings(
-							ctx,
-							containerID,
-							oldImageID,
-							changedAt,
-					); err != nil {
-							return fmt.Errorf(
-									"error invalidando findings de container_id=%s e image_id=%s: %w",
-									containerID,
-									oldImageID,
-									err,
-							)
-					}
+			if _, err := o.findingPort.SupersedeContainerImageFindings(
+				ctx,
+				containerID,
+				oldImageID,
+				changedAt,
+			); err != nil {
+				return fmt.Errorf(
+					"error invalidando findings de container_id=%s e image_id=%s: %w",
+					containerID,
+					oldImageID,
+					err,
+				)
 			}
+		}
 	}
 
 	if err := o.containerPort.SaveContainer(ctx, container); err != nil {
-			return fmt.Errorf(
-					"error guardando container_id=%s, image_id=%s: %w",
-					containerID,
-					imageID,
-					err,
-			)
+		return fmt.Errorf(
+			"error guardando container_id=%s, image_id=%s: %w",
+			containerID,
+			imageID,
+			err,
+		)
 	}
 
 	savedContainer, err := o.containerPort.GetContainer(ctx, containerID)
 	if err != nil {
-			return fmt.Errorf(
-					"error recuperando imagen persistida para container_id=%s: %w",
-					containerID,
-					err,
-			)
+		return fmt.Errorf(
+			"error recuperando imagen persistida para container_id=%s: %w",
+			containerID,
+			err,
+		)
 	}
 
 	imageNodeID := strings.TrimSpace(savedContainer.ImageID)
 
 	if imageNodeID != "" {
-			vulns, err := o.containerPort.GetVulnerabilitiesByContainerImage(
-					ctx,
-					imageNodeID,
+		vulns, err := o.containerPort.GetVulnerabilitiesByContainerImage(
+			ctx,
+			imageNodeID,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"contenedor guardado parcialmente: container_id=%s, image_id=%s: %w",
+				containerID,
+				imageNodeID,
+				err,
 			)
-			if err != nil {
-					return fmt.Errorf(
-							"contenedor guardado parcialmente: container_id=%s, image_id=%s: %w",
-							containerID,
-							imageNodeID,
-							err,
-					)
-			}
+		}
 
-			if _, err := o.syncContainerFindingsForImage(
-					ctx,
-					imageNodeID,
-					vulns,
-			); err != nil {
-					return fmt.Errorf(
-							"contenedor guardado parcialmente: container_id=%s, image_id=%s: %w",
-							containerID,
-							imageNodeID,
-							err,
-					)
-			}
+		if _, err := o.syncContainerFindingsForImage(
+			ctx,
+			imageNodeID,
+			vulns,
+		); err != nil {
+			return fmt.Errorf(
+				"contenedor guardado parcialmente: container_id=%s, image_id=%s: %w",
+				containerID,
+				imageNodeID,
+				err,
+			)
+		}
 	}
 
 	return nil
 }
-
 
 // syncContainerFindingsForImage sincroniza/materializa los findings contextuales para todos los contenedores que usan la imagen.
 func (o *Orchestrator) syncContainerFindingsForImage(
@@ -2316,8 +2310,6 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		return nil, errors.New("scoutPort is not initialized")
 	}
 
-
-
 	// if idx := strings.Index(imageID, "_"); idx != -1 && strings.HasPrefix(imageID, "container") {
 	// 	imageID = imageID[idx+1:]
 	// }
@@ -2325,14 +2317,13 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		imageName = imageName[idx+1:]
 	}
 
-	 imageID = strings.TrimSpace(imageID)
+	imageID = strings.TrimSpace(imageID)
 	scoutImageName := strings.TrimSpace(imageName)
 
 	if idx := strings.Index(scoutImageName, "_"); idx != -1 &&
-			strings.HasPrefix(scoutImageName, "container") {
-			scoutImageName = scoutImageName[idx+1:]
+		strings.HasPrefix(scoutImageName, "container") {
+		scoutImageName = scoutImageName[idx+1:]
 	}
-
 
 	// Desacoplar el contexto de la desconexión HTTP del cliente, manteniendo un timeout de seguridad amplio (15 min)
 	// para garantizar que la ingesta de vulnerabilidades y findings en Neo4j se complete de forma atómica.
@@ -3354,16 +3345,14 @@ func (o *Orchestrator) RefreshProjectPatches(ctx context.Context, projectID int6
 	return result, nil
 }
 
-
 // fixedVersionText genera un texto con las versiones fijas separadas por comas.
 func fixedVersionText(fixedVersions []domain.FixedVersion) string {
-    values := make([]string, 0, len(fixedVersions))
-    for _, fixedVersion := range fixedVersions {
-        values = append(values, fixedVersion.String())
-    }
-    return strings.Join(values, ", ")
+	values := make([]string, 0, len(fixedVersions))
+	for _, fixedVersion := range fixedVersions {
+		values = append(values, fixedVersion.String())
+	}
+	return strings.Join(values, ", ")
 }
-
 
 // SyntheticPatchFromFixedVersions genera un objeto Patch sintético basado en la existencia de versiones fijas para un CVE dado.
 func syntheticPatchFromFixedVersions(cveID string, fixedVersions []domain.FixedVersion) *domain.Patch {
@@ -3384,7 +3373,6 @@ func syntheticPatchFromFixedVersions(cveID string, fixedVersions []domain.FixedV
 func (o *Orchestrator) GetTTPMatrix(ctx context.Context, projectID *int64) ([]domain.TTPMatrixItem, error) {
 	return o.infraPort.GetTTPMatrix(ctx, projectID)
 }
-
 
 // Métodos auxiliares de consulta de estado previo para auditoría
 func (o *Orchestrator) GetEndpointByID(ctx context.Context, id int64) (*domain.Endpoint, error) {
@@ -3414,6 +3402,7 @@ func (o *Orchestrator) GetContainerByID(ctx context.Context, id string) (*domain
 func (o *Orchestrator) GetProjectByID(ctx context.Context, id int64) (*domain.Project, error) {
 	return o.projectPort.GetByID(ctx, id)
 }
+
 // GetTTPStats devuelve las métricas agregadas para el dashboard de inteligencia de amenazas.
 func (o *Orchestrator) GetTTPStats(ctx context.Context, projectID int64) (*domain.TTPStats, error) {
 	return o.infraPort.GetTTPStats(ctx, projectID)

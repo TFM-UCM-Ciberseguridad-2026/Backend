@@ -685,8 +685,16 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, query domain.PatchQueueQue
 		OPTIONAL MATCH (c:Container)-[:HAS_INSTALLATION|USES_IMAGE]->(asset)
 		OPTIONAL MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
 		OPTIONAL MATCH (p:Patch)-[:FIXES]->(v)
-		WITH DISTINCT f, v, asset, s, e, c, rem, collect(p.url) AS patch_urls
-		WITH f, v, asset, s, e, c, rem, patch_urls,
+		WITH DISTINCT f, v, asset, s, e, c, rem,
+			collect(CASE WHEN p IS NOT NULL THEN {
+				url: coalesce(p.url, ''),
+				official: coalesce(p.official, false),
+				reference_type: coalesce(p.reference_type, ''),
+				fixed_version: coalesce(p.fixed_version, '')
+			} ELSE null END) AS raw_patch_refs
+		WITH f, v, asset, s, e, c, rem,
+			[patch IN raw_patch_refs WHERE patch IS NOT NULL] AS patch_refs
+		WITH f, v, asset, s, e, c, rem, patch_refs,
 			coalesce(rem.fixed_version, v.fixed_version, '') AS fixed_version,
 			coalesce(s.name, asset.name, asset.id) AS software_name,
 			coalesce(s.version, 'N/A') AS software_version,
@@ -704,11 +712,12 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, query domain.PatchQueueQue
 			f.asset_criticality AS asset_criticality,
 			f.urgency_boost AS urgency_boost,
 			f.priority_score AS priority_score,
-			(size(patch_urls) > 0 OR coalesce(rem.fixed_version, v.fixed_version, '') <> '') AS patch_available,
+			(size(patch_refs) > 0 OR coalesce(rem.fixed_version, v.fixed_version, '') <> '') AS patch_available,
 			CASE
-				WHEN size(patch_urls) > 0 AND all(url IN patch_urls WHERE url STARTS WITH 'fixed-version://') THEN 'WORKAROUND'
-				WHEN size(patch_urls) > 0 THEN 'OFFICIAL_FIX'
-				WHEN coalesce(rem.fixed_version, v.fixed_version, '') <> '' THEN 'WORKAROUND'
+				WHEN any(patch IN patch_refs
+				         WHERE patch.fixed_version <> '')
+				     OR coalesce(rem.fixed_version, v.fixed_version, '') <> '' THEN 'OFFICIAL_FIX'
+				WHEN size(patch_refs) > 0 THEN 'MITIGATION'
 				ELSE 'UNAVAILABLE'
 			END AS remediation_kind,
 			CASE
@@ -747,7 +756,8 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, query domain.PatchQueueQue
 		       ($patch_available = "TRUE" AND patch_available = true) OR 
 		       ($patch_available = "FALSE" AND patch_available = false)
 		      )
-		  AND ($remediation_kind = "" OR $remediation_kind = "ALL" OR toLower(remediation_kind) = toLower($remediation_kind))
+		  AND ($remediation_kind = "" OR $remediation_kind = "ALL"
+		       OR toLower(remediation_kind) = toLower($remediation_kind))
 
 		WITH collect({
 			finding_id: finding_id,
