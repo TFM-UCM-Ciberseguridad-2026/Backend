@@ -698,6 +698,31 @@ func (h *OrchestratorHandler) GetPatchesForVulnerability(w http.ResponseWriter, 
 	}, http.StatusOK)
 }
 
+// GET /api/projects/{id}/cve-patches
+//
+// Devuelve los parches de todas las CVE del proyecto agrupados por CVE. Existe para que
+// la ficha de una técnica ATT&CK pueda enseñar los parches de sus CVE sin encadenar una
+// petición por cada una: hay técnicas con más de cien.
+func (h *OrchestratorHandler) GetPatchesForProject(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		sendError(w, "ID de proyecto inválido", http.StatusBadRequest)
+		return
+	}
+
+	items, err := h.orchestrator.GetPatchesForProject(r.Context(), projectID)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]any{
+		"project_id": projectID,
+		"count":      len(items),
+		"items":      items,
+	}, http.StatusOK)
+}
+
 // POST /api/vulnerabilities/{cve}/patches/refresh
 func (h *OrchestratorHandler) RefreshPatchesForVulnerability(w http.ResponseWriter, r *http.Request) {
 	cveID := r.PathValue("cve")

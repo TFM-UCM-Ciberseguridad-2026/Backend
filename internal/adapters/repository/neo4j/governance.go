@@ -37,15 +37,52 @@ func (r *governanceRepository) IsSeeded(ctx context.Context, projectID int64) (b
 	return false, res.Err()
 }
 
+// ProjectsWithoutFramework lista los proyectos sin marco de gobierno.
+//
+// Una consulta para todo el grafo en lugar de preguntar proyecto a proyecto: el barrido
+// del arranque solo tiene que sembrar los que salgan de aquí, y en una base ya sembrada
+// no devuelve ninguno.
+func (r *governanceRepository) ProjectsWithoutFramework(ctx context.Context) ([]int64, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (p:Project)
+		WHERE NOT EXISTS {
+		        MATCH (n)-[:BELONGS_TO]->(p)
+		        WHERE n:PolicyDocument OR n:Procedure OR n:Role OR n:RACIActivity
+		      }
+		RETURN p.id AS id
+		ORDER BY id
+	`
+
+	res, err := session.Run(ctx, query, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	ids := make([]int64, 0)
+	for res.Next(ctx) {
+		if id, ok := res.Record().Values[0].(int64); ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids, res.Err()
+}
+
 // Policies
 func (r *governanceRepository) SavePolicy(ctx context.Context, projectID int64, policy *domain.PolicyDocument) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
+	// El MERGE va sobre el patrón entero —nodo Y pertenencia— y no sobre el nodo suelto.
+	// Con dos MERGE separados, el primero encontraba cualquier nodo del grafo con ese id y
+	// el segundo le colgaba otra pertenencia: dos proyectos sembrados compartían literalmente
+	// los mismos nodos, porque la semilla usa ids fijos (pol-1, role-1, act-1, proc-1), y
+	// editar el marco de uno cambiaba el del otro.
 	query := `
 		MATCH (proj:Project {id: $projectID})
-		MERGE (p:PolicyDocument {id: $id})
-		MERGE (p)-[:BELONGS_TO]->(proj)
+		MERGE (p:PolicyDocument {id: $id})-[:BELONGS_TO]->(proj)
 		SET p.name = $name,
 		    p.version = $version,
 		    p.status = $status,
@@ -131,10 +168,14 @@ func (r *governanceRepository) SaveProcedure(ctx context.Context, projectID int6
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
+	// El MERGE va sobre el patrón entero —nodo Y pertenencia— y no sobre el nodo suelto.
+	// Con dos MERGE separados, el primero encontraba cualquier nodo del grafo con ese id y
+	// el segundo le colgaba otra pertenencia: dos proyectos sembrados compartían literalmente
+	// los mismos nodos, porque la semilla usa ids fijos (pol-1, role-1, act-1, proc-1), y
+	// editar el marco de uno cambiaba el del otro.
 	query := `
 		MATCH (proj:Project {id: $projectID})
-		MERGE (p:Procedure {id: $id})
-		MERGE (p)-[:BELONGS_TO]->(proj)
+		MERGE (p:Procedure {id: $id})-[:BELONGS_TO]->(proj)
 		SET p.name = $name,
 		    p.meta = $meta,
 		    p.steps = $steps
@@ -197,10 +238,14 @@ func (r *governanceRepository) SaveRole(ctx context.Context, projectID int64, ro
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
+	// El MERGE va sobre el patrón entero —nodo Y pertenencia— y no sobre el nodo suelto.
+	// Con dos MERGE separados, el primero encontraba cualquier nodo del grafo con ese id y
+	// el segundo le colgaba otra pertenencia: dos proyectos sembrados compartían literalmente
+	// los mismos nodos, porque la semilla usa ids fijos (pol-1, role-1, act-1, proc-1), y
+	// editar el marco de uno cambiaba el del otro.
 	query := `
 		MATCH (proj:Project {id: $projectID})
-		MERGE (role:Role {id: $id})
-		MERGE (role)-[:BELONGS_TO]->(proj)
+		MERGE (role:Role {id: $id})-[:BELONGS_TO]->(proj)
 		SET role.name = $name,
 		    role.contact = $contact
 	`
@@ -267,15 +312,17 @@ func (r *governanceRepository) SaveRACIActivity(ctx context.Context, projectID i
 		}
 	}
 
+	// La actividad y los roles se buscan dentro del proyecto: sin acotar, una actividad
+	// podía acabar enlazada al rol homónimo de otro proyecto, o a varios a la vez.
 	query := `
-		MATCH (a:RACIActivity {id: $id})
+		MATCH (a:RACIActivity {id: $id})-[:BELONGS_TO]->(proj:Project {id: $projectID})
 		SET a.name = $name, a.order = $order
-		WITH a
+		WITH a, proj
 		OPTIONAL MATCH (a)-[r:INVOLVES]->()
 		DELETE r
-		WITH a
+		WITH a, proj
 		UNWIND $roles AS roleMapping
-		MATCH (role:Role {id: roleMapping.role_id})
+		MATCH (role:Role {id: roleMapping.role_id})-[:BELONGS_TO]->(proj)
 		MERGE (a)-[newRel:INVOLVES]->(role)
 		SET newRel.role_type = roleMapping.role_type
 	`
@@ -283,8 +330,7 @@ func (r *governanceRepository) SaveRACIActivity(ctx context.Context, projectID i
 	// If the node doesn't exist yet, we must create it first
 	createIfNeededQuery := `
 		MATCH (proj:Project {id: $projectID})
-		MERGE (a:RACIActivity {id: $id})
-		MERGE (a)-[:BELONGS_TO]->(proj)
+		MERGE (a:RACIActivity {id: $id})-[:BELONGS_TO]->(proj)
 		SET a.name = $name, a.order = $order
 	`
 	_, err := session.Run(ctx, createIfNeededQuery, map[string]interface{}{
@@ -298,10 +344,11 @@ func (r *governanceRepository) SaveRACIActivity(ctx context.Context, projectID i
 	}
 
 	params := map[string]interface{}{
-		"id":    activity.ID,
-		"name":  activity.Name,
-		"order": activity.Order,
-		"roles": roleMappings,
+		"id":        activity.ID,
+		"name":      activity.Name,
+		"order":     activity.Order,
+		"roles":     roleMappings,
+		"projectID": projectID,
 	}
 
 	_, err = session.Run(ctx, query, params)

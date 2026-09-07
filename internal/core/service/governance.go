@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"time"
 
@@ -15,6 +16,29 @@ type governanceService struct {
 
 func NewGovernanceService(repo ports.GovernanceRepository) ports.GovernanceService {
 	return &governanceService{repo: repo}
+}
+
+// SeedPending siembra el marco de los proyectos que aún no lo tienen.
+//
+// Existe porque la siembra vivía en el arranque con un id de proyecto escrito a mano:
+// los proyectos creados por cualquier otra vía se quedaban sin marco y su pestaña de
+// Gobierno salía vacía sin explicación. Ahora los proyectos nuevos se siembran al
+// crearse, y esto recupera a los que quedaron atrás.
+func (s *governanceService) SeedPending(ctx context.Context) (int, error) {
+	pendientes, err := s.repo.ProjectsWithoutFramework(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	sembrados := 0
+	for _, projectID := range pendientes {
+		if err := s.Seed(ctx, projectID); err != nil {
+			// Un proyecto que falle no debe impedir sembrar los demás.
+			return sembrados, fmt.Errorf("proyecto %d: %w", projectID, err)
+		}
+		sembrados++
+	}
+	return sembrados, nil
 }
 
 func (s *governanceService) Seed(ctx context.Context, projectID int64) error {

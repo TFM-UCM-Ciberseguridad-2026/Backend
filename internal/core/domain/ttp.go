@@ -165,10 +165,33 @@ const (
 
 // TTPMatrixItem represents a TTP mapped to multiple CVEs, ready for frontend rendering.
 
+// Estado de parcheo de una CVE dentro del alcance consultado. Es el peor caso de sus
+// hallazgos: una CVE parcheada en un servidor pero abierta en otro sigue siendo OPEN,
+// con el mismo criterio que la ventana de SLA.
+//
+// UNKNOWN no es "sin problema": es que no hay ningún hallazgo con el que responder. Pasa
+// con las CVE que entran en el alcance colgadas de la imagen de un contenedor por
+// HAS_VULNERABILITY, y en las consultas globales (project_id=0), donde no hay proyecto
+// que acotar. Se distingue de PATCHED a propósito, porque una CVE sin hallazgo no puede
+// dar por resuelta a la técnica que la incluye.
+const (
+	CVEPatchStatusOpen      = "OPEN"
+	CVEPatchStatusMitigated = "MITIGATED"
+	CVEPatchStatusPatched   = "PATCHED"
+	CVEPatchStatusUnknown   = "UNKNOWN"
+)
+
 type TTPMatrixCVE struct {
 	ID   string `json:"id"`
 	CVSS any    `json:"cvss"`
 	Desc string `json:"desc"`
+
+	// Status es el peor caso de los hallazgos de la CVE en el alcance consultado.
+	// FindingsOpen cuenta los que no están cerrados: una mitigación deja el software
+	// vulnerable instalado, así que cuenta como abierta.
+	Status        string `json:"status"`
+	FindingsTotal int    `json:"findings_total"`
+	FindingsOpen  int    `json:"findings_open"`
 }
 
 type TTPMatrixItem struct {
@@ -177,6 +200,13 @@ type TTPMatrixItem struct {
 	Tactic string         `json:"tactic"`
 	Desc   string         `json:"desc"`
 	CVEs   []TTPMatrixCVE `json:"cves"`
+
+	// Resolved marca la técnica cuyas CVE están TODAS cerradas. Una sola CVE mitigada,
+	// abierta o sin hallazgo la mantiene activa, y una técnica sin CVE nunca es resuelta:
+	// no tiene nada que resolver.
+	Resolved bool `json:"resolved"`
+	OpenCVEs int  `json:"open_cves"`
+	TotalCVEs int `json:"total_cves"`
 }
 
 // TTPTopItem representa una TTP con su frecuencia de aparición, para el top-10 del dashboard.

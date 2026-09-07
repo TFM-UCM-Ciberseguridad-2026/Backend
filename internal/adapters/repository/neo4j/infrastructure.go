@@ -54,7 +54,7 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 		matchClause = `
 			MATCH (proj:Project)
 			WHERE proj.id = $projectID OR toString(proj.id) = toString($projectID)
-			MATCH (proj)-[:HAS_ENDPOINT]->(e)
+			OPTIONAL MATCH (proj)-[:HAS_ENDPOINT]->(e)
 			OPTIONAL MATCH (e)-[:CONNECTED_TO]->(net:Network)
 			OPTIONAL MATCH (e)-[:HAS_HARDWARE]->(hw:Hardware)
 			OPTIONAL MATCH (e)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
@@ -169,13 +169,21 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 					endNode(rel):IPAddress
 			)
 
-			WITH nodes, collect({
-					id: elementId(rel),
-					type: type(rel),
-					source: elementId(startNode(rel)),
-					target: elementId(endNode(rel)),
-					properties: properties(rel)
-			}) AS cleanRels
+			// El OPTIONAL MATCH anterior deja rel a null cuando el proyecto no tiene ninguna
+			// relación, pero el mapa que lo envuelve no es null: collect devolvía entonces una
+			// entrada con todos los campos vacíos, y el grafo de un proyecto recién creado
+			// anunciaba un enlace que no existe. Se descarta igual que ip_mappings más abajo.
+			WITH nodes, collect(
+					CASE WHEN rel IS NULL THEN null
+					ELSE {
+						id: elementId(rel),
+						type: type(rel),
+						source: elementId(startNode(rel)),
+						target: elementId(endNode(rel)),
+						properties: properties(rel)
+					} END
+			) AS relsBrutas
+			WITH nodes, [r IN relsBrutas WHERE r IS NOT NULL] AS cleanRels
 
 			WITH nodes, cleanRels, [nodeObj IN nodes | nodeObj.id] AS scopedIds
 			OPTIONAL MATCH (n)-[:HAS_IP]->(ip:IPAddress)
@@ -1796,13 +1804,48 @@ func (r *infrastructureRepo) GetTTPMatrix(ctx context.Context, projectID *int64)
 		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
 		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) }
 
+		// Estado de parcheo de cada CVE dentro del proyecto. Se calcula ANTES de abrir el
+		// abanico por técnica: así se resuelve una vez por CVE y no una vez por cada par
+		// CVE-técnica, que son tres veces más.
+		//
+		// El recorrido es el mismo que usa la cola de parcheo (risk.go): desde el activo
+		// del proyecto hasta el hallazgo, cubriendo instalación del host, instalación
+		// dentro de contenedor e imagen de contenedor.
+		//
+		// En consulta global (project_id=0) no hay proyecto que acotar: no se cuenta
+		// ningún hallazgo y todas las CVE quedan en UNKNOWN, que es lo que impide dar por
+		// resuelta una técnica cuyo estado no se ha medido contra ningún alcance.
+		OPTIONAL MATCH (v)<-[:OF_VULNERABILITY]-(f:Finding)
+		WHERE NOT ($project_id = 0 OR toString($project_id) = "0")
+		  AND EXISTS {
+		        MATCH (proj:Project)-[:HAS_ENDPOINT]->(scoped)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)-[:HAS_FINDING]->(f)
+		        WHERE proj.id = $project_id OR toString(proj.id) = toString($project_id) OR proj.name = toString($project_id)
+		      }
+
+		WITH v,
+		     count(f) AS findings_total,
+		     sum(CASE WHEN toUpper(coalesce(f.status, 'OPEN')) IN ['PATCHED', 'FIXED', 'RESOLVED', 'CLOSED', 'SUPERSEDED'] THEN 1 ELSE 0 END) AS findings_cerrados,
+		     sum(CASE WHEN toUpper(coalesce(f.status, 'OPEN')) = 'MITIGATED' THEN 1 ELSE 0 END) AS findings_mitigados
+
+		// Peor caso: basta un hallazgo ni cerrado ni mitigado para que la CVE sea OPEN.
+		WITH v,
+		     findings_total,
+		     findings_total - findings_cerrados AS findings_open,
+		     CASE
+		       WHEN findings_total = 0 THEN 'UNKNOWN'
+		       WHEN findings_total - findings_cerrados = 0 THEN 'PATCHED'
+		       WHEN findings_total - findings_cerrados - findings_mitigados = 0 THEN 'MITIGATED'
+		       ELSE 'OPEN'
+		     END AS cve_status
+
 		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t1:TTP)
 		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t2:TTP)
 		OPTIONAL MATCH (v)-[:MAPS_TO]->(t3:TTP)
 
-		WITH v, [t IN [t1, t2, t3] WHERE t IS NOT NULL] AS ttps_raw
+		WITH v, findings_total, findings_open, cve_status,
+		     [t IN [t1, t2, t3] WHERE t IS NOT NULL] AS ttps_raw
 		UNWIND (CASE WHEN size(ttps_raw) > 0 THEN ttps_raw ELSE [null] END) AS t
-		WITH v, t WHERE t IS NOT NULL
+		WITH v, t, findings_total, findings_open, cve_status WHERE t IS NOT NULL
 
 		// La descripción se recorta a 160 caracteres: una misma CVE cuelga de
 		// varias técnicas, así que su texto completo viajaba repetido y suponía el
@@ -1814,14 +1857,23 @@ func (r *infrastructureRepo) GetTTPMatrix(ctx context.Context, projectID *int64)
 			        WHEN v.description IS NULL THEN ''
 			        WHEN size(v.description) > 160 THEN left(v.description, 160) + '…'
 			        ELSE v.description
-			      END
+			      END,
+			status: cve_status,
+			findings_total: findings_total,
+			findings_open: findings_open
 		}) AS cves
 
-		RETURN coalesce(t.ttp_id, t.id, '') AS ttp_id, 
-		       coalesce(t.name, '') AS name, 
-		       coalesce(t.tactic, t.tactics, '') AS tactic, 
-		       coalesce(t.description, '') AS desc, 
-		       cves
+		// Una técnica es resuelta solo si TODAS sus CVE están cerradas. Una CVE mitigada
+		// la mantiene activa —el software vulnerable sigue instalado— y una UNKNOWN
+		// también, porque no hay hallazgo que demuestre el cierre.
+		RETURN coalesce(t.ttp_id, t.id, '') AS ttp_id,
+		       coalesce(t.name, '') AS name,
+		       coalesce(t.tactic, t.tactics, '') AS tactic,
+		       coalesce(t.description, '') AS desc,
+		       cves,
+		       size(cves) > 0 AND size([c IN cves WHERE c.status <> 'PATCHED']) = 0 AS resolved,
+		       size([c IN cves WHERE c.status IN ['OPEN', 'MITIGATED']]) AS open_cves,
+		       size(cves) AS total_cves
 	`
 
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
@@ -1842,6 +1894,9 @@ func (r *infrastructureRepo) GetTTPMatrix(ctx context.Context, projectID *int64)
 			tactic, _ := record.Get("tactic")
 			desc, _ := record.Get("desc")
 			cvesRaw, _ := record.Get("cves")
+			resolvedRaw, _ := record.Get("resolved")
+			openCVEsRaw, _ := record.Get("open_cves")
+			totalCVEsRaw, _ := record.Get("total_cves")
 
 			var cves []domain.TTPMatrixCVE
 			if cvesRaw != nil {
@@ -1851,22 +1906,34 @@ func (r *infrastructureRepo) GetTTPMatrix(ctx context.Context, projectID *int64)
 							cveID := fmt.Sprint(cMap["id"])
 							cveCVSS := fmt.Sprintf("%v", cMap["cvss"])
 							cveDesc := fmt.Sprint(cMap["desc"])
+							status := domain.CVEPatchStatusUnknown
+							if s, ok := cMap["status"].(string); ok && s != "" {
+								status = s
+							}
 							cves = append(cves, domain.TTPMatrixCVE{
-								ID:   cveID,
-								CVSS: cveCVSS,
-								Desc: cveDesc,
+								ID:            cveID,
+								CVSS:          cveCVSS,
+								Desc:          cveDesc,
+								Status:        status,
+								FindingsTotal: int(toInt64(cMap["findings_total"])),
+								FindingsOpen:  int(toInt64(cMap["findings_open"])),
 							})
 						}
 					}
 				}
 			}
 
+			resolved, _ := resolvedRaw.(bool)
+
 			matrix = append(matrix, domain.TTPMatrixItem{
-				ID:     fmt.Sprint(id),
-				Name:   fmt.Sprint(name),
-				Tactic: fmt.Sprint(tactic),
-				Desc:   fmt.Sprint(desc),
-				CVEs:   cves,
+				ID:        fmt.Sprint(id),
+				Name:      fmt.Sprint(name),
+				Tactic:    fmt.Sprint(tactic),
+				Desc:      fmt.Sprint(desc),
+				CVEs:      cves,
+				Resolved:  resolved,
+				OpenCVEs:  int(toInt64(openCVEsRaw)),
+				TotalCVEs: int(toInt64(totalCVEsRaw)),
 			})
 		}
 		return matrix, nil

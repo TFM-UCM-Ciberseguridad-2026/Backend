@@ -179,15 +179,18 @@ func (r *projectRepo) DeleteByID(ctx context.Context, id int64) error {
 		WHERE NOT (sub1:ThreatActor OR sub1:TTP) AND NOT (sub2:ThreatActor OR sub2:TTP) AND NOT (sub3:ThreatActor OR sub3:TTP) AND NOT (sub4:ThreatActor OR sub4:TTP)
 		DETACH DELETE p, e, sub1, sub2, sub3, sub4
 	`
-	_ = executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
-
 	// El marco de gobierno cuelga del proyecto por [:BELONGS_TO], que no forma parte del
-	// recorrido anterior: sin esto, al borrar un proyecto sus políticas, procedimientos,
-	// roles, actividades RACI y configuración de SLA quedaban huérfanos en el grafo.
+	// recorrido de la consulta anterior: sin esto, al borrar un proyecto sus políticas,
+	// procedimientos, roles, actividades RACI y configuración de SLA quedaban huérfanos.
 	//
-	// Se borra solo lo que no pertenece a ningún OTRO proyecto: los identificadores de la
-	// semilla son los mismos para todos ("pol-1", "role-1"…), así que un nodo puede estar
-	// compartido y borrarlo dejaría al otro proyecto sin su marco normativo.
+	// Va ANTES de borrar el proyecto, y ese orden es la razón de que exista este bloque:
+	// su MATCH parte del nodo Project, así que ejecutado después no encontraba nada y el
+	// marco sobrevivía suelto en el grafo a cada borrado.
+	//
+	// Se borra solo lo que no pertenece a ningún OTRO proyecto. Desde que cada proyecto
+	// tiene sus propios nodos eso ya no debería ocurrir, pero los grafos creados antes de
+	// ese cambio sí pueden tener nodos compartidos, y borrarlos dejaría al otro proyecto
+	// sin su marco normativo.
 	governanceQuery := `
 		MATCH (g)-[:BELONGS_TO]->(p:Project)
 		WHERE (toString(p.id) = toString($id) OR elementId(p) = toString($id))
@@ -199,6 +202,8 @@ func (r *projectRepo) DeleteByID(ctx context.Context, id int64) error {
 		DETACH DELETE g
 	`
 	_ = executeWriteHelper(ctx, r.driver, governanceQuery, map[string]any{"id": id})
+
+	_ = executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
 
 	// Limpieza exhaustiva de cualquier nodo huérfano (redes sueltas, softwares, vulnerabilidades)
 	cleanupQuery := `

@@ -96,6 +96,7 @@ type Orchestrator struct {
 	ttpMapper           ports.TTPMapper
 	threatActorPort     ports.ThreatActorPort
 	notifier            ports.NotificationPort // nil si no se inyecta
+	govService          ports.GovernanceService // nil si no se inyecta
 	cpeService          *CPEService
 	ttpSync             TTPBackgroundSyncManager
 	ttpQueueHigh        chan ttpTask
@@ -211,6 +212,13 @@ func (o *Orchestrator) WithNotifier(n ports.NotificationPort) *Orchestrator {
 	return o
 }
 
+// WithGovernance inyecta el servicio de gobierno para sembrar el marco normativo de cada
+// proyecto nuevo. Sin él, la creación de proyectos funciona igual pero nace sin marco.
+func (o *Orchestrator) WithGovernance(govService ports.GovernanceService) *Orchestrator {
+	o.govService = govService
+	return o
+}
+
 // nextNodeID genera un ID numérico auto-incremental simple para un label dado.
 // Reutiliza el mismo patrón que ya usaba el código para Patch en
 // AutoScanAndRegisterVulnerabilities, generalizado a cualquier label.
@@ -262,7 +270,23 @@ func (o *Orchestrator) CreateProject(ctx context.Context, project *domain.Projec
 		project.ProjectID = id
 	}
 
-	return o.projectPort.Save(ctx, project)
+	if err := o.projectPort.Save(ctx, project); err != nil {
+		return err
+	}
+
+	// El marco de gobierno se siembra aquí y no al arrancar el binario, que es donde
+	// estaba con un id de proyecto escrito a mano: así lo recibe cualquier proyecto,
+	// venga de la interfaz, de la API o de una importación.
+	//
+	// Un fallo sembrando no invalida el proyecto, que ya está guardado: se registra y se
+	// sigue, porque Seed es idempotente y el barrido del arranque lo completará.
+	if o.govService != nil {
+		if err := o.govService.Seed(ctx, project.ProjectID); err != nil {
+			log.Printf("[Governance] proyecto %d creado, pero falló la siembra del marco: %v", project.ProjectID, err)
+		}
+	}
+
+	return nil
 }
 
 // DeleteProject elimina un proyecto y su infraestructura asociada en cascada.
@@ -1260,6 +1284,15 @@ func (o *Orchestrator) GetPatchesForVulnerability(ctx context.Context, cveID str
 		return nil, fmt.Errorf("cve_id vacío")
 	}
 	return o.patchPort.GetByVulnerability(ctx, cveID)
+}
+
+// GetPatchesForProject recupera, agrupados por CVE, los parches de todas las
+// vulnerabilidades del alcance de un proyecto. Con projectID 0 recorre el grafo entero.
+func (o *Orchestrator) GetPatchesForProject(ctx context.Context, projectID int64) ([]domain.CVEPatches, error) {
+	if o.patchPort == nil {
+		return nil, fmt.Errorf("puerto de parches no inicializado")
+	}
+	return o.patchPort.GetByProject(ctx, projectID)
 }
 
 // DeclarePatchApplied registra un parche aplicado, propaga el efecto a los findings del

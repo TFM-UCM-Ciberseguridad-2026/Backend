@@ -131,6 +131,10 @@ type PatchPort interface {
 	// GetByVulnerability devuelve los parches que corrigen un CVE.
 	GetByVulnerability(ctx context.Context, cveID string) ([]domain.Patch, error)
 
+	// GetByProject devuelve los parches de todas las CVE del alcance de un proyecto,
+	// agrupados por CVE, en una sola consulta. Con projectID 0 recorre el grafo entero.
+	GetByProject(ctx context.Context, projectID int64) ([]domain.CVEPatches, error)
+
 	// SaveApplication crea (Patch)-[:APPLIED_TO]->(SoftwareInstallation). Redeclarar
 	// actualiza la arista existente.
 	SaveApplication(ctx context.Context, application *domain.AppliedPatch) error
