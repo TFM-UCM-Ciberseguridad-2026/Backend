@@ -142,7 +142,7 @@ func main() {
 	// ── 4. Declarar el parche SIN actualizar la versión ────────────────────
 	fmt.Println("\n[4/6] Declarando OFFICIAL_FIX con la versión aún vulnerable...")
 	app, _, err := orch.DeclarePatchApplied(ctx, instHost, cveID, patchID,
-		domain.RemediationLevelOfficialFix, time.Time{}, "diego", "Declarado sin actualizar")
+		domain.RemediationLevelOfficialFix, time.Time{}, "diego", "Declarado sin actualizar", "")
 	if err != nil {
 		log.Fatalf("declaración: %v", err)
 	}
@@ -180,7 +180,7 @@ func main() {
 	}
 
 	appOK, _, err := orch.DeclarePatchApplied(ctx, instHost, cveID, patchID,
-		domain.RemediationLevelOfficialFix, time.Time{}, "diego", "Actualizado de verdad")
+		domain.RemediationLevelOfficialFix, time.Time{}, "diego", "Actualizado de verdad", patchedVersion)
 	if err != nil {
 		log.Fatalf("redeclaración: %v", err)
 	}
@@ -247,7 +247,7 @@ func main() {
 	fmt.Println("    ✓ El motor de riesgo ya cuenta las vulnerabilidades de contenedor")
 
 	if _, _, err := orch.DeclarePatchApplied(ctx, instCont, cveID, patchID,
-		domain.RemediationLevelOfficialFix, time.Time{}, "diego", "Imagen reconstruida"); err != nil {
+		domain.RemediationLevelOfficialFix, time.Time{}, "diego", "Imagen reconstruida", patchedVersion); err != nil {
 		log.Fatalf("declaración contenedor: %v", err)
 	}
 

@@ -1251,26 +1251,95 @@ func (o *Orchestrator) GetPatchesForVulnerability(ctx context.Context, cveID str
 	return o.patchPort.GetByVulnerability(ctx, cveID)
 }
 
-// resolvePatchLevel valida el patch seleccionado y evita que el cliente fuerce un nivel
-// de remediación incompatible con la evidencia almacenada del patch.
-func (o *Orchestrator) resolvePatchLevel(ctx context.Context, cveID string, patchID int64) (domain.RemediationLevel, error) {
+// resolvePatchLevel deriva el nivel de la evidencia del patch. Manda que haya versión
+// corregida, no que el aviso sea del fabricante. Es un techo: el cliente puede declarar
+// menos, nunca más.
+func (o *Orchestrator) resolvePatchLevel(ctx context.Context, installationID, cveID string, patchID int64, targetVersion string, requested domain.RemediationLevel) (domain.RemediationLevel, error) {
 	patch, err := o.patchPort.GetByID(ctx, patchID)
 	if err != nil {
 		return "", fmt.Errorf("error recuperando el patch %d: %w", patchID, err)
 	}
 	if patch == nil {
-		return domain.RemediationLevelOfficialFix, nil
+		return "", fmt.Errorf("no existe el patch %d", patchID)
 	}
 
-	// Es OFFICIAL_FIX cuando el parche esté marcado como oficial o tenga tipo FIXED_VERSION
-	if patch.Official || patch.ReferenceType == "FIXED_VERSION" {
-		return domain.RemediationLevelOfficialFix, nil
+	patches, err := o.patchPort.GetByVulnerability(ctx, cveID)
+	if err != nil {
+		return "", fmt.Errorf("error comprobando el patch %d para la CVE %s: %w", patchID, cveID, err)
 	}
 
-	// Es WORKAROUND cuando el parche no sea oficial
-	return domain.RemediationLevelWorkaround, nil
+	belongsToCVE := false
+	for _, candidate := range patches {
+		if candidate.PatchID == patchID {
+			belongsToCVE = true
+			break
+		}
+	}
+	if !belongsToCVE {
+		return "", fmt.Errorf("el patch %d no está asociado a la CVE %s", patchID, cveID)
+	}
+
+	ceiling := domain.RemediationLevelUnavailable
+	switch {
+	case patch.Official && fixedVersionIsValid(patch.FixedVersion):
+		ceiling = domain.RemediationLevelOfficialFix
+	case fixedVersionIsValid(patch.FixedVersion):
+		if o.versionSatisfiesFix(ctx, installationID, targetVersion, patch.FixedVersion) {
+			ceiling = domain.RemediationLevelOfficialFix
+		} else {
+			ceiling = domain.RemediationLevelWorkaround
+		}
+
+	case strings.EqualFold(strings.TrimSpace(patch.ReferenceType), "MITIGATION"):
+		ceiling = domain.RemediationLevelWorkaround
+	}
+
+	return weakerRemediationLevel(requested, ceiling), nil
 }
 
+// versionSatisfiesFix comprueba si la versión destino, o la instalada si no se declara,
+// alcanza alguna de las corregidas.
+func (o *Orchestrator) versionSatisfiesFix(ctx context.Context, installationID, targetVersion, rawFixedVersion string) bool {
+	candidate := strings.TrimSpace(targetVersion)
+	if idx := strings.LastIndex(candidate, "@"); idx >= 0 {
+		candidate = candidate[idx+1:]
+	}
+
+	if candidate == "" {
+		if strings.TrimSpace(installationID) == "" || o.softwareInstPort == nil {
+			return false
+		}
+		software, err := o.softwareInstPort.GetInstalledSoftware(ctx, installationID)
+		if err != nil || software == nil {
+			return false
+		}
+		candidate = strings.TrimSpace(software.Version)
+	}
+	if candidate == "" {
+		return false
+	}
+
+	for _, fv := range domain.ParseFixedVersions(rawFixedVersion) {
+		if strings.TrimSpace(fv.Version) == "" {
+			continue
+		}
+		if cmp, comparable := domain.CompareVersions(candidate, fv.Version); comparable && cmp >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// weakerRemediationLevel devuelve el de mayor factor, es decir el que menos riesgo retira.
+func weakerRemediationLevel(a, b domain.RemediationLevel) domain.RemediationLevel {
+	if !a.IsValid() {
+		return b
+	}
+	if RemediationFactorForLevel(a) >= RemediationFactorForLevel(b) {
+		return a
+	}
+	return b
+}
 
 func fixedVersionIsValid(raw string) bool {
 	for _, fixedVersion := range domain.ParseFixedVersions(raw) {
@@ -1332,37 +1401,22 @@ func (o *Orchestrator) DeclarePatchApplied(
 		}
 	}
 
-	// Determinar el nivel según lo que marque el parche
-	if patchID > 0 {
-		if patchObj, err := o.patchPort.GetByID(ctx, patchID); err == nil && patchObj != nil {
-			if patchObj.Official || patchObj.ReferenceType == "FIXED_VERSION" {
-				level = domain.RemediationLevelOfficialFix
-			} else {
-				level = domain.RemediationLevelWorkaround
-			}
-		}
-	}
-	if !level.IsValid() {
-		resolvedLevel, err := o.resolvePatchLevel(ctx, cveID, patchID)
-		if err == nil {
-			level = resolvedLevel
-		} else {
-			level = domain.RemediationLevelOfficialFix
-		}
+	level, err := o.resolvePatchLevel(ctx, installationID, cveID, patchID, targetVersion, level)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	// Normalizar versión objetivo (quitar prefijo paquete@ si existe)
 	cleanTargetVer := strings.TrimSpace(targetVersion)
 	if idx := strings.LastIndex(cleanTargetVer, "@"); idx >= 0 {
 		cleanTargetVer = cleanTargetVer[idx+1:]
 	}
 
-	// Si targetVersion no venía en la petición, extraerlo de la información del parche
 	if cleanTargetVer == "" && patchID > 0 {
-		if p, pErr := o.patchPort.GetByID(ctx, patchID); pErr == nil && p != nil && p.FixedVersion != "" {
-			fvs := domain.ParseFixedVersions(p.FixedVersion)
-			if len(fvs) > 0 && fvs[0].Version != "" {
-				cleanTargetVer = fvs[0].Version
+		if patch, patchErr := o.patchPort.GetByID(ctx, patchID); patchErr == nil &&
+			patch != nil && patch.FixedVersion != "" {
+			fixedVersions := domain.ParseFixedVersions(patch.FixedVersion)
+			if len(fixedVersions) > 0 && fixedVersions[0].Version != "" {
+				cleanTargetVer = fixedVersions[0].Version
 			}
 		}
 	}
@@ -1507,6 +1561,7 @@ func (o *Orchestrator) GetAppliedPatchHistoryByEndpoint(ctx context.Context, end
 	}
 	return o.patchPort.GetAppliedPatchHistoryByEndpoint(ctx, endpointID)
 }
+
 // DeclarePatchAppliedToContainer declara la remediación únicamente sobre el finding
 // contextual seleccionado del contenedor. La imagen compartida no se modifica.
 func (o *Orchestrator) DeclarePatchAppliedToContainer(
@@ -1542,7 +1597,8 @@ func (o *Orchestrator) DeclarePatchAppliedToContainer(
 		patchID = patches[0].PatchID
 	}
 
-	level, err := o.resolvePatchLevel(ctx, cveID, patchID)
+	// El contenedor no expone instalación ni versión destino: sin comprobación de versión.
+	level, err := o.resolvePatchLevel(ctx, "", cveID, patchID, "", level)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2070,99 +2126,98 @@ func (o *Orchestrator) SaveContainerImage(ctx context.Context, image *domain.Con
 // asociándolo al Endpoint host y a la imagen base si existe.
 func (o *Orchestrator) SaveContainer(ctx context.Context, container *domain.Container) error {
 	if container == nil {
-			return fmt.Errorf("contenedor vacío")
+		return fmt.Errorf("contenedor vacío")
 	}
 
 	containerID := strings.TrimSpace(container.ContainerID)
 	imageID := strings.TrimSpace(container.ImageID)
 
 	if containerID == "" {
-			return fmt.Errorf("container_id vacío")
+		return fmt.Errorf("container_id vacío")
 	}
 
 	existingContainer, err := o.containerPort.GetContainer(ctx, containerID)
 	if err != nil && !errors.Is(err, domain.ErrNodeNotFound) {
-			return fmt.Errorf(
-					"error recuperando container_id=%s antes de actualizar image_id: %w",
-					containerID,
-					err,
-			)
+		return fmt.Errorf(
+			"error recuperando container_id=%s antes de actualizar image_id: %w",
+			containerID,
+			err,
+		)
 	}
 
 	if existingContainer != nil {
-			oldImageID := strings.TrimSpace(existingContainer.ImageID)
-			oldImageRef := strings.TrimPrefix(oldImageID, containerID+"_")
+		oldImageID := strings.TrimSpace(existingContainer.ImageID)
+		oldImageRef := strings.TrimPrefix(oldImageID, containerID+"_")
 
-			if oldImageID != "" && oldImageRef != imageID {
-					changedAt := time.Now().UTC()
+		if oldImageID != "" && oldImageRef != imageID {
+			changedAt := time.Now().UTC()
 
-					if _, err := o.findingPort.SupersedeContainerImageFindings(
-							ctx,
-							containerID,
-							oldImageID,
-							changedAt,
-					); err != nil {
-							return fmt.Errorf(
-									"error invalidando findings de container_id=%s e image_id=%s: %w",
-									containerID,
-									oldImageID,
-									err,
-							)
-					}
+			if _, err := o.findingPort.SupersedeContainerImageFindings(
+				ctx,
+				containerID,
+				oldImageID,
+				changedAt,
+			); err != nil {
+				return fmt.Errorf(
+					"error invalidando findings de container_id=%s e image_id=%s: %w",
+					containerID,
+					oldImageID,
+					err,
+				)
 			}
+		}
 	}
 
 	if err := o.containerPort.SaveContainer(ctx, container); err != nil {
-			return fmt.Errorf(
-					"error guardando container_id=%s, image_id=%s: %w",
-					containerID,
-					imageID,
-					err,
-			)
+		return fmt.Errorf(
+			"error guardando container_id=%s, image_id=%s: %w",
+			containerID,
+			imageID,
+			err,
+		)
 	}
 
 	savedContainer, err := o.containerPort.GetContainer(ctx, containerID)
 	if err != nil {
-			return fmt.Errorf(
-					"error recuperando imagen persistida para container_id=%s: %w",
-					containerID,
-					err,
-			)
+		return fmt.Errorf(
+			"error recuperando imagen persistida para container_id=%s: %w",
+			containerID,
+			err,
+		)
 	}
 
 	imageNodeID := strings.TrimSpace(savedContainer.ImageID)
 
 	if imageNodeID != "" {
-			vulns, err := o.containerPort.GetVulnerabilitiesByContainerImage(
-					ctx,
-					imageNodeID,
+		vulns, err := o.containerPort.GetVulnerabilitiesByContainerImage(
+			ctx,
+			imageNodeID,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"contenedor guardado parcialmente: container_id=%s, image_id=%s: %w",
+				containerID,
+				imageNodeID,
+				err,
 			)
-			if err != nil {
-					return fmt.Errorf(
-							"contenedor guardado parcialmente: container_id=%s, image_id=%s: %w",
-							containerID,
-							imageNodeID,
-							err,
-					)
-			}
+		}
 
-			if _, err := o.syncContainerFindingsForImage(
-					ctx,
-					imageNodeID,
-					vulns,
-			); err != nil {
-					return fmt.Errorf(
-							"contenedor guardado parcialmente: container_id=%s, image_id=%s: %w",
-							containerID,
-							imageNodeID,
-							err,
-					)
-			}
+		if _, err := o.syncContainerFindingsForImage(
+			ctx,
+			imageNodeID,
+			vulns,
+		); err != nil {
+			return fmt.Errorf(
+				"contenedor guardado parcialmente: container_id=%s, image_id=%s: %w",
+				containerID,
+				imageNodeID,
+				err,
+			)
+		}
 	}
 
 	return nil
 }
-
 
 // syncContainerFindingsForImage sincroniza/materializa los findings contextuales para todos los contenedores que usan la imagen.
 func (o *Orchestrator) syncContainerFindingsForImage(
@@ -2272,8 +2327,6 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		return nil, errors.New("scoutPort is not initialized")
 	}
 
-
-
 	// if idx := strings.Index(imageID, "_"); idx != -1 && strings.HasPrefix(imageID, "container") {
 	// 	imageID = imageID[idx+1:]
 	// }
@@ -2281,14 +2334,13 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		imageName = imageName[idx+1:]
 	}
 
-	 imageID = strings.TrimSpace(imageID)
+	imageID = strings.TrimSpace(imageID)
 	scoutImageName := strings.TrimSpace(imageName)
 
 	if idx := strings.Index(scoutImageName, "_"); idx != -1 &&
-			strings.HasPrefix(scoutImageName, "container") {
-			scoutImageName = scoutImageName[idx+1:]
+		strings.HasPrefix(scoutImageName, "container") {
+		scoutImageName = scoutImageName[idx+1:]
 	}
-
 
 	// Desacoplar el contexto de la desconexión HTTP del cliente, manteniendo un timeout de seguridad amplio (15 min)
 	// para garantizar que la ingesta de vulnerabilidades y findings en Neo4j se complete de forma atómica.
@@ -3310,16 +3362,14 @@ func (o *Orchestrator) RefreshProjectPatches(ctx context.Context, projectID int6
 	return result, nil
 }
 
-
 // fixedVersionText genera un texto con las versiones fijas separadas por comas.
 func fixedVersionText(fixedVersions []domain.FixedVersion) string {
-    values := make([]string, 0, len(fixedVersions))
-    for _, fixedVersion := range fixedVersions {
-        values = append(values, fixedVersion.String())
-    }
-    return strings.Join(values, ", ")
+	values := make([]string, 0, len(fixedVersions))
+	for _, fixedVersion := range fixedVersions {
+		values = append(values, fixedVersion.String())
+	}
+	return strings.Join(values, ", ")
 }
-
 
 // SyntheticPatchFromFixedVersions genera un objeto Patch sintético basado en la existencia de versiones fijas para un CVE dado.
 func syntheticPatchFromFixedVersions(cveID string, fixedVersions []domain.FixedVersion) *domain.Patch {
@@ -3340,7 +3390,6 @@ func syntheticPatchFromFixedVersions(cveID string, fixedVersions []domain.FixedV
 func (o *Orchestrator) GetTTPMatrix(ctx context.Context, projectID *int64) ([]domain.TTPMatrixItem, error) {
 	return o.infraPort.GetTTPMatrix(ctx, projectID)
 }
-
 
 // Métodos auxiliares de consulta de estado previo para auditoría
 func (o *Orchestrator) GetEndpointByID(ctx context.Context, id int64) (*domain.Endpoint, error) {
@@ -3370,6 +3419,7 @@ func (o *Orchestrator) GetContainerByID(ctx context.Context, id string) (*domain
 func (o *Orchestrator) GetProjectByID(ctx context.Context, id int64) (*domain.Project, error) {
 	return o.projectPort.GetByID(ctx, id)
 }
+
 // GetTTPStats devuelve las métricas agregadas para el dashboard de inteligencia de amenazas.
 func (o *Orchestrator) GetTTPStats(ctx context.Context, projectID int64) (*domain.TTPStats, error) {
 	return o.infraPort.GetTTPStats(ctx, projectID)
