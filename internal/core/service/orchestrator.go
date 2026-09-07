@@ -1280,18 +1280,14 @@ func (o *Orchestrator) resolvePatchLevel(ctx context.Context, installationID, cv
 	}
 
 	ceiling := domain.RemediationLevelUnavailable
+	referenceType := strings.ToUpper(strings.TrimSpace(patch.ReferenceType))
 	switch {
-	case patch.Official && fixedVersionIsValid(patch.FixedVersion):
-		ceiling = domain.RemediationLevelOfficialFix
-	case fixedVersionIsValid(patch.FixedVersion):
-		if o.versionSatisfiesFix(ctx, installationID, targetVersion, patch.FixedVersion) {
-			ceiling = domain.RemediationLevelOfficialFix
-		} else {
-			ceiling = domain.RemediationLevelWorkaround
-		}
-
-	case strings.EqualFold(strings.TrimSpace(patch.ReferenceType), "MITIGATION"):
+	case referenceType == "MITIGATION":
 		ceiling = domain.RemediationLevelWorkaround
+	case fixedVersionIsValid(patch.FixedVersion):
+		ceiling = domain.RemediationLevelOfficialFix
+	case patch.Official:
+		ceiling = domain.RemediationLevelTemporaryFix
 	}
 
 	return weakerRemediationLevel(requested, ceiling), nil
