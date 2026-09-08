@@ -108,9 +108,12 @@ type NetworkPort interface {
 	Update(ctx context.Context, network *domain.Network) error
 	GetByID(ctx context.Context, id int64) (*domain.Network, error)
 	DeleteByID(ctx context.Context, id int64) error
-	LinkMatchingEndpoints(ctx context.Context, networkID int64, cidr string, vlanID int64) (int, error)
-	LinkEndpointToMatchingNetworks(ctx context.Context, endpointID int64, ips []domain.EndpointIP) (int, error)
-	LinkContainerToMatchingNetworks(ctx context.Context, containerID string, ips []domain.EndpointIP) (int, error)
+	// Los tres Link* reciben el ámbito de proyecto porque el emparejamiento es por CIDR y
+	// VLAN: sin acotarlo, dos proyectos que usen el mismo direccionamiento privado (algo
+	// permitido desde que la unicidad es por proyecto) se enlazarían los activos entre sí.
+	LinkMatchingEndpoints(ctx context.Context, networkID int64, cidr string, vlanID int64, projectIDs []int64) (int, error)
+	LinkEndpointToMatchingNetworks(ctx context.Context, endpointID int64, ips []domain.EndpointIP, projectID int64) (int, error)
+	LinkContainerToMatchingNetworks(ctx context.Context, containerID string, ips []domain.EndpointIP, projectID int64) (int, error)
 	LinkNetworkToProjectIfOrphan(ctx context.Context, networkID int64, projectID int64) error
 }
 
@@ -239,10 +242,24 @@ type InfrastructurePort interface {
 	IsAnalysisPending(ctx context.Context, projectID int64) (bool, error)
 	ImportGraphData(ctx context.Context, data *domain.GraphData) error
 	GetPaginatedInventory(ctx context.Context, query domain.InventoryQuery) (*domain.PaginatedInventoryResponse, error)
-	IsAssetNodeNameDuplicate(ctx context.Context, name string, excludeID any) (bool, error)
-	IsNetworkNameDuplicate(ctx context.Context, name string, excludeID any) (bool, error)
-	IsVlanIDDuplicate(ctx context.Context, vlanID int64, excludeID any) (bool, error)
+	// IsAssetNodeNameDuplicate comprueba el nombre dentro del proyecto indicado: endpoints
+	// y contenedores comparten espacio de nombres, pero dos proyectos distintos sí pueden
+	// reutilizar el mismo nombre.
+	IsAssetNodeNameDuplicate(ctx context.Context, name string, excludeID any, projectID int64) (bool, error)
 	IsProjectNameDuplicate(ctx context.Context, name string, excludeID any) (bool, error)
+
+	// GetNetworksInProjectScope devuelve las redes visibles desde los proyectos indicados,
+	// excluyendo la red excludeNetworkID. Con projectIDs vacío devuelve las redes que no
+	// cuelgan de ningún proyecto. Es la base del control de duplicados por proyecto.
+	GetNetworksInProjectScope(ctx context.Context, projectIDs []int64, excludeNetworkID int64) ([]domain.Network, error)
+	// GetProjectIDsByNetwork resuelve los proyectos a los que pertenece una red. Puede
+	// devolver varios: las aristas CONTAINS_NETWORK se acumulan y nunca se limpian.
+	GetProjectIDsByNetwork(ctx context.Context, networkID int64) ([]int64, error)
+	// GetProjectIDByContainer resuelve el proyecto de un contenedor a través de su host.
+	GetProjectIDByContainer(ctx context.Context, containerID string) (int64, error)
+	// FindIPConflicts devuelve los activos del proyecto que ya ocupan alguna de las IPs
+	// indicadas, ignorando el activo que se está creando o editando.
+	FindIPConflicts(ctx context.Context, projectID int64, ips []string, excludeEndpointID int64, excludeContainerID string) ([]domain.IPConflict, error)
 }
 
 // ContainerPort define las operaciones para gestionar imágenes y contenedores.

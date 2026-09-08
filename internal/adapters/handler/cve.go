@@ -7,6 +7,7 @@ Emite logs estructurados en JSON (sin campo operador) con diffs exactos y justif
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -39,6 +40,23 @@ func sendError(w http.ResponseWriter, msg string, code int) {
 	http.Error(w, msg, code)
 }
 
+// assetErrorStatus traduce los errores de dominio de redes y activos al código HTTP
+// adecuado: 400 para datos inválidos, 409 para colisiones con algo ya existente, 404 si no
+// existe y 500 para el resto (fallos de base de datos, etc.).
+func assetErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, domain.ErrInvalidNetwork), errors.Is(err, domain.ErrInvalidIP):
+		return http.StatusBadRequest
+	case errors.Is(err, domain.ErrDuplicateNetwork), errors.Is(err, domain.ErrDuplicateIP),
+		errors.Is(err, domain.ErrDuplicateAsset):
+		return http.StatusConflict
+	case errors.Is(err, domain.ErrNodeNotFound):
+		return http.StatusNotFound
+	default:
+		return http.StatusInternalServerError
+	}
+
+}
 func sendJSON(w http.ResponseWriter, data any, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
@@ -155,7 +173,7 @@ func (h *OrchestratorHandler) AddEndpointToProject(w http.ResponseWriter, r *htt
 
 	if err := h.orchestrator.AddEndpointToProject(r.Context(), projectID, &endpoint); err != nil {
 		emitAuditLog("CREACION", "Endpoint", fmt.Sprint(endpoint.EndpointID), endpoint.Hostname, idStr, payload.Justification, nil, "ERROR", err.Error())
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 
@@ -1005,7 +1023,7 @@ func (h *OrchestratorHandler) CreateNetwork(w http.ResponseWriter, r *http.Reque
 	networkID, linked, err := h.orchestrator.CreateNetwork(r.Context(), &network, req.ProjectID)
 	if err != nil {
 		emitAuditLog("CREACION", "Network", fmt.Sprint(networkID), req.Nombre, fmt.Sprint(req.ProjectID), req.Justification, nil, "ERROR", err.Error())
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 
@@ -1066,7 +1084,7 @@ func (h *OrchestratorHandler) UpdateEndpoint(w http.ResponseWriter, r *http.Requ
 
 	if err := h.orchestrator.UpdateEndpoint(r.Context(), &endpoint); err != nil {
 		emitAuditLog("MODIFICACION", "Endpoint", idStr, endpoint.Hostname, "", justification, nil, "ERROR", err.Error())
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 
@@ -1195,7 +1213,7 @@ func (h *OrchestratorHandler) UpdateNetwork(w http.ResponseWriter, r *http.Reque
 	linked, err := h.orchestrator.UpdateNetwork(r.Context(), &network, req.ProjectID)
 	if err != nil {
 		emitAuditLog("MODIFICACION", "Network", idStr, req.Nombre, fmt.Sprint(req.ProjectID), justification, nil, "ERROR", err.Error())
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 
@@ -1652,7 +1670,7 @@ func (h *OrchestratorHandler) AddContainerToEndpoint(w http.ResponseWriter, r *h
 	container := payload.Container
 	if err := h.orchestrator.AddContainerToEndpoint(r.Context(), endpointID, &container); err != nil {
 		emitAuditLog("CREACION", "Container", container.ContainerID, container.Name, "", payload.Justification, nil, "ERROR", err.Error())
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 
@@ -1699,7 +1717,7 @@ func (h *OrchestratorHandler) UpdateContainer(w http.ResponseWriter, r *http.Req
 
 	if err := h.orchestrator.UpdateContainer(r.Context(), &container); err != nil {
 		emitAuditLog("MODIFICACION", "Container", idStr, container.Name, "", justification, nil, "ERROR", err.Error())
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 

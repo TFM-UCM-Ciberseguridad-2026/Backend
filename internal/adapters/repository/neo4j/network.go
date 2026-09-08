@@ -88,7 +88,7 @@ func (r *networkRepo) DeleteByID(ctx context.Context, id int64) error {
 
 // LinkMatchingEndpoints recorre todos los Endpoints y Contenedores con IPs registradas y conecta
 // los que caen dentro del CIDR y coinciden en VLAN con la red. Devuelve cuántos activos se enlazaron.
-func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64, cidr string, vlanID int64) (int, error) {
+func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64, cidr string, vlanID int64, projectIDs []int64) (int, error) {
 	var ipNet *net.IPNet
 	if cidr != "" {
 		_, ipNet, _ = net.ParseCIDR(cidr)
@@ -105,12 +105,33 @@ func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64
 		isCont  bool
 	}
 
-	res, err := readSession.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		result, err := tx.Run(ctx, `
+	// Sin acotar por proyecto, esta búsqueda barre toda la base de datos y engancha a la red
+	// activos de otros proyectos que usen el mismo direccionamiento privado.
+	candidateQuery := `
+		MATCH (e)-[:HAS_IP]->(ip:IPAddress)
+		WHERE e:Endpoint OR e:Container
+		RETURN e.id AS node_id, labels(e) AS labels, ip.ip AS ip, ip.vlan_id AS vlan_id
+	`
+	if len(projectIDs) > 0 {
+		candidateQuery = `
+			UNWIND $project_ids AS pid
+			MATCH (p:Project)
+			WHERE toInteger(p.id) = toInteger(pid) OR toString(p.id) = toString(pid)
+			CALL {
+				WITH p
+				MATCH (p)-[:HAS_ENDPOINT]->(e:Endpoint) RETURN e
+				UNION
+				WITH p
+				MATCH (p)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(e:Container) RETURN e
+			}
+			WITH DISTINCT e
 			MATCH (e)-[:HAS_IP]->(ip:IPAddress)
-			WHERE e:Endpoint OR e:Container
 			RETURN e.id AS node_id, labels(e) AS labels, ip.ip AS ip, ip.vlan_id AS vlan_id
-		`, nil)
+		`
+	}
+
+	res, err := readSession.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, candidateQuery, map[string]any{"project_ids": projectIDs})
 		if err != nil {
 			return nil, err
 		}
@@ -217,7 +238,7 @@ func (r *networkRepo) LinkMatchingEndpoints(ctx context.Context, networkID int64
 	return len(matches), nil
 }
 
-func (r *networkRepo) LinkEndpointToMatchingNetworks(ctx context.Context, endpointID int64, ips []domain.EndpointIP) (int, error) {
+func (r *networkRepo) LinkEndpointToMatchingNetworks(ctx context.Context, endpointID int64, ips []domain.EndpointIP, projectID int64) (int, error) {
 	writeSession := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer writeSession.Close(ctx)
 
@@ -251,10 +272,11 @@ func (r *networkRepo) LinkEndpointToMatchingNetworks(ctx context.Context, endpoi
 	}
 
 	res, err := readSession.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		result, err := tx.Run(ctx, `
-			MATCH (n:Network)
-			RETURN n.id AS network_id, n.cidr AS cidr, n.vlan_id AS vlan_id
-		`, nil)
+		query := allNetworksQuery
+		if projectID > 0 {
+			query = networksInProjectQuery
+		}
+		result, err := tx.Run(ctx, query, map[string]any{"project_id": projectID})
 		if err != nil {
 			return nil, err
 		}
@@ -365,7 +387,7 @@ func (r *networkRepo) LinkNetworkToProjectIfOrphan(ctx context.Context, networkI
 	})
 }
 
-func (r *networkRepo) LinkContainerToMatchingNetworks(ctx context.Context, containerID string, ips []domain.EndpointIP) (int, error) {
+func (r *networkRepo) LinkContainerToMatchingNetworks(ctx context.Context, containerID string, ips []domain.EndpointIP, projectID int64) (int, error) {
 	writeSession := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer writeSession.Close(ctx)
 
@@ -399,7 +421,11 @@ func (r *networkRepo) LinkContainerToMatchingNetworks(ctx context.Context, conta
 	}
 
 	res, err := readSession.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		result, err := tx.Run(ctx, "MATCH (n:Network) RETURN n.id AS network_id, n.cidr AS cidr, n.vlan_id AS vlan_id", nil)
+		query := allNetworksQuery
+		if projectID > 0 {
+			query = networksInProjectQuery
+		}
+		result, err := tx.Run(ctx, query, map[string]any{"project_id": projectID})
 		if err != nil {
 			return nil, err
 		}
@@ -485,4 +511,24 @@ func (r *networkRepo) LinkContainerToMatchingNetworks(ctx context.Context, conta
 	}
 
 	return len(matchingNetworkIDs), nil
-}
+}// networksInProjectQuery devuelve las redes visibles desde un proyecto. Se usa para acotar
+// el emparejamiento activo-red: con la unicidad de CIDR por proyecto, dos proyectos pueden
+// declarar el mismo rango y sin este filtro los activos se cruzarían entre proyectos.
+const networksInProjectQuery = `
+	MATCH (p:Project)
+	WHERE toInteger(p.id) = toInteger($project_id) OR toString(p.id) = toString($project_id)
+	CALL {
+		WITH p
+		MATCH (p)-[:CONTAINS_NETWORK]->(n:Network) RETURN n
+		UNION
+		WITH p
+		MATCH (p)-[:HAS_ENDPOINT]->(:Endpoint)-[:CONNECTED_TO]->(n:Network) RETURN n
+		UNION
+		WITH p
+		MATCH (p)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:CONNECTED_TO]->(n:Network) RETURN n
+	}
+	RETURN DISTINCT n.id AS network_id, n.cidr AS cidr, n.vlan_id AS vlan_id
+`
+
+// allNetworksQuery es el ámbito cuando no se puede resolver el proyecto del activo.
+const allNetworksQuery = `MATCH (n:Network) RETURN n.id AS network_id, n.cidr AS cidr, n.vlan_id AS vlan_id`

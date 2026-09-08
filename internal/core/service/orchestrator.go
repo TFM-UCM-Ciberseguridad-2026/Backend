@@ -281,12 +281,15 @@ func (o *Orchestrator) RenameProject(ctx context.Context, projectID int64, newNa
 
 // AddEndpointToProject guarda un nuevo endpoint y lo vincula a un proyecto.
 func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64, endpoint *domain.Endpoint) error {
-	if endpoint.Hostname != "" && o.infraPort != nil {
-		if exists, err := o.infraPort.IsAssetNodeNameDuplicate(ctx, endpoint.Hostname, 0); err == nil && exists {
-			return fmt.Errorf("Ya existe un activo con este nombre. Por favor, elige un nombre único.")
-		}
+	if err := o.validateAssetNameUnique(ctx, endpoint.Hostname, endpoint.EndpointID, projectID); err != nil {
+		return err
 	}
 
+	validIPs, err := o.validateAssetIPs(ctx, projectID, endpoint.IPs, endpoint.EndpointID, "")
+	if err != nil {
+		return err
+	}
+	endpoint.IPs = validIPs
 	if endpoint.EndpointID == 0 {
 		id, err := o.nextNodeID(ctx, "Endpoint")
 		if err != nil {
@@ -313,7 +316,7 @@ func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64
 			return fmt.Errorf("error guardando IPs del endpoint: %w", err)
 		}
 		if o.networkPort != nil {
-			if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
+			if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs, projectID); err != nil {
 				return fmt.Errorf("error enlazando endpoint a las redes coincidentes: %w", err)
 			}
 		}
@@ -344,17 +347,10 @@ func (o *Orchestrator) AssociateHardwareToEndpoint(ctx context.Context, endpoint
 // indicado como nodo huérfano de ese proyecto en concreto (no aparece en el resto).
 // Devuelve el ID de la red creada y cuántos endpoints se enlazaron.
 func (o *Orchestrator) CreateNetwork(ctx context.Context, network *domain.Network, projectID int64) (int64, int, error) {
-	if network.Nombre != "" && o.infraPort != nil {
-		if exists, err := o.infraPort.IsNetworkNameDuplicate(ctx, network.Nombre, 0); err == nil && exists {
-			return 0, 0, fmt.Errorf("Ya existe una red con este nombre. Por favor, elige un nombre único.")
-		}
+	scope, err := o.validateNetworkUniqueness(ctx, network, projectID, 0)
+	if err != nil {
+		return 0, 0, err
 	}
-	if network.VLANID > 0 && o.infraPort != nil {
-		if exists, err := o.infraPort.IsVlanIDDuplicate(ctx, network.VLANID, 0); err == nil && exists {
-			return 0, 0, fmt.Errorf("El VLAN ID ya está asignado a otra red. Por favor, elige un VLAN ID único.")
-		}
-	}
-
 	if network.NetworkID == 0 {
 		id, err := o.nextNodeID(ctx, "Network")
 		if err != nil {
@@ -367,7 +363,7 @@ func (o *Orchestrator) CreateNetwork(ctx context.Context, network *domain.Networ
 		return 0, 0, err
 	}
 
-	linked, err := o.networkPort.LinkMatchingEndpoints(ctx, network.NetworkID, network.CIDR, network.VLANID)
+	linked, err := o.networkPort.LinkMatchingEndpoints(ctx, network.NetworkID, network.CIDR, network.VLANID, scope)
 	if err != nil {
 		return network.NetworkID, 0, fmt.Errorf("error enlazando endpoints a la red: %w", err)
 	}
@@ -2755,11 +2751,15 @@ func (o *Orchestrator) RunDailyPipeline(ctx context.Context) error {
 
 // AddContainerToEndpoint guarda un contenedor y lo vincula a un host (endpoint)
 func (o *Orchestrator) AddContainerToEndpoint(ctx context.Context, hostID int64, container *domain.Container) error {
-	if container.Name != "" && o.infraPort != nil {
-		if exists, err := o.infraPort.IsAssetNodeNameDuplicate(ctx, container.Name, ""); err == nil && exists {
-			return fmt.Errorf("Ya existe un activo con este nombre. Por favor, elige un nombre único.")
-		}
+	if err := o.validateAssetNameUnique(ctx, container.Name, container.ContainerID, o.projectIDOfEndpoint(ctx, hostID)); err != nil {
+		return err
 	}
+
+	validIPs, err := o.validateAssetIPs(ctx, o.projectIDOfEndpoint(ctx, hostID), container.IPs, 0, container.ContainerID)
+	if err != nil {
+		return err
+	}
+	container.IPs = validIPs
 
 	if container.ContainerID == "" {
 		// En principio el frontend genera UUID, pero si no...
@@ -2776,7 +2776,7 @@ func (o *Orchestrator) AddContainerToEndpoint(ctx context.Context, hostID int64,
 			return fmt.Errorf("error guardando IPs del contenedor: %w", err)
 		}
 		if o.networkPort != nil {
-			if _, err := o.networkPort.LinkContainerToMatchingNetworks(ctx, container.ContainerID, container.IPs); err != nil {
+			if _, err := o.networkPort.LinkContainerToMatchingNetworks(ctx, container.ContainerID, container.IPs, o.projectIDOfEndpoint(ctx, hostID)); err != nil {
 				return fmt.Errorf("error enlazando contenedor a las redes coincidentes: %w", err)
 			}
 		}
@@ -2786,11 +2786,20 @@ func (o *Orchestrator) AddContainerToEndpoint(ctx context.Context, hostID int64,
 
 // UpdateContainer actualiza los datos de un contenedor y sus IPs.
 func (o *Orchestrator) UpdateContainer(ctx context.Context, container *domain.Container) error {
-	if container.Name != "" && o.infraPort != nil {
-		if exists, err := o.infraPort.IsAssetNodeNameDuplicate(ctx, container.Name, container.ContainerID); err == nil && exists {
-			return fmt.Errorf("Ya existe un activo con este nombre. Por favor, elige un nombre único.")
-		}
+	projectID := int64(0)
+	if o.infraPort != nil {
+		projectID, _ = o.infraPort.GetProjectIDByContainer(ctx, container.ContainerID)
 	}
+
+	if err := o.validateAssetNameUnique(ctx, container.Name, container.ContainerID, projectID); err != nil {
+		return err
+	}
+
+	validIPs, err := o.validateAssetIPs(ctx, projectID, container.IPs, 0, container.ContainerID)
+	if err != nil {
+		return err
+	}
+	container.IPs = validIPs
 
 	if err := o.SaveContainer(ctx, container); err != nil {
 		return err
@@ -2800,7 +2809,7 @@ func (o *Orchestrator) UpdateContainer(ctx context.Context, container *domain.Co
 		return fmt.Errorf("error actualizando IPs del contenedor: %w", err)
 	}
 	if o.networkPort != nil {
-		if _, err := o.networkPort.LinkContainerToMatchingNetworks(ctx, container.ContainerID, container.IPs); err != nil {
+		if _, err := o.networkPort.LinkContainerToMatchingNetworks(ctx, container.ContainerID, container.IPs, projectID); err != nil {
 			return fmt.Errorf("error re-enlazando contenedor a redes coincidentes: %w", err)
 		}
 	}
@@ -2811,11 +2820,19 @@ func (o *Orchestrator) UpdateContainer(ctx context.Context, container *domain.Co
 
 // UpdateEndpoint actualiza los datos y re-enlaza las IPs de un Endpoint en Neo4j.
 func (o *Orchestrator) UpdateEndpoint(ctx context.Context, endpoint *domain.Endpoint) error {
-	if endpoint.Hostname != "" && o.infraPort != nil {
-		if exists, err := o.infraPort.IsAssetNodeNameDuplicate(ctx, endpoint.Hostname, endpoint.EndpointID); err == nil && exists {
-			return fmt.Errorf("Ya existe un activo con este nombre. Por favor, elige un nombre único.")
-		}
+	endpointProjectID := o.projectIDOfEndpoint(ctx, endpoint.EndpointID)
+
+	if err := o.validateAssetNameUnique(ctx, endpoint.Hostname, endpoint.EndpointID, endpointProjectID); err != nil {
+		return err
 	}
+
+	// Las IPs se validan antes de tocar nada: SaveIPs borra y recrea los nodos :IPAddress,
+	// así que comprobar después dejaría el duplicado ya escrito.
+	validIPs, err := o.validateAssetIPs(ctx, endpointProjectID, endpoint.IPs, endpoint.EndpointID, "")
+	if err != nil {
+		return err
+	}
+	endpoint.IPs = validIPs
 
 	// Recalcular la categoría aquí es lo que permite reclasificar un activo mal dado de alta:
 	// al corregir su tipo, el bucket de SLA se recoloca en la misma operación.
@@ -2830,7 +2847,7 @@ func (o *Orchestrator) UpdateEndpoint(ctx context.Context, endpoint *domain.Endp
 	}
 
 	if o.networkPort != nil {
-		if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
+		if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs, endpointProjectID); err != nil {
 			return fmt.Errorf("error actualizando relaciones endpoint-red para endpoint %d: %w", endpoint.EndpointID, err)
 		}
 	}
@@ -2870,21 +2887,14 @@ func (o *Orchestrator) GetEndpointIPs(ctx context.Context, endpointID int64) ([]
 // Si tras la actualización ningún endpoint coincide, ancla la red al proyecto indicado
 // como huérfana de ese proyecto (ver LinkNetworkToProjectIfOrphan).
 func (o *Orchestrator) UpdateNetwork(ctx context.Context, network *domain.Network, projectID int64) (int, error) {
-	if network.Nombre != "" && o.infraPort != nil {
-		if exists, err := o.infraPort.IsNetworkNameDuplicate(ctx, network.Nombre, network.NetworkID); err == nil && exists {
-			return 0, fmt.Errorf("Ya existe una red con este nombre. Por favor, elige un nombre único.")
-		}
+	scope, err := o.validateNetworkUniqueness(ctx, network, projectID, network.NetworkID)
+	if err != nil {
+		return 0, err
 	}
-	if network.VLANID > 0 && o.infraPort != nil {
-		if exists, err := o.infraPort.IsVlanIDDuplicate(ctx, network.VLANID, network.NetworkID); err == nil && exists {
-			return 0, fmt.Errorf("El VLAN ID ya está asignado a otra red. Por favor, elige un VLAN ID único.")
-		}
-	}
-
 	if err := o.networkPort.Update(ctx, network); err != nil {
 		return 0, err
 	}
-	linked, err := o.networkPort.LinkMatchingEndpoints(ctx, network.NetworkID, network.CIDR, network.VLANID)
+	linked, err := o.networkPort.LinkMatchingEndpoints(ctx, network.NetworkID, network.CIDR, network.VLANID, scope)
 	if err != nil {
 		return 0, fmt.Errorf("error enlazando endpoints a la red actualizada: %w", err)
 	}
@@ -3573,4 +3583,155 @@ func (o *Orchestrator) GetPaginatedInventory(ctx context.Context, query domain.I
 		query.Limit = 50
 	}
 	return o.infraPort.GetPaginatedInventory(ctx, query)
+}
+
+// validateNetworkUniqueness valida y normaliza los datos de una red y comprueba que no
+// colisione con otra red del mismo proyecto por nombre, rango CIDR o VLAN ID.
+//
+// El ámbito es el proyecto, no la base de datos entera: dos auditorías distintas pueden
+// tener cada una su "DMZ" en 10.0.1.0/24. El ámbito se calcula uniendo el proyecto que
+// llega en la petición con los que ya tenga la red en el grafo, porque el cliente no
+// siempre manda project_id al editar y una red puede colgar de varios proyectos.
+//
+// Los errores del repositorio se propagan en lugar de ignorarse: si la base de datos no
+// puede responder, no damos por hecho que no hay duplicados.
+func (o *Orchestrator) validateNetworkUniqueness(ctx context.Context, network *domain.Network, projectID int64, excludeID int64) ([]int64, error) {
+	if err := domain.ValidateAndNormalizeNetwork(network); err != nil {
+		return nil, err
+	}
+	if o.infraPort == nil {
+		// Sin repositorio no hay comprobación posible; devolvemos al menos el proyecto pedido
+		// para que el emparejamiento posterior siga acotado.
+		if projectID > 0 {
+			return []int64{projectID}, nil
+		}
+		return nil, nil
+	}
+
+	scope, err := o.networkProjectScope(ctx, projectID, excludeID)
+	if err != nil {
+		return nil, err
+	}
+
+	candidates, err := o.infraPort.GetNetworksInProjectScope(ctx, scope, excludeID)
+	if err != nil {
+		return nil, fmt.Errorf("error comprobando las redes del proyecto: %w", err)
+	}
+
+	nameKey := strings.ToLower(network.Nombre)
+	for _, other := range candidates {
+		if strings.ToLower(strings.TrimSpace(other.Nombre)) == nameKey {
+			return nil, fmt.Errorf("%w: ya existe una red con este nombre en el proyecto. Por favor, elige un nombre único", domain.ErrDuplicateNetwork)
+		}
+
+		// Comparamos por la forma canónica: 10.0.1.37/24 y 10.0.1.0/24 son la misma subred.
+		if otherCIDR, err := domain.NormalizeCIDR(other.CIDR); err == nil && otherCIDR == network.CIDR {
+			return nil, fmt.Errorf("%w: el rango %s ya está asignado a la red '%s' de este proyecto. Por favor, elige un CIDR único", domain.ErrDuplicateNetwork, network.CIDR, other.Nombre)
+		}
+
+		if network.VLANID > 0 && other.VLANID == network.VLANID {
+			return nil, fmt.Errorf("%w: el VLAN ID %d ya está asignado a la red '%s' de este proyecto. Por favor, elige un VLAN ID único", domain.ErrDuplicateNetwork, network.VLANID, other.Nombre)
+		}
+	}
+
+	return scope, nil
+}
+
+// networkProjectScope devuelve los proyectos contra los que comprobar duplicados: el que
+// llega en la petición más los que la red ya tenga asignados en el grafo. Una lista vacía
+// significa "redes sin proyecto", que es el ámbito de una red creada sin proyecto.
+func (o *Orchestrator) networkProjectScope(ctx context.Context, projectID int64, networkID int64) ([]int64, error) {
+	seen := make(map[int64]bool)
+	var scope []int64
+
+	if projectID > 0 {
+		seen[projectID] = true
+		scope = append(scope, projectID)
+	}
+
+	if networkID > 0 {
+		owners, err := o.infraPort.GetProjectIDsByNetwork(ctx, networkID)
+		if err != nil {
+			return nil, fmt.Errorf("error resolviendo el proyecto de la red: %w", err)
+		}
+		for _, id := range owners {
+			if id > 0 && !seen[id] {
+				seen[id] = true
+				scope = append(scope, id)
+			}
+		}
+	}
+
+	return scope, nil
+}
+
+// validateAssetIPs normaliza las IPs de un endpoint o contenedor y comprueba que ninguna
+// esté ya ocupada por otro activo del mismo proyecto. Devuelve las IPs ya normalizadas
+// para que el llamante persista esas y no las del formulario.
+//
+// Se llama SIEMPRE antes de escribir: SaveIPs borra y recrea los nodos :IPAddress, así que
+// validar después dejaría el duplicado ya guardado.
+func (o *Orchestrator) validateAssetIPs(ctx context.Context, projectID int64, ips []domain.EndpointIP, excludeEndpointID int64, excludeContainerID string) ([]domain.EndpointIP, error) {
+	normalized, err := domain.NormalizeAssetIPs(ips)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(normalized) == 0 || o.infraPort == nil || projectID <= 0 {
+		return normalized, nil
+	}
+
+	values := make([]string, 0, len(normalized))
+	for _, entry := range normalized {
+		values = append(values, entry.IP)
+	}
+
+	conflicts, err := o.infraPort.FindIPConflicts(ctx, projectID, values, excludeEndpointID, excludeContainerID)
+	if err != nil {
+		return nil, err
+	}
+	if len(conflicts) > 0 {
+		return nil, domain.FormatIPConflicts(conflicts)
+	}
+
+	return normalized, nil
+}
+
+// projectIDOfEndpoint resuelve el proyecto de un endpoint, o 0 si no se puede determinar.
+// Se usa para acotar la comprobación de IPs duplicadas; si falla, la comprobación cruzada
+// se omite y solo queda la validación de formato, que no depende de la base de datos.
+func (o *Orchestrator) projectIDOfEndpoint(ctx context.Context, endpointID int64) int64 {
+	if o.riskPort == nil || endpointID <= 0 {
+		return 0
+	}
+	projectID, err := o.riskPort.GetProjectIDByEndpoint(ctx, endpointID)
+	if err != nil {
+		return 0
+	}
+	return projectID
+}
+
+// validateAssetNameUnique comprueba que no exista ya un endpoint o un contenedor con ese
+// nombre en el proyecto. Los dos tipos comparten espacio de nombres, pero el ámbito es el
+// proyecto: dos auditorías distintas pueden tener cada una su "validation-dmz-web".
+//
+// excludeID es el identificador del propio activo al editarlo (int64 para endpoints,
+// string para contenedores), para que no choque consigo mismo.
+//
+// El error del repositorio se propaga en lugar de ignorarse: si la base de datos no puede
+// responder, no damos por hecho que el nombre está libre.
+func (o *Orchestrator) validateAssetNameUnique(ctx context.Context, name string, excludeID any, projectID int64) error {
+	if strings.TrimSpace(name) == "" || o.infraPort == nil {
+		return nil
+	}
+
+	exists, err := o.infraPort.IsAssetNodeNameDuplicate(ctx, name, excludeID, projectID)
+	if err != nil {
+		return fmt.Errorf("error comprobando el nombre del activo: %w", err)
+	}
+	if exists {
+		return fmt.Errorf("%w: ya existe un activo con este nombre en el proyecto. Por favor, elige un nombre único", domain.ErrDuplicateAsset)
+	}
+
+	return nil
 }
