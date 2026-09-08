@@ -327,6 +327,10 @@ func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64
 
 // AssociateHardwareToEndpoint guarda componentes de hardware y los enlaza a un endpoint.
 func (o *Orchestrator) AssociateHardwareToEndpoint(ctx context.Context, endpointID int64, hardware *domain.Hardware) error {
+	if err := domain.ValidateAndNormalizeHardware(hardware); err != nil {
+		return err
+	}
+
 	if hardware.HardwareID == 0 {
 		id, err := o.nextNodeID(ctx, "Hardware")
 		if err != nil {
@@ -2913,6 +2917,9 @@ func (o *Orchestrator) DeleteNetwork(ctx context.Context, networkID int64) error
 
 // UpdateHardware actualiza las especificaciones de Hardware.
 func (o *Orchestrator) UpdateHardware(ctx context.Context, hardware *domain.Hardware) error {
+	if err := domain.ValidateAndNormalizeHardware(hardware); err != nil {
+		return err
+	}
 	return o.hardwarePort.Update(ctx, hardware)
 }
 

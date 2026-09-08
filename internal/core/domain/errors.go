@@ -25,4 +25,9 @@ var (
 	// ErrDuplicateAsset indica que ya existe un endpoint o un contenedor con ese nombre
 	// en el mismo proyecto. Se traduce a HTTP 409.
 	ErrDuplicateAsset = errors.New("activo duplicado")
+
+	// ErrInvalidHardware indica que los datos de un componente físico no superan la
+	// validación de dominio (magnitudes imposibles, arquitectura desconocida, sin
+	// identificar). Se traduce a HTTP 400.
+	ErrInvalidHardware = errors.New("datos de hardware inválidos")
 )

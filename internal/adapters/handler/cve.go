@@ -45,7 +45,8 @@ func sendError(w http.ResponseWriter, msg string, code int) {
 // existe y 500 para el resto (fallos de base de datos, etc.).
 func assetErrorStatus(err error) int {
 	switch {
-	case errors.Is(err, domain.ErrInvalidNetwork), errors.Is(err, domain.ErrInvalidIP):
+	case errors.Is(err, domain.ErrInvalidNetwork), errors.Is(err, domain.ErrInvalidIP),
+		errors.Is(err, domain.ErrInvalidHardware):
 		return http.StatusBadRequest
 	case errors.Is(err, domain.ErrDuplicateNetwork), errors.Is(err, domain.ErrDuplicateIP),
 		errors.Is(err, domain.ErrDuplicateAsset):
@@ -218,17 +219,17 @@ func (h *OrchestratorHandler) AssociateHardwareToEndpoint(w http.ResponseWriter,
 	hw := payload.Hardware
 	if err := h.orchestrator.AssociateHardwareToEndpoint(r.Context(), endpointID, &hw); err != nil {
 		emitAuditLog("CREACION", "Hardware", fmt.Sprint(hw.HardwareID), hw.Model, "", payload.Justification, nil, "ERROR", err.Error())
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 
 	cambios := map[string]auditChange{
 		"hardware_id":   {Despues: hw.HardwareID},
 		"modelo":        {Despues: hw.Model},
-		"tipo":          {Despues: hw.Type},
+		"arquitectura":  {Despues: hw.Architecture},
 		"manufacturer":  {Despues: hw.Manufacturer},
 		"serial_number": {Despues: hw.SerialNumber},
-		"cpu":           {Despues: hw.CPU},
+		"cpu_cores":     {Despues: hw.CPUCores},
 		"ram_gb":        {Despues: hw.RAMGB},
 		"storage_gb":    {Despues: hw.StorageGB},
 		"endpoint_id":   {Despues: endpointID},
@@ -1311,7 +1312,7 @@ func (h *OrchestratorHandler) UpdateHardware(w http.ResponseWriter, r *http.Requ
 	hw.HardwareID = hwID
 	if err := h.orchestrator.UpdateHardware(r.Context(), &hw); err != nil {
 		emitAuditLog("MODIFICACION", "Hardware", idStr, hw.Model, "", justification, nil, "ERROR", err.Error())
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 
@@ -1320,8 +1321,8 @@ func (h *OrchestratorHandler) UpdateHardware(w http.ResponseWriter, r *http.Requ
 		if oldHW.Model != hw.Model && hw.Model != "" {
 			cambios["modelo"] = auditChange{Antes: oldHW.Model, Despues: hw.Model}
 		}
-		if oldHW.Type != hw.Type && hw.Type != "" {
-			cambios["tipo"] = auditChange{Antes: oldHW.Type, Despues: hw.Type}
+		if oldHW.Architecture != hw.Architecture && hw.Architecture != "" {
+			cambios["arquitectura"] = auditChange{Antes: oldHW.Architecture, Despues: hw.Architecture}
 		}
 		if oldHW.Manufacturer != hw.Manufacturer && hw.Manufacturer != "" {
 			cambios["manufacturer"] = auditChange{Antes: oldHW.Manufacturer, Despues: hw.Manufacturer}
@@ -1329,8 +1330,8 @@ func (h *OrchestratorHandler) UpdateHardware(w http.ResponseWriter, r *http.Requ
 		if oldHW.SerialNumber != hw.SerialNumber && hw.SerialNumber != "" {
 			cambios["serial_number"] = auditChange{Antes: oldHW.SerialNumber, Despues: hw.SerialNumber}
 		}
-		if oldHW.CPU != hw.CPU && hw.CPU != "" {
-			cambios["cpu"] = auditChange{Antes: oldHW.CPU, Despues: hw.CPU}
+		if oldHW.CPUCores != hw.CPUCores && hw.CPUCores > 0 {
+			cambios["cpu_cores"] = auditChange{Antes: oldHW.CPUCores, Despues: hw.CPUCores}
 		}
 		if oldHW.RAMGB != hw.RAMGB && hw.RAMGB > 0 {
 			cambios["ram_gb"] = auditChange{Antes: oldHW.RAMGB, Despues: hw.RAMGB}
