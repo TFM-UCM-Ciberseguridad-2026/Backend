@@ -1284,8 +1284,15 @@ func (o *Orchestrator) resolvePatchLevel(ctx context.Context, installationID, cv
 	switch {
 	case referenceType == "MITIGATION":
 		ceiling = domain.RemediationLevelWorkaround
-	case fixedVersionIsValid(patch.FixedVersion):
+	case patch.Official && fixedVersionIsValid(patch.FixedVersion):
 		ceiling = domain.RemediationLevelOfficialFix
+	// Sin aval del fabricante hay que comprobar que la instalación sube a la versión.
+	case fixedVersionIsValid(patch.FixedVersion):
+		if o.versionSatisfiesFix(ctx, installationID, targetVersion, patch.FixedVersion) {
+			ceiling = domain.RemediationLevelOfficialFix
+		} else {
+			ceiling = domain.RemediationLevelWorkaround
+		}
 	case patch.Official:
 		ceiling = domain.RemediationLevelTemporaryFix
 	}
