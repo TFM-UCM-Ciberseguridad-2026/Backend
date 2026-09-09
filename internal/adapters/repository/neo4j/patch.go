@@ -12,17 +12,16 @@ type patchRepo struct {
 	driver neo4j.DriverWithContext
 }
 
-// SaveApplication declara un parche como aplicado distinguiendo por cve_id para no sobrescribir relaciones.
+// SaveApplication declara un parche como aplicado. Permite que convivan TEMPORARY_FIX y OFFICIAL_FIX para el mismo CVE.
 func (r *patchRepo) SaveApplication(ctx context.Context, a *domain.AppliedPatch) error {
 	query := `
 		MATCH (p:Patch) WHERE p.id = $patch_id OR toInteger(p.id) = toInteger($patch_id) OR toString(p.id) = toString($patch_id)
 		MATCH (target)
 		WHERE ($asset_type = 'CONTAINER' AND target:Container AND (target.id = $container_id OR toString(target.id) = toString($container_id)))
 		   OR ($asset_type <> 'CONTAINER' AND target:SoftwareInstallation AND (target.id = $installation_id OR toString(target.id) = toString($installation_id)))
-		MERGE (p)-[rel:APPLIED_TO {cve_id: $cve_id}]->(target)
+		MERGE (p)-[rel:APPLIED_TO {cve_id: $cve_id, remediation_level: $remediation_level}]->(target)
 		SET rel.applied_at              = $applied_at,
 		    rel.applied_by              = $applied_by,
-		    rel.remediation_level       = $remediation_level,
 		    rel.remediation_factor      = $remediation_factor,
 		    rel.notes                   = $notes,
 		    rel.verified                = $verified,
@@ -63,59 +62,121 @@ func (r *patchRepo) SaveApplication(ctx context.Context, a *domain.AppliedPatch)
 	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
-// GetAppliedPatchHistoryByEndpoint recupera el histórico de parches y findings resueltos agrupado por software.
+// GetAppliedPatchHistoryByEndpoint recupera el histórico de parches y findings resueltos
+// agrupado por software tradicional y por imágenes de contenedores alojadas en el endpoint.
 func (r *patchRepo) GetAppliedPatchHistoryByEndpoint(ctx context.Context, endpointID int64) (*domain.EndpointPatchHistory, error) {
 	query := `
 		MATCH (e:Endpoint)
 		WHERE e.id = $endpoint_id OR toInteger(e.id) = toInteger($endpoint_id) OR toString(e.id) = toString($endpoint_id) OR elementId(e) = toString($endpoint_id)
+
+		// ── RAMA 1: Software nativo en el host o instalaciones en contenedor ──
 		OPTIONAL MATCH (e)-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
 		OPTIONAL MATCH (si)-[:INSTANCE_OF]->(s:Software)
-		OPTIONAL MATCH (p:Patch)-[rel:APPLIED_TO]->(si)
-		OPTIONAL MATCH (si)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-		WHERE (toUpper(coalesce(f.status, '')) IN ['PATCHED', 'RESOLVED', 'CLOSED', 'MITIGATED'] OR f.remediation_factor = 0.0)
-		  AND (rel.cve_id = v.cve_id OR (p IS NOT NULL AND (p)-[:FIXES]->(v)) OR rel IS NOT NULL)
-		
+		OPTIONAL MATCH (p1:Patch)-[rel1:APPLIED_TO]->(si)
+		OPTIONAL MATCH (si)-[:HAS_FINDING]->(f1:Finding)-[:OF_VULNERABILITY]->(v1:Vulnerability)
+		WHERE (toUpper(coalesce(f1.status, '')) IN ['PATCHED', 'RESOLVED', 'CLOSED', 'MITIGATED', 'SUPERSEDED'] OR f1.remediation_factor = 0.0)
+		  AND (rel1.cve_id = v1.cve_id OR (p1 IS NOT NULL AND (p1)-[:FIXES]->(v1)) OR rel1 IS NOT NULL)
+
 		WITH e, si, s,
-		     collect(DISTINCT CASE WHEN p IS NOT NULL AND rel IS NOT NULL THEN {
-		         patch_id: p.id,
-		         patch_url: coalesce(p.url, ''),
-		         patch_description: coalesce(p.description, ''),
-		         cve_id: coalesce(rel.cve_id, ''),
-		         applied_at: rel.applied_at,
-		         applied_by: coalesce(rel.applied_by, ''),
-		         remediation_level: coalesce(rel.remediation_level, 'OFFICIAL_FIX'),
-		         remediation_factor: coalesce(rel.remediation_factor, 0.0),
-		         notes: coalesce(rel.notes, ''),
-		         verified: coalesce(rel.verified, false),
-		         verification_conclusive: coalesce(rel.verification_conclusive, false),
-		         verification_reason: coalesce(rel.verification_reason, ''),
-		         installed_version: coalesce(rel.installed_version, ''),
-		         expected_version: coalesce(rel.expected_version, '')
-		     } ELSE null END) AS raw_patches,
-		     collect(DISTINCT CASE WHEN f IS NOT NULL AND v IS NOT NULL THEN {
-		         finding_id: f.id,
-		         cve_id: v.cve_id,
-		         status: coalesce(f.status, 'PATCHED'),
-		         patch_id: coalesce(p.id, 0),
-		         patch_description: coalesce(p.description, rel.notes, 'Parche oficial aplicado'),
-		         patch_url: coalesce(p.url, ''),
-		         remediation_level: coalesce(rel.remediation_level, 'OFFICIAL_FIX'),
-		         applied_at: coalesce(rel.applied_at, f.resolved_at, f.last_seen),
-		         applied_by: coalesce(rel.applied_by, 'operator'),
-		         notes: coalesce(rel.notes, ''),
-		         expected_version: coalesce(rel.expected_version, s.version, '')
-		     } ELSE null END) AS raw_findings
-		WHERE si IS NOT NULL
+		     collect(DISTINCT CASE WHEN p1 IS NOT NULL AND rel1 IS NOT NULL THEN {
+		         patch_id: p1.id,
+		         patch_url: coalesce(p1.url, ''),
+		         patch_description: coalesce(p1.description, ''),
+		         cve_id: coalesce(rel1.cve_id, ''),
+		         applied_at: rel1.applied_at,
+		         applied_by: coalesce(rel1.applied_by, ''),
+		         remediation_level: coalesce(rel1.remediation_level, 'OFFICIAL_FIX'),
+		         remediation_factor: coalesce(rel1.remediation_factor, 0.0),
+		         notes: coalesce(rel1.notes, ''),
+		         verified: coalesce(rel1.verified, false),
+		         verification_conclusive: coalesce(rel1.verification_conclusive, false),
+		         verification_reason: coalesce(rel1.verification_reason, ''),
+		         installed_version: coalesce(rel1.installed_version, ''),
+		         expected_version: coalesce(rel1.expected_version, rel1.installed_version, s.version, '')
+		     } ELSE null END) AS si_raw_patches,
+		     collect(DISTINCT CASE WHEN f1 IS NOT NULL AND v1 IS NOT NULL THEN {
+		         finding_id: f1.id,
+		         cve_id: v1.cve_id,
+		         status: coalesce(f1.status, 'PATCHED'),
+		         patch_id: coalesce(p1.id, 0),
+		         patch_description: coalesce(p1.description, rel1.notes, 'Parche oficial aplicado'),
+		         patch_url: coalesce(p1.url, ''),
+		         remediation_level: coalesce(rel1.remediation_level, 'OFFICIAL_FIX'),
+		         applied_at: coalesce(rel1.applied_at, f1.resolved_at, f1.last_seen),
+		         applied_by: coalesce(rel1.applied_by, 'operator'),
+		         notes: coalesce(rel1.notes, ''),
+		         expected_version: coalesce(rel1.expected_version, rel1.installed_version, s.version, '')
+		     } ELSE null END) AS si_raw_findings
+
+		WITH e,
+		     collect(CASE WHEN si IS NOT NULL THEN {
+		         installation_id: si.id,
+		         software_id: coalesce(s.id, 0),
+		         software_name: coalesce(s.name, si.install_path, si.id),
+		         current_version: coalesce(s.version, 'N/A'),
+		         applied_patches: [p IN si_raw_patches WHERE p IS NOT NULL],
+		         resolved_findings: [f IN si_raw_findings WHERE f IS NOT NULL]
+		     } ELSE null END) AS si_groups
+
+		// ── RAMA 2: Contenedores e imágenes de contenedor alojadas en el endpoint ──
+		OPTIONAL MATCH (e)-[:HOSTS]->(c:Container)
+		OPTIONAL MATCH (c)-[:USES_IMAGE]->(ci:ContainerImage)
+		OPTIONAL MATCH (p2:Patch)-[rel2:APPLIED_TO]->(target2)
+		WHERE target2 = c OR target2 = ci
+		OPTIONAL MATCH (ci_or_c)-[:HAS_FINDING]->(f2:Finding)-[:OF_VULNERABILITY]->(v2:Vulnerability)
+		WHERE (ci_or_c = ci OR ci_or_c = c)
+		  AND (f2.container_id = c.id OR f2.container_id IS NULL OR f2.image_id = ci.id)
+		  AND (toUpper(coalesce(f2.status, '')) IN ['PATCHED', 'RESOLVED', 'CLOSED', 'MITIGATED', 'SUPERSEDED'] OR f2.remediation_factor = 0.0)
+		  AND (rel2.cve_id = v2.cve_id OR (p2 IS NOT NULL AND (p2)-[:FIXES]->(v2)) OR rel2 IS NOT NULL)
+
+		WITH e, si_groups, c, ci,
+		     collect(DISTINCT CASE WHEN p2 IS NOT NULL AND rel2 IS NOT NULL THEN {
+		         patch_id: p2.id,
+		         patch_url: coalesce(p2.url, ''),
+		         patch_description: coalesce(p2.description, ''),
+		         cve_id: coalesce(rel2.cve_id, ''),
+		         applied_at: rel2.applied_at,
+		         applied_by: coalesce(rel2.applied_by, ''),
+		         remediation_level: coalesce(rel2.remediation_level, 'OFFICIAL_FIX'),
+		         remediation_factor: coalesce(rel2.remediation_factor, 0.0),
+		         notes: coalesce(rel2.notes, ''),
+		         verified: coalesce(rel2.verified, false),
+		         verification_conclusive: coalesce(rel2.verification_conclusive, false),
+		         verification_reason: coalesce(rel2.verification_reason, ''),
+		         installed_version: coalesce(rel2.installed_version, ci.tag, ''),
+		         expected_version: coalesce(rel2.expected_version, rel2.installed_version, ci.tag, '')
+		     } ELSE null END) AS c_raw_patches,
+		     collect(DISTINCT CASE WHEN f2 IS NOT NULL AND v2 IS NOT NULL THEN {
+		         finding_id: f2.id,
+		         cve_id: v2.cve_id,
+		         status: coalesce(f2.status, 'PATCHED'),
+		         patch_id: coalesce(p2.id, 0),
+		         patch_description: coalesce(p2.description, rel2.notes, 'Vulnerabilidad de contenedor resuelta'),
+		         patch_url: coalesce(p2.url, ''),
+		         remediation_level: coalesce(rel2.remediation_level, 'OFFICIAL_FIX'),
+		         applied_at: coalesce(rel2.applied_at, f2.resolved_at, f2.last_seen),
+		         applied_by: coalesce(rel2.applied_by, 'operator'),
+		         notes: coalesce(rel2.notes, ''),
+		         expected_version: coalesce(rel2.expected_version, rel2.installed_version, ci.tag, '')
+		     } ELSE null END) AS c_raw_findings
+
+		WITH e, si_groups,
+		     collect(CASE WHEN c IS NOT NULL AND (size(c_raw_patches) > 0 OR size(c_raw_findings) > 0) THEN {
+		         installation_id: c.id,
+		         software_id: 0,
+		         software_name: CASE
+		             WHEN ci IS NOT NULL THEN 'Contenedor: ' + coalesce(c.name, c.id) + ' (' + coalesce(ci.name, ci.id) + ')'
+		             ELSE 'Contenedor: ' + coalesce(c.name, c.id)
+		         END,
+		         current_version: coalesce(ci.tag, 'latest'),
+		         applied_patches: [p IN c_raw_patches WHERE p IS NOT NULL],
+		         resolved_findings: [f IN c_raw_findings WHERE f IS NOT NULL]
+		     } ELSE null END) AS c_groups
+
+		// ── UNIFICACIÓN: grupos de software + grupos de contenedores ──
 		RETURN e.id AS endpoint_id,
 		       coalesce(e.hostname, '') AS hostname,
-		       collect({
-		           installation_id: si.id,
-		           software_id: coalesce(s.id, 0),
-		           software_name: coalesce(s.name, si.install_path, si.id),
-		           current_version: coalesce(s.version, 'N/A'),
-		           applied_patches: [p IN raw_patches WHERE p IS NOT NULL],
-		           resolved_findings: [f IN raw_findings WHERE f IS NOT NULL]
-		       }) AS software_groups
+		       [g IN (si_groups + c_groups) WHERE g IS NOT NULL AND (g.software_id > 0 OR size(g.applied_patches) > 0 OR size(g.resolved_findings) > 0)] AS software_groups
 	`
 
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})

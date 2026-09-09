@@ -1504,9 +1504,22 @@ func (o *Orchestrator) DeclarePatchApplied(
 		return nil, nil, fmt.Errorf("error cerrando findings resueltos: %w", err)
 	}
 
-	// 7. Persistir en el histórico la relación APPLIED_TO para CADA CVE resuelta
+	// 7. Persistir en el histórico la relación APPLIED_TO controlando duplicados y convivencia
+	existingApps, _ := o.patchPort.GetApplicationsByInstallation(ctx, installationID)
+	existingLevelsByCVE := make(map[string][]domain.RemediationLevel)
+	for _, a := range existingApps {
+		existingLevelsByCVE[a.CVEID] = append(existingLevelsByCVE[a.CVEID], a.RemediationLevel)
+	}
+
 	var primaryApplication *domain.AppliedPatch
 	for _, resCVE := range resolvedCVEs {
+		verification := o.verifyPatchApplication(ctx, installationID, resCVE, level)
+
+		// Si el usuario aplicó una versión destino específica, esa es la versión objetivo real
+		if cleanTargetVer != "" {
+			verification.ExpectedVersion = cleanTargetVer
+		}
+
 		app := &domain.AppliedPatch{
 			PatchID:           patchID,
 			InstallationID:    installationID,
@@ -1516,9 +1529,38 @@ func (o *Orchestrator) DeclarePatchApplied(
 			RemediationLevel:  level,
 			RemediationFactor: remediationFactor,
 			Notes:             notes,
-			Verification:      o.verifyPatchApplication(ctx, installationID, resCVE, level),
+			Verification:      verification,
 		}
-		_ = o.patchPort.SaveApplication(ctx, app)
+
+		shouldAddToHistory := true
+		if levels, exists := existingLevelsByCVE[resCVE]; exists && len(levels) > 0 {
+			hasOfficial := false
+			hasTemporary := false
+			for _, l := range levels {
+				if l == domain.RemediationLevelOfficialFix {
+					hasOfficial = true
+				}
+				if l == domain.RemediationLevelTemporaryFix || l == domain.RemediationLevelWorkaround {
+					hasTemporary = true
+				}
+			}
+
+			if hasOfficial {
+				// Si la existente es OFFICIAL_FIX, no se añade la nueva
+				shouldAddToHistory = false
+			} else if hasTemporary && level == domain.RemediationLevelOfficialFix {
+				// Si la existente es TEMPORARY_FIX y la nueva es OFFICIAL_FIX, sí se añade (conviven ambas)
+				shouldAddToHistory = true
+			} else {
+				// Si la existente es TEMPORARY_FIX y la nueva es TEMPORARY_FIX (o ya existe), no se añade
+				shouldAddToHistory = false
+			}
+		}
+
+		if shouldAddToHistory {
+			_ = o.patchPort.SaveApplication(ctx, app)
+			existingLevelsByCVE[resCVE] = append(existingLevelsByCVE[resCVE], level)
+		}
 
 		var remAppliedAt *time.Time
 		if level != domain.RemediationLevelUnavailable {
@@ -1620,9 +1662,39 @@ func (o *Orchestrator) DeclarePatchAppliedToContainer(
 		RemediationLevel: level, RemediationFactor: factor, Notes: notes,
 		Verification: domain.PatchVerification{Reason: domain.VerificationNotApplicable},
 	}
-	if err := o.patchPort.SaveApplication(ctx, application); err != nil {
-		return nil, nil, fmt.Errorf("error declarando remediación del contenedor %s: %w", containerID, err)
+
+	// Comprobar histórico del contenedor para evitar duplicados
+	existingApps, _ := o.patchPort.GetApplicationsByContainer(ctx, containerID)
+	shouldAddToHistory := true
+	if len(existingApps) > 0 {
+		hasOfficial := false
+		hasTemporary := false
+		for _, prevApp := range existingApps {
+			if prevApp.CVEID == cveID {
+				if prevApp.RemediationLevel == domain.RemediationLevelOfficialFix {
+					hasOfficial = true
+				}
+				if prevApp.RemediationLevel == domain.RemediationLevelTemporaryFix || prevApp.RemediationLevel == domain.RemediationLevelWorkaround {
+					hasTemporary = true
+				}
+			}
+		}
+
+		if hasOfficial {
+			shouldAddToHistory = false
+		} else if hasTemporary && level == domain.RemediationLevelOfficialFix {
+			shouldAddToHistory = true
+		} else if hasTemporary {
+			shouldAddToHistory = false
+		}
 	}
+
+	if shouldAddToHistory {
+		if err := o.patchPort.SaveApplication(ctx, application); err != nil {
+			return nil, nil, fmt.Errorf("error declarando remediación del contenedor %s: %w", containerID, err)
+		}
+	}
+
 	affected, err := o.findingPort.ApplyRemediationByContainerAndCVE(ctx, containerID, cveID, findingID, factor, status)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error actualizando finding %d del contenedor %s: %w", findingID, containerID, err)

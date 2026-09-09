@@ -449,18 +449,32 @@ func (r *findingRepo) ApplyRemediationByInstallationAndCVE(ctx context.Context, 
 
 func (r *findingRepo) ApplyRemediationByContainerAndCVE(ctx context.Context, containerID, cveID string, findingID int64, remediationFactor float64, status string) ([]int64, error) {
 	query := `
-		MATCH (c:Container {id: $container_id})-[:USES_IMAGE]->(image:ContainerImage)
-		MATCH (image)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability {cve_id: $cve_id})
-		WHERE f.container_id = c.id AND f.image_id = image.id AND f.id = $finding_id
-		SET f.remediation_factor = $remediation_factor, f.status = $status, f.last_seen = $now
-		FOREACH (_ IN CASE WHEN $remediation_factor = 0.0 THEN [1] ELSE [] END |
-			SET f.risk_score = 0.0, f.priority_score = 0.0, f.resolved_at = $now
+		MATCH (c:Container)
+		WHERE c.id = $container_id OR toString(c.id) = toString($container_id)
+		MATCH (c)-[:USES_IMAGE|HAS_FINDING*1..2]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE (v.cve_id = $cve_id OR toUpper(v.cve_id) = toUpper($cve_id))
+		  AND (f.id = $finding_id OR toString(f.id) = toString($finding_id) OR toInteger(f.id) = toInteger($finding_id))
+		SET f.remediation_factor = $remediation_factor,
+		    f.status             = $status,
+		    f.last_seen          = $now,
+		    f.resolved_at        = $now
+		// Si es parche completo, anula el riesgo técnico a 0
+		FOREACH (_ IN CASE WHEN $status = 'PATCHED' OR $remediation_factor = 0.0 THEN [1] ELSE [] END |
+			SET f.risk_score = 0.0
 		)
-		RETURN f.id AS finding_id
+		// Sea parche o mitigación/workaround, la prioridad de parcheo pasa a 0 para que no sea requerida en cola
+		FOREACH (_ IN CASE WHEN $status IN ['PATCHED', 'MITIGATED', 'RESOLVED'] OR $remediation_factor = 0.0 THEN [1] ELSE [] END |
+			SET f.priority_score = 0.0
+		)
+		RETURN DISTINCT f.id AS finding_id
 	`
 	return r.applyRemediationFindingQuery(ctx, query, map[string]any{
-		"container_id": containerID, "cve_id": cveID, "finding_id": findingID,
-		"remediation_factor": remediationFactor, "status": status, "now": time.Now().UTC(),
+		"container_id":       containerID,
+		"cve_id":             cveID,
+		"finding_id":         findingID,
+		"remediation_factor": remediationFactor,
+		"status":             status,
+		"now":                time.Now().UTC(),
 	})
 }
 
@@ -889,11 +903,13 @@ func (r *findingRepo) CloseResolvedFindingsBatch(ctx context.Context, installati
 		  AND v.cve_id IN $cve_ids
 		SET f.remediation_factor = $remediation_factor,
 		    f.status             = $status,
-		    f.last_seen          = $now
-		FOREACH (_ IN CASE WHEN $remediation_factor = 0.0 THEN [1] ELSE [] END |
-		    SET f.risk_score     = 0.0,
-		        f.priority_score = 0.0,
-		        f.resolved_at    = $now
+		    f.last_seen          = $now,
+		    f.resolved_at        = $now
+		FOREACH (_ IN CASE WHEN $status = 'PATCHED' OR $remediation_factor = 0.0 THEN [1] ELSE [] END |
+		    SET f.risk_score     = 0.0
+		)
+		FOREACH (_ IN CASE WHEN $status IN ['PATCHED', 'MITIGATED', 'RESOLVED'] OR $remediation_factor = 0.0 THEN [1] ELSE [] END |
+		    SET f.priority_score = 0.0
 		)
 		RETURN f.id AS finding_id
 	`
