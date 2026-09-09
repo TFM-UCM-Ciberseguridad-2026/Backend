@@ -12,17 +12,16 @@ type patchRepo struct {
 	driver neo4j.DriverWithContext
 }
 
-// SaveApplication declara un parche como aplicado distinguiendo por cve_id para no sobrescribir relaciones.
+// SaveApplication declara un parche como aplicado. Permite que convivan TEMPORARY_FIX y OFFICIAL_FIX para el mismo CVE.
 func (r *patchRepo) SaveApplication(ctx context.Context, a *domain.AppliedPatch) error {
 	query := `
 		MATCH (p:Patch) WHERE p.id = $patch_id OR toInteger(p.id) = toInteger($patch_id) OR toString(p.id) = toString($patch_id)
 		MATCH (target)
 		WHERE ($asset_type = 'CONTAINER' AND target:Container AND (target.id = $container_id OR toString(target.id) = toString($container_id)))
 		   OR ($asset_type <> 'CONTAINER' AND target:SoftwareInstallation AND (target.id = $installation_id OR toString(target.id) = toString($installation_id)))
-		MERGE (p)-[rel:APPLIED_TO {cve_id: $cve_id}]->(target)
+		MERGE (p)-[rel:APPLIED_TO {cve_id: $cve_id, remediation_level: $remediation_level}]->(target)
 		SET rel.applied_at              = $applied_at,
 		    rel.applied_by              = $applied_by,
-		    rel.remediation_level       = $remediation_level,
 		    rel.remediation_factor      = $remediation_factor,
 		    rel.notes                   = $notes,
 		    rel.verified                = $verified,
@@ -90,7 +89,7 @@ func (r *patchRepo) GetAppliedPatchHistoryByEndpoint(ctx context.Context, endpoi
 		         verification_conclusive: coalesce(rel.verification_conclusive, false),
 		         verification_reason: coalesce(rel.verification_reason, ''),
 		         installed_version: coalesce(rel.installed_version, ''),
-		         expected_version: coalesce(rel.expected_version, '')
+		         expected_version: coalesce(rel.expected_version, rel.installed_version, s.version, '')
 		     } ELSE null END) AS raw_patches,
 		     collect(DISTINCT CASE WHEN f IS NOT NULL AND v IS NOT NULL THEN {
 		         finding_id: f.id,
@@ -103,7 +102,7 @@ func (r *patchRepo) GetAppliedPatchHistoryByEndpoint(ctx context.Context, endpoi
 		         applied_at: coalesce(rel.applied_at, f.resolved_at, f.last_seen),
 		         applied_by: coalesce(rel.applied_by, 'operator'),
 		         notes: coalesce(rel.notes, ''),
-		         expected_version: coalesce(rel.expected_version, s.version, '')
+		         expected_version: coalesce(rel.expected_version, rel.installed_version, s.version, '')
 		     } ELSE null END) AS raw_findings
 		WHERE si IS NOT NULL
 		RETURN e.id AS endpoint_id,
