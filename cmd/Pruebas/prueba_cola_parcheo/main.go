@@ -240,7 +240,7 @@ func main() {
 	}
 	parches, _ := orch.GetPatchesForVulnerability(ctx, cveID)
 	if _, _, err := orch.DeclarePatchApplied(ctx, activos[0].instID, cveID, parches[0].PatchID,
-		domain.RemediationLevelOfficialFix, time.Time{}, "diego", ""); err != nil {
+		domain.RemediationLevelOfficialFix, time.Time{}, "diego", "", "2.17.1"); err != nil {
 		log.Fatalf("declaración: %v", err)
 	}
 
