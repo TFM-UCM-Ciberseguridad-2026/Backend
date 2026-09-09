@@ -85,7 +85,7 @@ func (s *ScoutAdapter) ScanImage(ctx context.Context, imageName string) ([]domai
 		outputBytes = s.mockData
 	} else {
 		// Ejecutar Docker Scout con formato SARIF (estándar de seguridad abierto)
-		cmd := exec.CommandContext(ctx, "docker", "scout", "cves", "--platform", "linux/amd64", imageName, "--format", "sarif")
+		cmd := exec.CommandContext(ctx, "docker", "scout", "cves", imageName, "--format", "sarif")
 		var out bytes.Buffer
 		var stderr bytes.Buffer
 		cmd.Stdout = &out
