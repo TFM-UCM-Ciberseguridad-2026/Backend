@@ -1294,7 +1294,7 @@ func (o *Orchestrator) resolvePatchLevel(ctx context.Context, installationID, cv
 			ceiling = domain.RemediationLevelWorkaround
 		}
 	case patch.Official:
-		ceiling = domain.RemediationLevelTemporaryFix
+		ceiling = domain.RemediationLevelOfficialFix
 	}
 
 	return weakerRemediationLevel(requested, ceiling), nil
@@ -1439,7 +1439,7 @@ func (o *Orchestrator) DeclarePatchApplied(
 				for _, fv := range fvs {
 					if fv.Version != "" {
 						cmp, ok := domain.CompareVersions(cleanTargetVer, fv.Version)
-						if ok && cmp >= 0 {
+						if ok && cmp > 0 {
 							resolvedCVEsMap[oldF.CVEID] = true
 							break
 						}
