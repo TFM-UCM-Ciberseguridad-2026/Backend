@@ -129,3 +129,49 @@ func broadcastIPv4(ipNet *net.IPNet) net.IP {
 	}
 	return out
 }
+
+/*
+=== Emparejamiento activo↔red por subred más específica ===
+
+Las redes de un proyecto no son un conjunto plano de rangos disjuntos: se puede declarar
+un supernet 10.0.0.0/16 y, dentro, una subred 10.0.1.0/24. Una IP como 10.0.1.5 cae en
+los dos rangos, y hay que decidir cuál manda en lugar de engancharla a ambos.
+
+La jerarquía NO se almacena: es una función pura de los CIDR, así que se calcula al vuelo
+comparando rangos. Eso evita un segundo origen de verdad que se desincronice al editar un
+CIDR, y hace desaparecer el caso "subred fuera del rango de su supuesto padre": si un rango
+no contiene la IP, sencillamente no es candidato, no hay nada que validar.
+*/
+
+// CIDRSpecificity devuelve el número de bits de host del rango: cuantos menos, más
+// específico es (un /24 IPv4 devuelve 8; un /16, 16).
+//
+// Se cuentan los bits de host y no los de red porque el prefijo por sí solo no es
+// comparable entre familias: un /24 IPv6 abarca 2^104 direcciones y un /24 IPv4 solo 2^8.
+// Los bits de host expresan directamente "el rango más pequeño", que es la regla de
+// desempate, y ordenan bien tanto dentro de una familia como entre las dos.
+func CIDRSpecificity(cidr string) (int, error) {
+	trimmed := strings.TrimSpace(cidr)
+	_, ipNet, err := net.ParseCIDR(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("%w: el CIDR '%s' no es válido", ErrInvalidNetwork, trimmed)
+	}
+	ones, bits := ipNet.Mask.Size()
+	return bits - ones, nil
+}
+
+// CIDRContainsIP indica si la dirección cae dentro del rango. Tolera CIDR no canónicos
+// (10.0.0.1/24 se comporta igual que 10.0.0.0/24) porque en la base hay redes anteriores
+// a NormalizeCIDR, y devuelve false ante cualquier entrada que no se pueda interpretar:
+// un CIDR mal formado no empareja con nada.
+func CIDRContainsIP(cidr, ip string) bool {
+	_, ipNet, err := net.ParseCIDR(strings.TrimSpace(cidr))
+	if err != nil {
+		return false
+	}
+	parsed := net.ParseIP(strings.TrimSpace(ip))
+	if parsed == nil {
+		return false
+	}
+	return ipNet.Contains(parsed)
+}

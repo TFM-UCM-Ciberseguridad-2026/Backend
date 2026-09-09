@@ -315,10 +315,14 @@ func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64
 		if err := o.endpointPort.SaveIPs(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
 			return fmt.Errorf("error guardando IPs del endpoint: %w", err)
 		}
-		if o.networkPort != nil {
-			if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs, projectID); err != nil {
-				return fmt.Errorf("error enlazando endpoint a las redes coincidentes: %w", err)
-			}
+	}
+
+	// El emparejamiento se recalcula aunque el endpoint venga sin IPs: si el alta reutiliza
+	// un ID que ya existía, quedarse dentro del if dejaría vivas las aristas de las IPs
+	// anteriores. Es la misma llamada incondicional que hace UpdateEndpoint.
+	if o.networkPort != nil {
+		if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs, projectID); err != nil {
+			return fmt.Errorf("error enlazando endpoint a las redes coincidentes: %w", err)
 		}
 	}
 
@@ -367,18 +371,46 @@ func (o *Orchestrator) CreateNetwork(ctx context.Context, network *domain.Networ
 		return 0, 0, err
 	}
 
-	linked, err := o.networkPort.LinkMatchingEndpoints(ctx, network.NetworkID, network.CIDR, network.VLANID, scope)
+	// El ancla al proyecto va ANTES de reconciliar. El ámbito se descubre recorriendo el
+	// grafo desde el proyecto, y una red recién guardada todavía no cuelga de él por ningún
+	// lado: si se reconciliara primero, la red nueva no entraría en su propio cálculo y no
+	// emparejaría con nada.
+	if projectID > 0 {
+		if err := o.networkPort.LinkNetworkToProjectIfOrphan(ctx, network.NetworkID, projectID); err != nil {
+			return network.NetworkID, 0, fmt.Errorf("error anclando la red huérfana al proyecto: %w", err)
+		}
+	}
+
+	linked, err := o.reconcileNetworkScope(ctx, scope, network.NetworkID)
 	if err != nil {
 		return network.NetworkID, 0, fmt.Errorf("error enlazando endpoints a la red: %w", err)
 	}
 
-	if projectID > 0 {
-		if err := o.networkPort.LinkNetworkToProjectIfOrphan(ctx, network.NetworkID, projectID); err != nil {
-			return network.NetworkID, linked, fmt.Errorf("error anclando la red huérfana al proyecto: %w", err)
-		}
+	return network.NetworkID, linked, nil
+}
+
+// reconcileNetworkScope recalcula el emparejamiento activo↔red y la jerarquía de subredes
+// de un ámbito de proyecto, y devuelve cuántos activos quedan colgando de la red indicada.
+//
+// El recálculo es del ámbito completo, no solo de la red tocada: al declarar una subred más
+// específica dentro de un rango que ya tenía activos, esos activos se reasignan a la subred.
+// Si solo se recalculara la red nueva se quedarían enganchados también al padre.
+func (o *Orchestrator) reconcileNetworkScope(ctx context.Context, scope []int64, networkID int64) (int, error) {
+	summary, err := o.networkPort.ReconcileProjectNetworkLinks(ctx, scope)
+	if err != nil {
+		return 0, err
 	}
 
-	return network.NetworkID, linked, nil
+	// Las reasignaciones se registran porque desde fuera parecen un cambio espontáneo: el
+	// usuario crea una /24 y ve moverse activos que él no ha tocado.
+	for _, move := range summary.Moves {
+		log.Printf("[redes] '%s' reasignado: %v -> %v", move.AssetName, move.From, move.To)
+	}
+
+	if networkID <= 0 {
+		return 0, nil
+	}
+	return o.networkPort.CountAssetsInNetwork(ctx, networkID)
 }
 
 // ExecuteCPEPipeline ejecuta el pipeline completo de 5 fases para la sugerencia de CPEs
@@ -2779,10 +2811,13 @@ func (o *Orchestrator) AddContainerToEndpoint(ctx context.Context, hostID int64,
 		if err := o.containerPort.SaveIPs(ctx, container.ContainerID, container.IPs); err != nil {
 			return fmt.Errorf("error guardando IPs del contenedor: %w", err)
 		}
-		if o.networkPort != nil {
-			if _, err := o.networkPort.LinkContainerToMatchingNetworks(ctx, container.ContainerID, container.IPs, o.projectIDOfEndpoint(ctx, hostID)); err != nil {
-				return fmt.Errorf("error enlazando contenedor a las redes coincidentes: %w", err)
-			}
+	}
+
+	// Incondicional por el mismo motivo que en el alta de endpoint: un alta que reutiliza
+	// un ID existente tiene que limpiar las aristas de las IPs anteriores.
+	if o.networkPort != nil {
+		if _, err := o.networkPort.LinkContainerToMatchingNetworks(ctx, container.ContainerID, container.IPs, o.projectIDOfEndpoint(ctx, hostID)); err != nil {
+			return fmt.Errorf("error enlazando contenedor a las redes coincidentes: %w", err)
 		}
 	}
 	return nil
@@ -2898,21 +2933,44 @@ func (o *Orchestrator) UpdateNetwork(ctx context.Context, network *domain.Networ
 	if err := o.networkPort.Update(ctx, network); err != nil {
 		return 0, err
 	}
-	linked, err := o.networkPort.LinkMatchingEndpoints(ctx, network.NetworkID, network.CIDR, network.VLANID, scope)
-	if err != nil {
-		return 0, fmt.Errorf("error enlazando endpoints a la red actualizada: %w", err)
-	}
+	// Igual que en CreateNetwork: primero el ancla, luego la reconciliación. Al editar el
+	// CIDR de una red hasta dejarla sin activos, el ancla es lo único que la mantiene
+	// visible en el grafo del proyecto para poder volver a corregirla.
 	if projectID > 0 {
 		if err := o.networkPort.LinkNetworkToProjectIfOrphan(ctx, network.NetworkID, projectID); err != nil {
-			return linked, fmt.Errorf("error anclando la red huérfana al proyecto: %w", err)
+			return 0, fmt.Errorf("error anclando la red huérfana al proyecto: %w", err)
 		}
+	}
+	linked, err := o.reconcileNetworkScope(ctx, scope, network.NetworkID)
+	if err != nil {
+		return 0, fmt.Errorf("error enlazando endpoints a la red actualizada: %w", err)
 	}
 	return linked, nil
 }
 
-// DeleteNetwork elimina una Red por su ID.
+// DeleteNetwork elimina una Red por su ID y recalcula el ámbito que la contenía.
+//
+// El recálculo es imprescindible: al borrar una subred específica, los activos que colgaban
+// de ella tienen que volver al rango padre que los sigue conteniendo. El ámbito se resuelve
+// ANTES del borrado, porque después la red ya no tiene proyecto del que colgar.
 func (o *Orchestrator) DeleteNetwork(ctx context.Context, networkID int64) error {
-	return o.networkPort.DeleteByID(ctx, networkID)
+	var scope []int64
+	if o.infraPort != nil {
+		owners, err := o.infraPort.GetProjectIDsByNetwork(ctx, networkID)
+		if err != nil {
+			return fmt.Errorf("error resolviendo el proyecto de la red antes de borrarla: %w", err)
+		}
+		scope = owners
+	}
+
+	if err := o.networkPort.DeleteByID(ctx, networkID); err != nil {
+		return err
+	}
+
+	if _, err := o.reconcileNetworkScope(ctx, scope, 0); err != nil {
+		return fmt.Errorf("red borrada, pero falló el recálculo de las relaciones activo-red: %w", err)
+	}
+	return nil
 }
 
 // UpdateHardware actualiza las especificaciones de Hardware.

@@ -108,12 +108,26 @@ type NetworkPort interface {
 	Update(ctx context.Context, network *domain.Network) error
 	GetByID(ctx context.Context, id int64) (*domain.Network, error)
 	DeleteByID(ctx context.Context, id int64) error
-	// Los tres Link* reciben el ámbito de proyecto porque el emparejamiento es por CIDR y
-	// VLAN: sin acotarlo, dos proyectos que usen el mismo direccionamiento privado (algo
-	// permitido desde que la unicidad es por proyecto) se enlazarían los activos entre sí.
-	LinkMatchingEndpoints(ctx context.Context, networkID int64, cidr string, vlanID int64, projectIDs []int64) (int, error)
+	// El emparejamiento activo↔red va siempre acotado a un ámbito de proyecto: sin acotarlo,
+	// dos proyectos que usen el mismo direccionamiento privado (algo permitido desde que la
+	// unicidad es por proyecto) se enlazarían los activos entre sí, y la jerarquía de
+	// subredes se calcularía mezclando redes de proyectos distintos. Una lista de proyectos
+	// vacía significa "redes sin proyecto", que es un ámbito más, no un comodín.
+
+	// ReconcileProjectNetworkLinks recalcula el ámbito entero: a qué red va cada activo y
+	// qué red es subred de cuál (CONTAINS_SUBNET). Se dispara al crear, editar o borrar una
+	// red, porque declarar una subred más específica reasigna activos que ya colgaban del
+	// rango padre.
+	ReconcileProjectNetworkLinks(ctx context.Context, projectIDs []int64) (domain.NetworkReconciliation, error)
+
+	// Los dos Link* son el camino de un solo activo (alta o edición de endpoint/contenedor):
+	// recolocan ese activo y no tocan la jerarquía, porque las redes no han cambiado.
 	LinkEndpointToMatchingNetworks(ctx context.Context, endpointID int64, ips []domain.EndpointIP, projectID int64) (int, error)
 	LinkContainerToMatchingNetworks(ctx context.Context, containerID string, ips []domain.EndpointIP, projectID int64) (int, error)
+
+	// CountAssetsInNetwork es lo que la API devuelve como `linked_endpoints`.
+	CountAssetsInNetwork(ctx context.Context, networkID int64) (int, error)
+
 	LinkNetworkToProjectIfOrphan(ctx context.Context, networkID int64, projectID int64) error
 }
 
