@@ -456,11 +456,15 @@ func (r *findingRepo) ApplyRemediationByContainerAndCVE(ctx context.Context, con
 		  AND (f.id = $finding_id OR toString(f.id) = toString($finding_id) OR toInteger(f.id) = toInteger($finding_id))
 		SET f.remediation_factor = $remediation_factor,
 		    f.status             = $status,
-		    f.last_seen          = $now
-		FOREACH (_ IN CASE WHEN $remediation_factor = 0.0 OR $status = 'PATCHED' THEN [1] ELSE [] END |
-			SET f.risk_score     = 0.0,
-			    f.priority_score = 0.0,
-			    f.resolved_at    = $now
+		    f.last_seen          = $now,
+		    f.resolved_at        = $now
+		// Si es parche completo, anula el riesgo técnico a 0
+		FOREACH (_ IN CASE WHEN $status = 'PATCHED' OR $remediation_factor = 0.0 THEN [1] ELSE [] END |
+			SET f.risk_score = 0.0
+		)
+		// Sea parche o mitigación/workaround, la prioridad de parcheo pasa a 0 para que no sea requerida en cola
+		FOREACH (_ IN CASE WHEN $status IN ['PATCHED', 'MITIGATED', 'RESOLVED'] OR $remediation_factor = 0.0 THEN [1] ELSE [] END |
+			SET f.priority_score = 0.0
 		)
 		RETURN f.id AS finding_id
 	`
@@ -899,11 +903,13 @@ func (r *findingRepo) CloseResolvedFindingsBatch(ctx context.Context, installati
 		  AND v.cve_id IN $cve_ids
 		SET f.remediation_factor = $remediation_factor,
 		    f.status             = $status,
-		    f.last_seen          = $now
-		FOREACH (_ IN CASE WHEN $remediation_factor = 0.0 THEN [1] ELSE [] END |
-		    SET f.risk_score     = 0.0,
-		        f.priority_score = 0.0,
-		        f.resolved_at    = $now
+		    f.last_seen          = $now,
+		    f.resolved_at        = $now
+		FOREACH (_ IN CASE WHEN $status = 'PATCHED' OR $remediation_factor = 0.0 THEN [1] ELSE [] END |
+		    SET f.risk_score     = 0.0
+		)
+		FOREACH (_ IN CASE WHEN $status IN ['PATCHED', 'MITIGATED', 'RESOLVED'] OR $remediation_factor = 0.0 THEN [1] ELSE [] END |
+		    SET f.priority_score = 0.0
 		)
 		RETURN f.id AS finding_id
 	`

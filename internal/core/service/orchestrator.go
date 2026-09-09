@@ -1287,16 +1287,12 @@ func (o *Orchestrator) resolvePatchLevel(ctx context.Context, installationID, cv
 	case patch.Official && fixedVersionIsValid(patch.FixedVersion):
 		ceiling = domain.RemediationLevelOfficialFix
 	// Sin aval del fabricante hay que comprobar que la instalación sube a la versión.
-
 	case fixedVersionIsValid(patch.FixedVersion):
-		// Para contenedores (installationID == ""), contar con versión corregida válida es suficiente para OFFICIAL_FIX
-		if installationID == "" || o.versionSatisfiesFix(ctx, installationID, targetVersion, patch.FixedVersion) {
+		if o.versionSatisfiesFix(ctx, installationID, targetVersion, patch.FixedVersion) {
 			ceiling = domain.RemediationLevelOfficialFix
 		} else {
 			ceiling = domain.RemediationLevelWorkaround
 		}
-	case patch.Official || referenceType == "PATCH" || referenceType == "FIX" || referenceType == "FIXED_VERSION":
-		ceiling = domain.RemediationLevelOfficialFix
 	case patch.Official:
 		ceiling = domain.RemediationLevelOfficialFix
 	}
@@ -1626,6 +1622,9 @@ func (o *Orchestrator) DeclarePatchAppliedToContainer(
 	if findingID <= 0 {
 		return nil, nil, fmt.Errorf("finding_id debe ser positivo")
 	}
+	if !level.IsValid() {
+		return nil, nil, fmt.Errorf("nivel de remediación no reconocido: %q", level)
+	}
 	if appliedAt.IsZero() {
 		appliedAt = time.Now().UTC()
 	}
@@ -1634,42 +1633,59 @@ func (o *Orchestrator) DeclarePatchAppliedToContainer(
 		if err != nil {
 			return nil, nil, fmt.Errorf("error recuperando parches de %s: %w", cveID, err)
 		}
-		if len(patches) > 0 {
-			patchID = patches[0].PatchID
-		} else {
-			patchID, _ = o.nextNodeID(ctx, "Patch")
+		if len(patches) == 0 {
+			return nil, nil, fmt.Errorf("no hay ningún parche registrado para %s", cveID)
 		}
+		if len(patches) > 1 {
+			return nil, nil, fmt.Errorf("hay %d parches registrados para %s: indica patch_id", len(patches), cveID)
+		}
+		patchID = patches[0].PatchID
 	}
 
-	// Al aplicar un parche en un contenedor desde la cola, la remediación es oficial
-	level = domain.RemediationLevelOfficialFix
-	factor := RemediationFactorForLevel(level) // 0.0
-	status := "PATCHED"
+	// El contenedor no expone instalación ni versión destino: sin comprobación de versión.
+	level, err := o.resolvePatchLevel(ctx, "", cveID, patchID, "", level)
+	if err != nil {
+		return nil, nil, err
+	}
 
+	factor := RemediationFactorForLevel(level)
+	status := "OPEN"
+	if level == domain.RemediationLevelOfficialFix {
+		status = "PATCHED"
+	}
+	if level == domain.RemediationLevelTemporaryFix || level == domain.RemediationLevelWorkaround {
+		status = "MITIGATED"
+	}
 	application := &domain.AppliedPatch{
-		PatchID:           patchID,
-		AssetType:         "CONTAINER",
-		AssetID:           containerID,
-		ContainerID:       containerID,
-		FindingID:         findingID,
-		CVEID:             cveID,
-		AppliedAt:         appliedAt.UTC(),
-		AppliedBy:         appliedBy,
-		RemediationLevel:  level,
-		RemediationFactor: factor,
-		Notes:             notes,
-		Verification:      domain.PatchVerification{Reason: domain.VerificationNotApplicable},
+		PatchID: patchID, AssetType: "CONTAINER", AssetID: containerID, ContainerID: containerID,
+		FindingID: findingID, CVEID: cveID, AppliedAt: appliedAt.UTC(), AppliedBy: appliedBy,
+		RemediationLevel: level, RemediationFactor: factor, Notes: notes,
+		Verification: domain.PatchVerification{Reason: domain.VerificationNotApplicable},
 	}
 
 	// Comprobar histórico del contenedor para evitar duplicados
 	existingApps, _ := o.patchPort.GetApplicationsByContainer(ctx, containerID)
 	shouldAddToHistory := true
 	if len(existingApps) > 0 {
+		hasOfficial := false
+		hasTemporary := false
 		for _, prevApp := range existingApps {
-			if prevApp.CVEID == cveID && prevApp.RemediationLevel == domain.RemediationLevelOfficialFix {
-				shouldAddToHistory = false
-				break
+			if prevApp.CVEID == cveID {
+				if prevApp.RemediationLevel == domain.RemediationLevelOfficialFix {
+					hasOfficial = true
+				}
+				if prevApp.RemediationLevel == domain.RemediationLevelTemporaryFix || prevApp.RemediationLevel == domain.RemediationLevelWorkaround {
+					hasTemporary = true
+				}
 			}
+		}
+
+		if hasOfficial {
+			shouldAddToHistory = false
+		} else if hasTemporary && level == domain.RemediationLevelOfficialFix {
+			shouldAddToHistory = true
+		} else if hasTemporary {
+			shouldAddToHistory = false
 		}
 	}
 
@@ -1683,22 +1699,42 @@ func (o *Orchestrator) DeclarePatchAppliedToContainer(
 	if err != nil {
 		return nil, nil, fmt.Errorf("error actualizando finding %d del contenedor %s: %w", findingID, containerID, err)
 	}
-
-	var remediationAt *time.Time = &application.AppliedAt
-	_, _ = o.remediationPort.ApplyByContainerAndCVE(ctx, containerID, cveID, findingID, level.RemediationStatus(), remediationAt)
-
-	if o.riskPort != nil {
-		_, _ = o.ComputeContainerRisk(ctx, containerID)
-		endpointID, _ := o.riskPort.GetEndpointIDByContainer(ctx, containerID)
-		if endpointID != 0 {
-			_ = o.ComputeEndpointRisk(ctx, endpointID)
-			projectID, _ := o.riskPort.GetProjectIDByEndpoint(ctx, endpointID)
-			if projectID != 0 {
-				_ = o.AggregateProjectRiskFromCurrentEndpointScores(ctx, projectID)
-			}
+	if len(affected) != 1 || affected[0] != findingID {
+		return nil, affected, fmt.Errorf("el finding %d no pertenece al contenedor %s y al CVE %s", findingID, containerID, cveID)
+	}
+	var remediationAt *time.Time
+	if level != domain.RemediationLevelUnavailable {
+		value := application.AppliedAt
+		remediationAt = &value
+	}
+	if _, err := o.remediationPort.ApplyByContainerAndCVE(ctx, containerID, cveID, findingID, level.RemediationStatus(), remediationAt); err != nil {
+		return nil, affected, fmt.Errorf("error sincronizando remediación contextual del finding %d: %w", findingID, err)
+	}
+	if o.riskPort == nil {
+		return application, affected, nil
+	}
+	if _, err := o.ComputeContainerRisk(ctx, containerID); err != nil {
+		return application, affected, fmt.Errorf("remediación guardada, pero falló el riesgo del contenedor %s: %w", containerID, err)
+	}
+	endpointID, err := o.riskPort.GetEndpointIDByContainer(ctx, containerID)
+	if err != nil {
+		return application, affected, fmt.Errorf("falló localización del endpoint del contenedor %s: %w", containerID, err)
+	}
+	if endpointID == 0 {
+		return application, affected, nil
+	}
+	if err := o.ComputeEndpointRisk(ctx, endpointID); err != nil {
+		return application, affected, fmt.Errorf("falló recálculo del endpoint %d: %w", endpointID, err)
+	}
+	projectID, err := o.riskPort.GetProjectIDByEndpoint(ctx, endpointID)
+	if err != nil {
+		return application, affected, fmt.Errorf("falló localización del proyecto del endpoint %d: %w", endpointID, err)
+	}
+	if projectID != 0 {
+		if err := o.AggregateProjectRiskFromCurrentEndpointScores(ctx, projectID); err != nil {
+			return application, affected, fmt.Errorf("falló recálculo del proyecto %d: %w", projectID, err)
 		}
 	}
-
 	return application, affected, nil
 }
 
