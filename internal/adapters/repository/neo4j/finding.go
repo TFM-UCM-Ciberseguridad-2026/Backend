@@ -466,7 +466,7 @@ func (r *findingRepo) ApplyRemediationByContainerAndCVE(ctx context.Context, con
 		FOREACH (_ IN CASE WHEN $status IN ['PATCHED', 'MITIGATED', 'RESOLVED'] OR $remediation_factor = 0.0 THEN [1] ELSE [] END |
 			SET f.priority_score = 0.0
 		)
-		RETURN f.id AS finding_id
+		RETURN DISTINCT f.id AS finding_id
 	`
 	return r.applyRemediationFindingQuery(ctx, query, map[string]any{
 		"container_id":       containerID,
