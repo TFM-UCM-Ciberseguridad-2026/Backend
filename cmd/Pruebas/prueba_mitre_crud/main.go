@@ -81,7 +81,7 @@ func main() {
 	fmt.Println("Relación USES (ThreatActor -> TTP) creada")
 
 	// Relacionar TTP con Vulnerability por la misma vía que usa el pipeline real
-	if err := vulnRepo.LinkTTPsToVulnerability(ctx, "CVE-2025-0001", "", []string{"T1059"}, "high", "capec_static"); err != nil {
+	if _, err := vulnRepo.LinkTTPsToVulnerability(ctx, "CVE-2025-0001", "", []string{"T1059"}, "high", "capec_static"); err != nil {
 		log.Fatalf("Error relacionando Vulnerabilidad con TTP: %v", err)
 	}
 	fmt.Println("Relación MAPS_TO (Vulnerability -> TTP) creada")

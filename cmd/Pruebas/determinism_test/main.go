@@ -13,6 +13,7 @@ import (
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/provider/ollama"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/config"
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 )
 
 type runDetail struct {
@@ -101,12 +102,18 @@ func main() {
 		fmt.Printf("\n=========================================\n")
 		fmt.Printf("[TEST] Running determinism test for %s (%s)\n", tc.CVE, tc.CWE)
 
+		req := domain.TTPMappingRequest{
+			CWE:         tc.CWE,
+			Description: tc.Description,
+			CVSSVector:  tc.CVSSVector,
+		}
+
 		// A. CORRIDA DE CONTROL
 		// Hacemos una llamada warm-up
-		_, _, _ = client.MapEnrichedToTTPRaw(ctx, tc.CWE, tc.Description, tc.CVSSVector)
+		_, _, _ = client.MapEnrichedToTTPRaw(ctx, req)
 
 		controlStart := time.Now()
-		controlTTPs, controlRaw, err := client.MapEnrichedToTTPRaw(ctx, tc.CWE, tc.Description, tc.CVSSVector)
+		controlTTPs, controlRaw, err := client.MapEnrichedToTTPRaw(ctx, req)
 		controlDuration := time.Since(controlStart).Milliseconds()
 		if err != nil {
 			log.Fatalf("[TEST] Error in control run for %s: %v", tc.CVE, err)
@@ -124,7 +131,7 @@ func main() {
 		for attempt := 1; attempt <= K; attempt++ {
 			// No hace falta InvalidateCache porque la consulta es enriquecida (no cachea)
 			start := time.Now()
-			ttps, raw, err := client.MapEnrichedToTTPRaw(ctx, tc.CWE, tc.Description, tc.CVSSVector)
+			ttps, raw, err := client.MapEnrichedToTTPRaw(ctx, req)
 			duration := time.Since(start).Milliseconds()
 
 			if err != nil {

@@ -1,4 +1,4 @@
-package neo4j
+package prueba_ttp_mapping
 
 import (
 	"context"
@@ -13,7 +13,7 @@ Pruebas de integración sobre el grafo real. Solo se ejecutan si se apunta a una
 instancia de Neo4j:
 
 	NEO4J_TEST_URI=bolt://localhost:7687 NEO4J_TEST_USER=neo4j NEO4J_TEST_PASS=password \
-	  go test ./internal/adapters/repository/neo4j/ -run Grafo -v
+	  go test ./cmd/Pruebas/prueba_ttp_mapping/ -run Grafo -v
 
 Son pruebas de LECTURA: no escriben ni borran nada. Comprueban invariantes que
 deberían cumplirse en cualquier grafo poblado por el pipeline TTP, y que en el

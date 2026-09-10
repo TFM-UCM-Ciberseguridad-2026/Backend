@@ -1,4 +1,4 @@
-package provider
+package prueba_mitre_attack
 
 import (
 	"compress/gzip"
@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/adapters/provider"
 )
 
 /*
@@ -17,7 +19,7 @@ Las pruebas de parseo usan bundles mínimos escritos a mano. La prueba de
 cobertura (TestBundleRealContieneLaFamiliaT1562) necesita el bundle oficial
 completo y solo se ejecuta si se le indica dónde está:
 
-	MITRE_BUNDLE=/ruta/enterprise-attack.json go test ./internal/adapters/provider/ -run T1562 -v
+	MITRE_BUNDLE=/ruta/enterprise-attack.json go test ./cmd/Pruebas/prueba_mitre_attack/ -run T1562 -v
 
 Existe porque en el grafo del entorno de pruebas faltaba la familia T1562
 ("Impair Defenses") entera —técnica padre y sus 13 subtécnicas—, mientras que
@@ -28,14 +30,14 @@ simplemente está desactualizado.
 
 // sirveBundle levanta un servidor que devuelve el JSON indicado, y construye un
 // provider apuntado a él.
-func sirveBundle(t *testing.T, cuerpo string) *MitreAttackSTIXProvider {
+func sirveBundle(t *testing.T, cuerpo string) *provider.MitreAttackSTIXProvider {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(cuerpo))
 	}))
 	t.Cleanup(srv.Close)
-	return NewMitreAttackSTIXProvider(srv.URL, 30)
+	return provider.NewMitreAttackSTIXProvider(srv.URL, 30)
 }
 
 func TestSeIgnoranTecnicasDeprecadasYRevocadas(t *testing.T) {
@@ -49,12 +51,12 @@ func TestSeIgnoranTecnicasDeprecadasYRevocadas(t *testing.T) {
 		 "external_references":[{"source_name":"mitre-attack","external_id":"T3000"}]}
 	]}`
 
-	ttps, _, _, err := sirveBundle(t, bundle).FetchATTACKBundle(context.Background())
+	catalog, err := sirveBundle(t, bundle).FetchATTACKBundle(context.Background())
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
-	if len(ttps) != 1 || ttps[0].TTPID != "T1000" {
-		t.Fatalf("esperada solo T1000, obtenido %+v", ttps)
+	if len(catalog.TTPs) != 1 || catalog.TTPs[0].TTPID != "T1000" {
+		t.Fatalf("esperada solo T1000, obtenido %+v", catalog.TTPs)
 	}
 }
 
@@ -66,12 +68,12 @@ func TestSeIgnoranReferenciasDeOtrasFuentes(t *testing.T) {
 		 "external_references":[{"source_name":"capec","external_id":"CAPEC-66"}]}
 	]}`
 
-	ttps, _, _, err := sirveBundle(t, bundle).FetchATTACKBundle(context.Background())
+	catalog, err := sirveBundle(t, bundle).FetchATTACKBundle(context.Background())
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
-	if len(ttps) != 0 {
-		t.Errorf("no debia ingerirse ninguna TTP, obtenido %+v", ttps)
+	if len(catalog.TTPs) != 0 {
+		t.Errorf("no debia ingerirse ninguna TTP, obtenido %+v", catalog.TTPs)
 	}
 }
 
@@ -88,27 +90,27 @@ func TestSeConservanLasTacticasMultiples(t *testing.T) {
 		   {"kill_chain_name":"mitre-attack","phase_name":"initial-access"}]}
 	]}`
 
-	ttps, _, _, err := sirveBundle(t, bundle).FetchATTACKBundle(context.Background())
+	catalog, err := sirveBundle(t, bundle).FetchATTACKBundle(context.Background())
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
-	if len(ttps) != 1 {
-		t.Fatalf("esperada 1 TTP, obtenidas %d", len(ttps))
+	if len(catalog.TTPs) != 1 {
+		t.Fatalf("esperada 1 TTP, obtenidas %d", len(catalog.TTPs))
 	}
 	for _, tactica := range []string{"persistence", "privilege-escalation", "initial-access"} {
-		if !strings.Contains(ttps[0].Tactic, tactica) {
-			t.Errorf("la tactica %q se perdio; Tactic=%q", tactica, ttps[0].Tactic)
+		if !strings.Contains(catalog.TTPs[0].Tactic, tactica) {
+			t.Errorf("la tactica %q se perdio; Tactic=%q", tactica, catalog.TTPs[0].Tactic)
 		}
 	}
 }
 
 func TestBundleVacioNoEsError(t *testing.T) {
-	ttps, actors, rels, err := sirveBundle(t, `{"objects":[]}`).FetchATTACKBundle(context.Background())
+	catalog, err := sirveBundle(t, `{"objects":[]}`).FetchATTACKBundle(context.Background())
 	if err != nil {
 		t.Fatalf("error inesperado: %v", err)
 	}
-	if len(ttps) != 0 || len(actors) != 0 || len(rels) != 0 {
-		t.Errorf("se esperaba todo vacio: %d/%d/%d", len(ttps), len(actors), len(rels))
+	if len(catalog.TTPs) != 0 || len(catalog.Actors) != 0 || len(catalog.Relations) != 0 {
+		t.Errorf("se esperaba todo vacio: %d/%d/%d", len(catalog.TTPs), len(catalog.Actors), len(catalog.Relations))
 	}
 }
 
@@ -118,7 +120,7 @@ func TestStatusNoOKEsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, _, err := NewMitreAttackSTIXProvider(srv.URL, 30).FetchATTACKBundle(context.Background())
+	_, err := provider.NewMitreAttackSTIXProvider(srv.URL, 30).FetchATTACKBundle(context.Background())
 	if err == nil {
 		t.Fatal("se esperaba error con status 404")
 	}
@@ -158,10 +160,11 @@ func TestBundleRealExcluyeLaFamiliaT1562Revocada(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ttps, _, _, err := NewMitreAttackSTIXProvider(srv.URL, 300).FetchATTACKBundle(context.Background())
+	catalog, err := provider.NewMitreAttackSTIXProvider(srv.URL, 300).FetchATTACKBundle(context.Background())
 	if err != nil {
 		t.Fatalf("error parseando el bundle real: %v", err)
 	}
+	ttps := catalog.TTPs
 	t.Logf("el ingestor extrajo %d TTPs vigentes del bundle oficial", len(ttps))
 
 	presentes := make(map[string]string, len(ttps))
