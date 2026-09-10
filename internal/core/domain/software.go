@@ -32,3 +32,9 @@ type Software struct {
 	CPEStatus   string     `json:"cpe_status"`
 	URL         string     `json:"url,omitempty"`
 }
+
+// SoftwareInstallationItem representa un elemento de instalación de software asociado a un id de software.
+type SoftwareInstallationItem struct {
+	InstallationID string `json:"installation_id"`
+	SoftwareID     int64  `json:"software_id"`
+}
