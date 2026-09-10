@@ -14,8 +14,14 @@ La regla, en orden:
 
  1. Una red sin CIDR válido no empareja con nada. Antes, guardar la red enganchaba por VLAN
     ignorando el rango, lo que dejó en la base activos colgando de redes con CIDR inválido.
- 2. La VLAN filtra: si la red declara vlan_id > 0, la IP tiene que traer esa misma VLAN.
-    Una red con vlan_id = 0 no filtra por VLAN.
+ 2. La VLAN tiene que coincidir exactamente, y el 0 no es un comodín: es la VLAN nativa,
+    la de las IPs sin etiquetar. Una red en la VLAN 102 solo empareja con IPs de la 102, y
+    una red con vlan_id = 0 solo con IPs que tampoco traigan VLAN.
+    Antes el 0 no filtraba, y eso juntaba en una misma red activos de VLANs distintas: un
+    /16 declarado con vlan_id = 0 recogía por igual IPs de la VLAN 2 y de la 3, que
+    acababan colgando del mismo nodo Network y por tanto adyacentes en el grafo y en las
+    rutas de ataque, cuando en la realidad están en dominios de broadcast separados y no se
+    alcanzan sin pasar por un router.
  3. Entre las redes supervivientes que contienen la IP gana la más específica (el rango más
     pequeño). Empate exacto -> el id menor, para que el resultado sea estable.
  4. Se resuelve IP por IP y se unen los ganadores: un activo multi-homed sigue conectado a
@@ -45,8 +51,10 @@ func MatchIPToNetwork(ip EndpointIP, candidates []Network) (NetworkMatch, bool) 
 
 	var winners []scored
 	for _, nw := range candidates {
-		// Regla 2: la VLAN de la red, si la declara, tiene que coincidir con la de la IP.
-		if nw.VLANID > 0 && ip.VLANID != nw.VLANID {
+		// Regla 2: la VLAN de la red y la de la IP tienen que ser la misma, sin excepción
+		// para el 0. Que la IP caiga dentro del rango no basta: si no comparten dominio de
+		// broadcast, el activo no pertenece a esa red.
+		if ip.VLANID != nw.VLANID {
 			continue
 		}
 		// Regla 1 + contención. CIDRSpecificity y CIDRContainsIP rechazan por su cuenta

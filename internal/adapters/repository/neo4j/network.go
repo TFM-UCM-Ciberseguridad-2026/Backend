@@ -256,8 +256,8 @@ const assetsInScopeQuery = `
 		MATCH (p)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(e:Container) RETURN e
 	}
 	WITH DISTINCT e
-	MATCH (e)-[:HAS_IP]->(ip:IPAddress)
-	WITH e, collect({ip: ip.ip, vlan_id: ip.vlan_id}) AS ips
+	OPTIONAL MATCH (e)-[:HAS_IP]->(ip:IPAddress)
+	WITH e, [x IN collect(CASE WHEN ip IS NULL THEN null ELSE {ip: ip.ip, vlan_id: ip.vlan_id} END) WHERE x IS NOT NULL] AS ips
 	OPTIONAL MATCH (e)-[:CONNECTED_TO]->(n:Network)
 	RETURN toString(e.id) AS asset_id,
 	       coalesce(e.hostname, e.name, toString(e.id)) AS asset_name,
@@ -271,8 +271,8 @@ const orphanAssetsInScopeQuery = `
 	WHERE (e:Endpoint OR e:Container)
 	  AND NOT EXISTS { MATCH (:Project)-[:HAS_ENDPOINT]->(e) }
 	  AND NOT EXISTS { MATCH (:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(e) }
-	MATCH (e)-[:HAS_IP]->(ip:IPAddress)
-	WITH e, collect({ip: ip.ip, vlan_id: ip.vlan_id}) AS ips
+	OPTIONAL MATCH (e)-[:HAS_IP]->(ip:IPAddress)
+	WITH e, [x IN collect(CASE WHEN ip IS NULL THEN null ELSE {ip: ip.ip, vlan_id: ip.vlan_id} END) WHERE x IS NOT NULL] AS ips
 	OPTIONAL MATCH (e)-[:CONNECTED_TO]->(n:Network)
 	RETURN toString(e.id) AS asset_id,
 	       coalesce(e.hostname, e.name, toString(e.id)) AS asset_name,
@@ -281,8 +281,14 @@ const orphanAssetsInScopeQuery = `
 	       [x IN collect(n.id) WHERE x IS NOT NULL | toString(x)] AS current_networks
 `
 
-// loadAssetsInScope carga los activos del ámbito que tienen alguna IP declarada. Un activo
-// sin IPs no puede emparejar con nada, así que no entra en el cálculo.
+// loadAssetsInScope carga TODOS los activos del ámbito, tengan IPs o no.
+//
+// Los que no tienen ninguna IP importan precisamente porque no pueden emparejar con nada:
+// si se quedan fuera del cálculo, el reconciliador no genera un plan para ellos y sus
+// CONNECTED_TO viejos no se borran nunca, porque el borrado solo actúa sobre los activos
+// que sí tienen plan. Así es como en la base quedaron activos sin una sola IP colgando de
+// dos redes de VLANs distintas, haciendo de puente entre ellas en el grafo. Ahora entran
+// con la lista de IPs vacía, el emparejamiento les asigna cero redes y sus aristas caen.
 func (r *networkRepo) loadAssetsInScope(ctx context.Context, projectIDs []int64) ([]scopedAsset, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
