@@ -245,12 +245,16 @@ func (r *projectRepo) ExportGraph(ctx context.Context, id int64) (*domain.GraphD
 	// <FIXES se recorre hacia atrás porque la arista va (:Patch)-[:FIXES]->(:Vulnerability):
 	// desde la vulnerabilidad hay que ir en sentido contrario para alcanzar el parche.
 	// Sin ella los nodos Patch no salían en el export y el informe no podía listarlos.
+	// IMPORTANTE: FIXES> no debe incluirse; de lo contrario, al alcanzar un Patch que resuelve
+	// múltiples CVEs globales, el recorrido saltaría hacia adelante incorporando al export
+	// CVEs adicionales que no están presentes en los activos de este proyecto.
+	// <APPLIED_TO permite alcanzar parches declarados sobre instalaciones o contenedores.
 	query := `
 		MATCH (p:Project)
 		WHERE toString(p.id) = toString($id) OR elementId(p) = toString($id)
 		CALL apoc.path.subgraphAll(p, {
 			maxLevel: 10,
-			relationshipFilter: "HAS_ENDPOINT>|CONTAINS_NETWORK>|HAS_IP>|HAS_HARDWARE>|CONNECTED_TO>|HAS_INSTALLATION>|INSTANCE_OF>|HOSTS>|USES_IMAGE>|HAS_FINDING>|OF_VULNERABILITY>|HAS_EXPLOIT>|HAS_REMEDIATION>|USES_PATCH>|FIXES>|HAS_CWE>|HAS_WEAKNESS>|MAPS_TO>|<FIXES|<MAPS_TO_CWE|<MAPS_TO_TTP|<USES|<BELONGS_TO|INVOLVES>"
+			relationshipFilter: "HAS_ENDPOINT>|CONTAINS_NETWORK>|HAS_IP>|HAS_HARDWARE>|CONNECTED_TO>|HAS_INSTALLATION>|INSTANCE_OF>|HOSTS>|USES_IMAGE>|HAS_FINDING>|OF_VULNERABILITY>|HAS_EXPLOIT>|HAS_REMEDIATION>|USES_PATCH>|HAS_CWE>|HAS_WEAKNESS>|MAPS_TO>|<FIXES|<APPLIED_TO|<MAPS_TO_CWE|<MAPS_TO_TTP|<USES|<BELONGS_TO|INVOLVES>"
 		}) YIELD nodes, relationships
 		
 		WITH 
