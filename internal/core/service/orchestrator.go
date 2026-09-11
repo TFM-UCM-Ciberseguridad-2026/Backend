@@ -1457,6 +1457,12 @@ func (o *Orchestrator) DeclarePatchApplied(
 	// 1. Obtener TODOS los findings actualmente ABIERTOS en esta instalación
 	initialOpenFindings, _ := o.findingPort.GetOpenFindingsByInstallation(ctx, installationID)
 
+	// Crear set de búsqueda rápida para validar que solo operamos sobre findings no resueltos
+	openCVEsSet := make(map[string]bool, len(initialOpenFindings))
+	for _, f := range initialOpenFindings {
+		openCVEsSet[f.CVEID] = true
+	}
+
 	// 2. Resolver o generar patchID si no viene dado
 	if patchID == 0 {
 		patches, err := o.patchPort.GetByVulnerability(ctx, cveID)
@@ -1489,12 +1495,15 @@ func (o *Orchestrator) DeclarePatchApplied(
 
 	remediationFactor := RemediationFactorForLevel(level)
 
-	// Mapa acumulativo de CVEs resueltas por esta operación
+	// Mapa acumulativo de CVEs que se van a resolver en esta operación concreta
 	resolvedCVEsMap := make(map[string]bool)
-	resolvedCVEsMap[cveID] = true
+	// Solo incluimos el cveID disparador si estaba abierto o si no hay lista previa
+	if openCVEsSet[cveID] || len(initialOpenFindings) == 0 {
+		resolvedCVEsMap[cveID] = true
+	}
 
 	// 3. Regla A: Comparación de versión semántica (cleanTargetVer >= fixed_version)
-	// Se ejecuta siempre que haya una nueva versión, sea oficial o workaround
+	// Se evalúa ÚNICAMENTE sobre la pool de vulnerabilidades abiertas
 	if cleanTargetVer != "" {
 		for _, oldF := range initialOpenFindings {
 			if oldF.FixedVersion != "" {
@@ -1502,7 +1511,7 @@ func (o *Orchestrator) DeclarePatchApplied(
 				for _, fv := range fvs {
 					if fv.Version != "" {
 						cmp, ok := domain.CompareVersions(cleanTargetVer, fv.Version)
-						if ok && cmp > 0 {
+						if ok && cmp >= 0 {
 							resolvedCVEsMap[oldF.CVEID] = true
 							break
 						}
@@ -1513,7 +1522,6 @@ func (o *Orchestrator) DeclarePatchApplied(
 	}
 
 	// 4. Actualizar versión en el nodo Software y consultar nuevo CPE en NVD
-	// Se ejecuta siempre que haya cleanTargetVer (eliminada la condición que exigía OfficialFix)
 	if cleanTargetVer != "" {
 		software, err := o.softwareInstPort.GetInstalledSoftware(ctx, installationID)
 		if err == nil && software != nil {
@@ -1532,7 +1540,7 @@ func (o *Orchestrator) DeclarePatchApplied(
 						newScanCVEs[v.CVEID] = true
 					}
 
-					// Cualquier CVE anterior que ya NO esté en el nuevo escaneo se considera resuelto
+					// Cualquier CVE abierta que ya NO esté presente en la nueva versión se resuelve
 					for _, oldF := range initialOpenFindings {
 						if !newScanCVEs[oldF.CVEID] {
 							resolvedCVEsMap[oldF.CVEID] = true
@@ -1543,7 +1551,7 @@ func (o *Orchestrator) DeclarePatchApplied(
 		}
 	}
 
-	// 5. Lista consolidada de CVEs resueltas
+	// 5. Lista consolidada de CVEs resueltas en este paso
 	resolvedCVEs := make([]string, 0, len(resolvedCVEsMap))
 	for cve := range resolvedCVEsMap {
 		resolvedCVEs = append(resolvedCVEs, cve)
@@ -1567,18 +1575,23 @@ func (o *Orchestrator) DeclarePatchApplied(
 		return nil, nil, fmt.Errorf("error cerrando findings resueltos: %w", err)
 	}
 
-	// 7. Persistir en el histórico la relación APPLIED_TO controlando duplicados y convivencia
+	// 7. Persistir en el histórico la relación APPLIED_TO controlando estrictamente duplicados
 	existingApps, _ := o.patchPort.GetApplicationsByInstallation(ctx, installationID)
-	existingLevelsByCVE := make(map[string][]domain.RemediationLevel)
+	existingOfficialMap := make(map[string]bool, len(existingApps))
 	for _, a := range existingApps {
-		existingLevelsByCVE[a.CVEID] = append(existingLevelsByCVE[a.CVEID], a.RemediationLevel)
+		if a.RemediationLevel == domain.RemediationLevelOfficialFix {
+			existingOfficialMap[a.CVEID] = true
+		}
 	}
 
 	var primaryApplication *domain.AppliedPatch
 	for _, resCVE := range resolvedCVEs {
-		verification := o.verifyPatchApplication(ctx, installationID, resCVE, level)
+		// Si este CVE ya fue registrado con OFFICIAL_FIX anteriormente, se conserva intacto
+		if existingOfficialMap[resCVE] {
+			continue
+		}
 
-		// Si el usuario aplicó una versión destino específica, esa es la versión objetivo real
+		verification := o.verifyPatchApplication(ctx, installationID, resCVE, level)
 		if cleanTargetVer != "" {
 			verification.ExpectedVersion = cleanTargetVer
 		}
@@ -1595,35 +1608,8 @@ func (o *Orchestrator) DeclarePatchApplied(
 			Verification:      verification,
 		}
 
-		shouldAddToHistory := true
-		if levels, exists := existingLevelsByCVE[resCVE]; exists && len(levels) > 0 {
-			hasOfficial := false
-			hasTemporary := false
-			for _, l := range levels {
-				if l == domain.RemediationLevelOfficialFix {
-					hasOfficial = true
-				}
-				if l == domain.RemediationLevelTemporaryFix || l == domain.RemediationLevelWorkaround {
-					hasTemporary = true
-				}
-			}
-
-			if hasOfficial {
-				// Si la existente es OFFICIAL_FIX, no se añade la nueva
-				shouldAddToHistory = false
-			} else if hasTemporary && level == domain.RemediationLevelOfficialFix {
-				// Si la existente es TEMPORARY_FIX y la nueva es OFFICIAL_FIX, sí se añade (conviven ambas)
-				shouldAddToHistory = true
-			} else {
-				// Si la existente es TEMPORARY_FIX y la nueva es TEMPORARY_FIX (o ya existe), no se añade
-				shouldAddToHistory = false
-			}
-		}
-
-		if shouldAddToHistory {
-			_ = o.patchPort.SaveApplication(ctx, app)
-			existingLevelsByCVE[resCVE] = append(existingLevelsByCVE[resCVE], level)
-		}
+		_ = o.patchPort.SaveApplication(ctx, app)
+		existingOfficialMap[resCVE] = true
 
 		var remAppliedAt *time.Time
 		if level != domain.RemediationLevelUnavailable {
@@ -1647,7 +1633,7 @@ func (o *Orchestrator) DeclarePatchApplied(
 		}
 	}
 
-	// 8. Re-escanear para asegurar que las nuevas vulnerabilidades de la nueva versión queden registradas
+	// 8. Re-escanear para asegurar que las vulnerabilidades de la nueva versión queden registradas
 	if cleanTargetVer != "" {
 		if sw, err := o.softwareInstPort.GetInstalledSoftware(ctx, installationID); err == nil && sw != nil {
 			_, _ = o.AutoScanAndRegisterVulnerabilities(ctx, installationID, sw.SoftwareID, domain.VulnerabilityScanOptions{
@@ -1656,7 +1642,7 @@ func (o *Orchestrator) DeclarePatchApplied(
 		}
 	}
 
-	// 9. Recalcular riesgo completo para los endpoints afectados y el proyecto
+	// 9. Recalcular riesgo completo
 	_ = o.recomputeRiskForInstallation(ctx, installationID)
 
 	return primaryApplication, affectedFindingIDs, nil
