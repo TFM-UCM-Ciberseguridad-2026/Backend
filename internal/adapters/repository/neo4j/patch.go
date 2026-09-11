@@ -72,11 +72,9 @@ func (r *patchRepo) GetAppliedPatchHistoryByEndpoint(ctx context.Context, endpoi
 		// ── RAMA 1: Software nativo en el host o instalaciones en contenedor ──
 		OPTIONAL MATCH (e)-[:HAS_INSTALLATION|HOSTS*1..2]->(si:SoftwareInstallation)
 		OPTIONAL MATCH (si)-[:INSTANCE_OF]->(s:Software)
+		
+		// 1.1 Parches aplicados en la instalación
 		OPTIONAL MATCH (p1:Patch)-[rel1:APPLIED_TO]->(si)
-		OPTIONAL MATCH (si)-[:HAS_FINDING]->(f1:Finding)-[:OF_VULNERABILITY]->(v1:Vulnerability)
-		WHERE (toUpper(coalesce(f1.status, '')) IN ['PATCHED', 'RESOLVED', 'CLOSED', 'MITIGATED', 'SUPERSEDED'] OR f1.remediation_factor = 0.0)
-		  AND (rel1.cve_id = v1.cve_id OR (p1 IS NOT NULL AND (p1)-[:FIXES]->(v1)) OR rel1 IS NOT NULL)
-
 		WITH e, si, s,
 		     collect(DISTINCT CASE WHEN p1 IS NOT NULL AND rel1 IS NOT NULL THEN {
 		         patch_id: p1.id,
@@ -93,19 +91,27 @@ func (r *patchRepo) GetAppliedPatchHistoryByEndpoint(ctx context.Context, endpoi
 		         verification_reason: coalesce(rel1.verification_reason, ''),
 		         installed_version: coalesce(rel1.installed_version, ''),
 		         expected_version: coalesce(rel1.expected_version, rel1.installed_version, s.version, '')
-		     } ELSE null END) AS si_raw_patches,
+		     } ELSE null END) AS si_raw_patches
+
+		// 1.2 Findings resueltos emparejados EXACTAMENTE por su cve_id aplicado (sin relaciones cruzadas)
+		OPTIONAL MATCH (si)-[:HAS_FINDING]->(f1:Finding)-[:OF_VULNERABILITY]->(v1:Vulnerability)
+		WHERE (toUpper(coalesce(f1.status, '')) IN ['PATCHED', 'RESOLVED', 'CLOSED', 'MITIGATED', 'SUPERSEDED'] OR f1.remediation_factor = 0.0)
+		OPTIONAL MATCH (p1_match:Patch)-[rel1_match:APPLIED_TO]->(si)
+		WHERE rel1_match.cve_id = v1.cve_id
+
+		WITH e, si, s, si_raw_patches,
 		     collect(DISTINCT CASE WHEN f1 IS NOT NULL AND v1 IS NOT NULL THEN {
 		         finding_id: f1.id,
 		         cve_id: v1.cve_id,
 		         status: coalesce(f1.status, 'PATCHED'),
-		         patch_id: coalesce(p1.id, 0),
-		         patch_description: coalesce(p1.description, rel1.notes, 'Parche oficial aplicado'),
-		         patch_url: coalesce(p1.url, ''),
-		         remediation_level: coalesce(rel1.remediation_level, 'OFFICIAL_FIX'),
-		         applied_at: coalesce(rel1.applied_at, f1.resolved_at, f1.last_seen),
-		         applied_by: coalesce(rel1.applied_by, 'operator'),
-		         notes: coalesce(rel1.notes, ''),
-		         expected_version: coalesce(rel1.expected_version, rel1.installed_version, s.version, '')
+		         patch_id: coalesce(p1_match.id, 0),
+		         patch_description: coalesce(p1_match.description, rel1_match.notes, 'Parche oficial aplicado'),
+		         patch_url: coalesce(p1_match.url, ''),
+		         remediation_level: coalesce(rel1_match.remediation_level, 'OFFICIAL_FIX'),
+		         applied_at: coalesce(rel1_match.applied_at, f1.resolved_at, f1.last_seen),
+		         applied_by: coalesce(rel1_match.applied_by, 'operator'),
+		         notes: coalesce(rel1_match.notes, ''),
+		         expected_version: coalesce(rel1_match.expected_version, rel1_match.installed_version, s.version, '')
 		     } ELSE null END) AS si_raw_findings
 
 		WITH e,
@@ -121,14 +127,10 @@ func (r *patchRepo) GetAppliedPatchHistoryByEndpoint(ctx context.Context, endpoi
 		// ── RAMA 2: Contenedores e imágenes de contenedor alojadas en el endpoint ──
 		OPTIONAL MATCH (e)-[:HOSTS]->(c:Container)
 		OPTIONAL MATCH (c)-[:USES_IMAGE]->(ci:ContainerImage)
+		
+		// 2.1 Parches aplicados a contenedores
 		OPTIONAL MATCH (p2:Patch)-[rel2:APPLIED_TO]->(target2)
 		WHERE target2 = c OR target2 = ci
-		OPTIONAL MATCH (ci_or_c)-[:HAS_FINDING]->(f2:Finding)-[:OF_VULNERABILITY]->(v2:Vulnerability)
-		WHERE (ci_or_c = ci OR ci_or_c = c)
-		  AND (f2.container_id = c.id OR f2.container_id IS NULL OR f2.image_id = ci.id)
-		  AND (toUpper(coalesce(f2.status, '')) IN ['PATCHED', 'RESOLVED', 'CLOSED', 'MITIGATED', 'SUPERSEDED'] OR f2.remediation_factor = 0.0)
-		  AND (rel2.cve_id = v2.cve_id OR (p2 IS NOT NULL AND (p2)-[:FIXES]->(v2)) OR rel2 IS NOT NULL)
-
 		WITH e, si_groups, c, ci,
 		     collect(DISTINCT CASE WHEN p2 IS NOT NULL AND rel2 IS NOT NULL THEN {
 		         patch_id: p2.id,
@@ -145,19 +147,29 @@ func (r *patchRepo) GetAppliedPatchHistoryByEndpoint(ctx context.Context, endpoi
 		         verification_reason: coalesce(rel2.verification_reason, ''),
 		         installed_version: coalesce(rel2.installed_version, ci.tag, ''),
 		         expected_version: coalesce(rel2.expected_version, rel2.installed_version, ci.tag, '')
-		     } ELSE null END) AS c_raw_patches,
+		     } ELSE null END) AS c_raw_patches
+
+		// 2.2 Findings resueltos de contenedores emparejados EXACTAMENTE por cve_id
+		OPTIONAL MATCH (ci_or_c)-[:HAS_FINDING]->(f2:Finding)-[:OF_VULNERABILITY]->(v2:Vulnerability)
+		WHERE (ci_or_c = ci OR ci_or_c = c)
+		  AND (f2.container_id = c.id OR f2.container_id IS NULL OR f2.image_id = ci.id)
+		  AND (toUpper(coalesce(f2.status, '')) IN ['PATCHED', 'RESOLVED', 'CLOSED', 'MITIGATED', 'SUPERSEDED'] OR f2.remediation_factor = 0.0)
+		OPTIONAL MATCH (p2_match:Patch)-[rel2_match:APPLIED_TO]->(target2_match)
+		WHERE (target2_match = c OR target2_match = ci) AND rel2_match.cve_id = v2.cve_id
+
+		WITH e, si_groups, c, ci, c_raw_patches,
 		     collect(DISTINCT CASE WHEN f2 IS NOT NULL AND v2 IS NOT NULL THEN {
 		         finding_id: f2.id,
 		         cve_id: v2.cve_id,
 		         status: coalesce(f2.status, 'PATCHED'),
-		         patch_id: coalesce(p2.id, 0),
-		         patch_description: coalesce(p2.description, rel2.notes, 'Vulnerabilidad de contenedor resuelta'),
-		         patch_url: coalesce(p2.url, ''),
-		         remediation_level: coalesce(rel2.remediation_level, 'OFFICIAL_FIX'),
-		         applied_at: coalesce(rel2.applied_at, f2.resolved_at, f2.last_seen),
-		         applied_by: coalesce(rel2.applied_by, 'operator'),
-		         notes: coalesce(rel2.notes, ''),
-		         expected_version: coalesce(rel2.expected_version, rel2.installed_version, ci.tag, '')
+		         patch_id: coalesce(p2_match.id, 0),
+		         patch_description: coalesce(p2_match.description, rel2_match.notes, 'Vulnerabilidad de contenedor resuelta'),
+		         patch_url: coalesce(p2_match.url, ''),
+		         remediation_level: coalesce(rel2_match.remediation_level, 'OFFICIAL_FIX'),
+		         applied_at: coalesce(rel2_match.applied_at, f2.resolved_at, f2.last_seen),
+		         applied_by: coalesce(rel2_match.applied_by, 'operator'),
+		         notes: coalesce(rel2_match.notes, ''),
+		         expected_version: coalesce(rel2_match.expected_version, rel2_match.installed_version, ci.tag, '')
 		     } ELSE null END) AS c_raw_findings
 
 		WITH e, si_groups,
@@ -173,7 +185,7 @@ func (r *patchRepo) GetAppliedPatchHistoryByEndpoint(ctx context.Context, endpoi
 		         resolved_findings: [f IN c_raw_findings WHERE f IS NOT NULL]
 		     } ELSE null END) AS c_groups
 
-		// ── UNIFICACIÓN: grupos de software + grupos de contenedores ──
+		// ── UNIFICACIÓN ──
 		RETURN e.id AS endpoint_id,
 		       coalesce(e.hostname, '') AS hostname,
 		       [g IN (si_groups + c_groups) WHERE g IS NOT NULL AND (g.software_id > 0 OR size(g.applied_patches) > 0 OR size(g.resolved_findings) > 0)] AS software_groups
