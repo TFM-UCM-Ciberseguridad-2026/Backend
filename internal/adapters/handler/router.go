@@ -12,7 +12,6 @@ Propósito arquitectónico y teórico:
 2. Multiplexación de Peticiones: Mapea los patrones de rutas y verbos HTTP (sintaxis nativa de Go 1.22+: "METHOD /path/{param}") con sus respectivos controladores de la capa de handlers.
 3. Cadena de Filtros (Middleware Chain): Envuelve el enrutador en las funciones decoradoras (CORS, Logger) para aplicarles reglas de seguridad y auditoría global de forma centralizada.
 */
-//va a haber una api que se sea /fetch/vuln/endpoint?endpoint=nombreendpoint
 
 // NewRouter crea y configura el multiplexor HTTP con las rutas de la aplicación.
 func NewRouter(h *OrchestratorHandler, hub *WSHub, govHandler *GovernanceHandler) *http.ServeMux {
@@ -107,10 +106,10 @@ func NewRouter(h *OrchestratorHandler, hub *WSHub, govHandler *GovernanceHandler
 	/* POST /api/risk/recalculate-all: Recalcula el riesgo de todos los endpoints (trigger manual o cron). */
 	mux.HandleFunc("POST /api/risk/recalculate-all", h.ComputeAllRisks)
 
-	// POST /api/projects/{id}/compute-risk: Recalcula el riesgo agregado de un proyecto completo, basado en todos sus endpoints y findings asociados.
+	/* POST /api/projects/{id}/compute-risk: Recalcula el riesgo agregado de un proyecto completo, basado en todos sus endpoints y findings asociados. */
 	mux.HandleFunc("POST /api/projects/{id}/compute-risk", h.ComputeProjectRisk)
 
-	// POST /api/risk/recalculate-all-projects: Recalcula el riesgo de todos los proyectos (trigger manual o cron).
+	/* POST /api/risk/recalculate-all-projects: Recalcula el riesgo de todos los proyectos (trigger manual o cron). */
 	mux.HandleFunc("POST /api/risk/recalculate-all-projects", h.ComputeAllProjectsRisk)
 
 	/* GET /api/vulnerabilities/{cve}/patches: Recupera los parches oficiales disponibles para un CVE. */
@@ -122,13 +121,16 @@ func NewRouter(h *OrchestratorHandler, hub *WSHub, govHandler *GovernanceHandler
 	/* GET /api/projects/{id}/cve-patches: Parches de todas las CVE del proyecto, agrupados por CVE, en una sola consulta. */
 	mux.HandleFunc("GET /api/projects/{id}/cve-patches", h.GetPatchesForProject)
 
-	/* POST /api/installations/{id}/applied-patches: Declara un parche como aplicado sobre la instalación y propaga el efecto al riesgo. */
+	/* POST /api/installations/{id}/applied-patches: Declara un parche como aplicado sobre la instalación, cierra findings y actualiza versiones/riesgo. */
 	mux.HandleFunc("POST /api/installations/{id}/applied-patches", h.DeclarePatchApplied)
 
-	/* GET /api/installations/{id}/applied-patches: Histórico de parches aplicados sobre la instalación. */
+	/* GET /api/installations/{id}/applied-patches: Histórico de parches aplicados sobre una instalación concreta. */
 	mux.HandleFunc("GET /api/installations/{id}/applied-patches", h.GetAppliedPatchHistory)
 	mux.HandleFunc("POST /api/containers/{id}/applied-patches", h.DeclareContainerPatchApplied)
 	mux.HandleFunc("GET /api/containers/{id}/applied-patches", h.GetContainerAppliedPatchHistory)
+
+	/* GET /api/endpoints/{id}/patch-history: Histórico de parches del endpoint agrupado por software instalado. */
+	mux.HandleFunc("GET /api/endpoints/{id}/patch-history", h.GetEndpointPatchHistory)
 
 	/* GET /api/patch-queue: Cola de parcheo ordenada por prioridad, opcionalmente filtrada por proyecto. */
 	mux.HandleFunc("GET /api/patch-queue", h.GetPatchQueue)
@@ -136,14 +138,17 @@ func NewRouter(h *OrchestratorHandler, hub *WSHub, govHandler *GovernanceHandler
 	// Rutas CRUD para Edición y Borrado de Activos
 	mux.HandleFunc("GET /api/endpoints/{id}/ips", h.GetEndpointIPs)
 	mux.HandleFunc("PUT /api/endpoints/{id}", h.UpdateEndpoint)
-
 	mux.HandleFunc("DELETE /api/endpoints/{id}", h.DeleteEndpoint)
+
 	mux.HandleFunc("PUT /api/networks/{id}", h.UpdateNetwork)
 	mux.HandleFunc("DELETE /api/networks/{id}", h.DeleteNetwork)
+
 	mux.HandleFunc("PUT /api/hardware/{id}", h.UpdateHardware)
 	mux.HandleFunc("DELETE /api/hardware/{id}", h.DeleteHardware)
+
 	mux.HandleFunc("PUT /api/software/{id}", h.UpdateSoftware)
 	mux.HandleFunc("DELETE /api/software/{id}", h.DeleteSoftware)
+
 	mux.HandleFunc("PUT /api/installations/{id}", h.UpdateSoftwareInstallation)
 	mux.HandleFunc("DELETE /api/installations/{id}", h.DeleteSoftwareInstallation)
 
@@ -154,6 +159,7 @@ func NewRouter(h *OrchestratorHandler, hub *WSHub, govHandler *GovernanceHandler
 	mux.HandleFunc("POST /api/containers/{id}/installations", h.RegisterContainerSoftwareInstallation)
 	mux.HandleFunc("POST /api/containers/images/{id}/scan-vulns", h.ScanContainerImageVulnerabilities)
 
+	// Borrado Genérico de Nodos
 	mux.HandleFunc("DELETE /api/nodes/{id}", h.DeleteNode)
 
 	/* POST /api/projects/{id}/patches/refresh: Refresca patches y fixed_versions para todos los CVEs abiertos del proyecto. */

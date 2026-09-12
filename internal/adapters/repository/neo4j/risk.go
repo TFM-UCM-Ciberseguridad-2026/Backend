@@ -219,7 +219,9 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 }
 
 // UpdateFindingScores persiste los scores calculados en el nodo Finding.
-func (r *riskRepo) UpdateFindingScores(ctx context.Context, findingID int64, impactScore, likelihood, exposureFactor, remediationFactor, riskScore, assetCriticality, urgencyBoost, priorityScore float64) error {
+// Los tiers se guardan aquí igual que en Endpoint, Installation y Project: sin ellos
+// el finding tenía score pero no etiqueta, y el front mostraba UNKNOWN.
+func (r *riskRepo) UpdateFindingScores(ctx context.Context, findingID int64, impactScore, likelihood, exposureFactor, remediationFactor, riskScore, assetCriticality, urgencyBoost, priorityScore float64, riskTier, priorityTier string) error {
 	query := `
 		MATCH (f:Finding {id: $id})
 		SET f.impact_score       = $impact_score,
@@ -227,9 +229,11 @@ func (r *riskRepo) UpdateFindingScores(ctx context.Context, findingID int64, imp
 			f.exposure_factor     = $exposure_factor,
 		    f.remediation_factor = $remediation_factor,
 		    f.risk_score         = $risk_score,
+		    f.risk_tier          = $risk_tier,
 		    f.asset_criticality  = $asset_criticality,
 		    f.urgency_boost      = $urgency_boost,
 		    f.priority_score     = $priority_score,
+		    f.priority_tier      = $priority_tier,
 		    f.risk_computed_at   = $now
 	`
 	return executeWriteHelper(ctx, r.driver, query, map[string]any{
@@ -239,9 +243,11 @@ func (r *riskRepo) UpdateFindingScores(ctx context.Context, findingID int64, imp
 		"exposure_factor":    exposureFactor,
 		"remediation_factor": remediationFactor,
 		"risk_score":         riskScore,
+		"risk_tier":          riskTier,
 		"asset_criticality":  assetCriticality,
 		"urgency_boost":      urgencyBoost,
 		"priority_score":     priorityScore,
+		"priority_tier":      priorityTier,
 		"now":                time.Now().UTC(),
 	})
 }
@@ -673,14 +679,22 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, query domain.PatchQueueQue
 		MATCH path = (e)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)
 		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset) OR 'Container' IN labels(asset))
 		MATCH (asset)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-		WHERE NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED']
+		WHERE NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED', 'MITIGATED']
 		  AND ($project_id IS NULL OR EXISTS { (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e) })
 		OPTIONAL MATCH (asset)-[:INSTANCE_OF]->(s:Software)
 		OPTIONAL MATCH (c:Container)-[:HAS_INSTALLATION|USES_IMAGE]->(asset)
 		OPTIONAL MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
 		OPTIONAL MATCH (p:Patch)-[:FIXES]->(v)
-		WITH DISTINCT f, v, asset, s, e, c, rem, collect(p.url) AS patch_urls
-		WITH f, v, asset, s, e, c, rem, patch_urls,
+		WITH DISTINCT f, v, asset, s, e, c, rem,
+			collect(CASE WHEN p IS NOT NULL THEN {
+				url: coalesce(p.url, ''),
+				official: coalesce(p.official, false),
+				reference_type: coalesce(p.reference_type, ''),
+				fixed_version: coalesce(p.fixed_version, '')
+			} ELSE null END) AS raw_patch_refs
+		WITH f, v, asset, s, e, c, rem,
+			[patch IN raw_patch_refs WHERE patch IS NOT NULL] AS patch_refs
+		WITH f, v, asset, s, e, c, rem, patch_refs,
 			coalesce(rem.fixed_version, v.fixed_version, '') AS fixed_version,
 			coalesce(s.name, asset.name, asset.id) AS software_name,
 			coalesce(s.version, 'N/A') AS software_version,
@@ -698,11 +712,12 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, query domain.PatchQueueQue
 			f.asset_criticality AS asset_criticality,
 			f.urgency_boost AS urgency_boost,
 			f.priority_score AS priority_score,
-			(size(patch_urls) > 0 OR coalesce(rem.fixed_version, v.fixed_version, '') <> '') AS patch_available,
+			(size(patch_refs) > 0 OR coalesce(rem.fixed_version, v.fixed_version, '') <> '') AS patch_available,
 			CASE
-				WHEN size(patch_urls) > 0 AND all(url IN patch_urls WHERE url STARTS WITH 'fixed-version://') THEN 'WORKAROUND'
-				WHEN size(patch_urls) > 0 THEN 'OFFICIAL_FIX'
-				WHEN coalesce(rem.fixed_version, v.fixed_version, '') <> '' THEN 'WORKAROUND'
+				WHEN any(patch IN patch_refs
+				         WHERE patch.fixed_version <> '')
+				     OR coalesce(rem.fixed_version, v.fixed_version, '') <> '' THEN 'OFFICIAL_FIX'
+				WHEN size(patch_refs) > 0 THEN 'MITIGATION'
 				ELSE 'UNAVAILABLE'
 			END AS remediation_kind,
 			CASE
@@ -741,7 +756,8 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, query domain.PatchQueueQue
 		       ($patch_available = "TRUE" AND patch_available = true) OR 
 		       ($patch_available = "FALSE" AND patch_available = false)
 		      )
-		  AND ($remediation_kind = "" OR $remediation_kind = "ALL" OR toLower(remediation_kind) = toLower($remediation_kind))
+		  AND ($remediation_kind = "" OR $remediation_kind = "ALL"
+		       OR toLower(remediation_kind) = toLower($remediation_kind))
 
 		WITH collect({
 			finding_id: finding_id,
@@ -1352,7 +1368,7 @@ func (r *riskRepo) GetOpenFindingCVEsByProject(ctx context.Context, projectID in
 		MATCH path = (e)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)
 		WHERE ('SoftwareInstallation' IN labels(asset) OR 'ContainerImage' IN labels(asset))
 		MATCH (asset)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-		WHERE NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED']
+		WHERE NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED', 'MITIGATED']
 		RETURN DISTINCT v.cve_id AS cve_id
 		ORDER BY cve_id ASC
 	`

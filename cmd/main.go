@@ -226,28 +226,17 @@ func main() {
 	// Middleware CORS para evitar bloqueos del navegador en desarrollo
 	corsHandler := middleware.CORS(router)
 
-	// Iniciar planificador Cron para la tarea diaria del NIST
-	s := gocron.NewScheduler(time.UTC)
-	s.Every(1).Day().At("02:00").Do(func() {
-		fmt.Println("Ejecutando tarea diaria: Sincronización con NIST...")
-		cronCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute) // Damos tiempo porque la API del NIST puede ser lenta
-		defer cancel()
-		if err := orchestrator.SyncNistDaily(cronCtx); err != nil {
-			log.Printf("Error en sincronización diaria NIST: %v", err)
-		} else {
-			log.Println("Sincronización diaria NIST completada con éxito.")
-		}
-	})
-
-	// Añadimos el escaneo de contenedores diario
+	// Iniciar planificador Cron para la tarea diaria nocturna (03:00 AM)
+	// Canalización secuencial: 1. Escaneo Docker Scout -> 2. Sincronización NIST/NVD -> 3. Recálculo global de riesgo
+	s := gocron.NewScheduler(time.Local)
 	s.Every(1).Day().At("03:00").Do(func() {
-		fmt.Println("Ejecutando tarea diaria: Escaneo de imágenes con Docker Scout...")
-		cronCtx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		log.Println("Ejecutando canalización diaria nocturna (03:00 AM)...")
+		cronCtx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 		defer cancel()
-		if err := orchestrator.SyncScoutDaily(cronCtx); err != nil {
-			log.Printf("Error en escaneo diario Docker Scout: %v", err)
+		if err := orchestrator.RunDailyPipeline(cronCtx); err != nil {
+			log.Printf("Error en canalización diaria nocturna (03:00 AM): %v", err)
 		} else {
-			log.Println("Escaneo diario Docker Scout completado con éxito.")
+			log.Println("Canalización diaria nocturna (03:00 AM) completada con éxito.")
 		}
 	})
 

@@ -449,18 +449,32 @@ func (r *findingRepo) ApplyRemediationByInstallationAndCVE(ctx context.Context, 
 
 func (r *findingRepo) ApplyRemediationByContainerAndCVE(ctx context.Context, containerID, cveID string, findingID int64, remediationFactor float64, status string) ([]int64, error) {
 	query := `
-		MATCH (c:Container {id: $container_id})-[:USES_IMAGE]->(image:ContainerImage)
-		MATCH (image)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability {cve_id: $cve_id})
-		WHERE f.container_id = c.id AND f.image_id = image.id AND f.id = $finding_id
-		SET f.remediation_factor = $remediation_factor, f.status = $status, f.last_seen = $now
-		FOREACH (_ IN CASE WHEN $remediation_factor = 0.0 THEN [1] ELSE [] END |
-			SET f.risk_score = 0.0, f.priority_score = 0.0, f.resolved_at = $now
+		MATCH (c:Container)
+		WHERE c.id = $container_id OR toString(c.id) = toString($container_id)
+		MATCH (c)-[:USES_IMAGE|HAS_FINDING*1..2]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE (v.cve_id = $cve_id OR toUpper(v.cve_id) = toUpper($cve_id))
+		  AND (f.id = $finding_id OR toString(f.id) = toString($finding_id) OR toInteger(f.id) = toInteger($finding_id))
+		SET f.remediation_factor = $remediation_factor,
+		    f.status             = $status,
+		    f.last_seen          = $now,
+		    f.resolved_at        = $now
+		// Si es parche completo, anula el riesgo técnico a 0
+		FOREACH (_ IN CASE WHEN $status = 'PATCHED' OR $remediation_factor = 0.0 THEN [1] ELSE [] END |
+			SET f.risk_score = 0.0
 		)
-		RETURN f.id AS finding_id
+		// Sea parche o mitigación/workaround, la prioridad de parcheo pasa a 0 para que no sea requerida en cola
+		FOREACH (_ IN CASE WHEN $status IN ['PATCHED', 'MITIGATED', 'RESOLVED'] OR $remediation_factor = 0.0 THEN [1] ELSE [] END |
+			SET f.priority_score = 0.0
+		)
+		RETURN DISTINCT f.id AS finding_id
 	`
 	return r.applyRemediationFindingQuery(ctx, query, map[string]any{
-		"container_id": containerID, "cve_id": cveID, "finding_id": findingID,
-		"remediation_factor": remediationFactor, "status": status, "now": time.Now().UTC(),
+		"container_id":       containerID,
+		"cve_id":             cveID,
+		"finding_id":         findingID,
+		"remediation_factor": remediationFactor,
+		"status":             status,
+		"now":                time.Now().UTC(),
 	})
 }
 
@@ -824,6 +838,111 @@ func (r *findingRepo) EnsureForContainerImageContextAndCVE(
 		PriorityScore:     getFloat64(props, "priority_score"),
 		RiskComputedAt:    getTimePtr(props, "risk_computed_at"),
 	}, created, nil
+}
+
+// GetOpenFindingsByInstallation recupera todos los findings abiertos de una instalación junto con su CVE y versión corregida.
+func (r *findingRepo) GetOpenFindingsByInstallation(ctx context.Context, installationID string) ([]domain.FindingRiskSummary, error) {
+	query := `
+		MATCH (si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE (si.id = $installation_id OR toString(si.id) = toString($installation_id))
+		  AND NOT toUpper(coalesce(f.status, 'OPEN')) IN ['PATCHED', 'RESOLVED', 'CLOSED']
+		OPTIONAL MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
+		RETURN f.id AS finding_id,
+		       v.cve_id AS cve_id,
+		       coalesce(f.risk_score, 0.0) AS risk_score,
+		       coalesce(f.priority_score, 0.0) AS priority_score,
+		       coalesce(f.status, 'OPEN') AS status,
+		       coalesce(rem.fixed_version, v.fixed_version, '') AS fixed_version
+	`
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"installation_id": installationID})
+		if err != nil {
+			return nil, err
+		}
+		var summaries []domain.FindingRiskSummary
+		for result.Next(ctx) {
+			rec := result.Record()
+			fid, _ := rec.Get("finding_id")
+			cve, _ := rec.Get("cve_id")
+			rs, _ := rec.Get("risk_score")
+			ps, _ := rec.Get("priority_score")
+			st, _ := rec.Get("status")
+			fv, _ := rec.Get("fixed_version")
+			summaries = append(summaries, domain.FindingRiskSummary{
+				FindingID:     toInt64(fid),
+				CVEID:         toStr(cve),
+				RiskScore:     toFloat64(rs),
+				PriorityScore: toFloat64(ps),
+				Status:        toStr(st),
+				FixedVersion:  toStr(fv),
+			})
+		}
+		return summaries, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.FindingRiskSummary{}, nil
+	}
+	return res.([]domain.FindingRiskSummary), nil
+}
+
+// CloseResolvedFindingsBatch cierra todos los findings resueltos por el parche o actualización.
+func (r *findingRepo) CloseResolvedFindingsBatch(ctx context.Context, installationID string, cveIDs []string, remediationFactor float64, status string) ([]int64, error) {
+	if len(cveIDs) == 0 {
+		return []int64{}, nil
+	}
+
+	query := `
+		MATCH (si:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE (si.id = $installation_id OR toString(si.id) = toString($installation_id))
+		  AND v.cve_id IN $cve_ids
+		SET f.remediation_factor = $remediation_factor,
+		    f.status             = $status,
+		    f.last_seen          = $now,
+		    f.resolved_at        = $now
+		FOREACH (_ IN CASE WHEN $status = 'PATCHED' OR $remediation_factor = 0.0 THEN [1] ELSE [] END |
+		    SET f.risk_score     = 0.0
+		)
+		FOREACH (_ IN CASE WHEN $status IN ['PATCHED', 'MITIGATED', 'RESOLVED'] OR $remediation_factor = 0.0 THEN [1] ELSE [] END |
+		    SET f.priority_score = 0.0
+		)
+		RETURN f.id AS finding_id
+	`
+	params := map[string]any{
+		"installation_id":    installationID,
+		"cve_ids":            cveIDs,
+		"remediation_factor": remediationFactor,
+		"status":             status,
+		"now":                time.Now().UTC(),
+	}
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, params)
+		if err != nil {
+			return nil, err
+		}
+		var ids []int64
+		for result.Next(ctx) {
+			id, _ := result.Record().Get("finding_id")
+			ids = append(ids, toInt64(id))
+		}
+		return ids, result.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []int64{}, nil
+	}
+	return res.([]int64), nil
 }
 
 // SupersedeContainerImageFindings invalida los findings contextuales asociados a

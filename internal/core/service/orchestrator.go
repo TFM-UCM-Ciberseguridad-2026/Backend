@@ -262,6 +262,12 @@ func (o *Orchestrator) nextInstallationID() string {
 
 // CreateProject guarda el proyecto principal.
 func (o *Orchestrator) CreateProject(ctx context.Context, project *domain.Project) error {
+	if project.Nombre != "" && o.infraPort != nil {
+		if exists, err := o.infraPort.IsProjectNameDuplicate(ctx, project.Nombre, 0); err == nil && exists {
+			return fmt.Errorf("Ya existe un proyecto con este nombre. Por favor, elige un nombre único.")
+		}
+	}
+
 	if project.ProjectID == 0 {
 		id, err := o.nextNodeID(ctx, "Project")
 		if err != nil {
@@ -300,14 +306,31 @@ func (o *Orchestrator) DeleteProject(ctx context.Context, projectID int64) error
 
 // RenameProject actualiza el nombre de un proyecto.
 func (o *Orchestrator) RenameProject(ctx context.Context, projectID int64, newName string) error {
-	if newName == "" {
+	newNameTrimmed := strings.TrimSpace(newName)
+	if newNameTrimmed == "" {
 		return fmt.Errorf("el nombre del proyecto no puede estar vacío")
 	}
-	return o.projectPort.RenameProject(ctx, projectID, newName)
+
+	if o.infraPort != nil {
+		if exists, err := o.infraPort.IsProjectNameDuplicate(ctx, newNameTrimmed, projectID); err == nil && exists {
+			return fmt.Errorf("Ya existe un proyecto con este nombre. Por favor, elige un nombre único.")
+		}
+	}
+
+	return o.projectPort.RenameProject(ctx, projectID, newNameTrimmed)
 }
 
 // AddEndpointToProject guarda un nuevo endpoint y lo vincula a un proyecto.
 func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64, endpoint *domain.Endpoint) error {
+	if err := o.validateAssetNameUnique(ctx, endpoint.Hostname, endpoint.EndpointID, projectID); err != nil {
+		return err
+	}
+
+	validIPs, err := o.validateAssetIPs(ctx, projectID, endpoint.IPs, endpoint.EndpointID, "")
+	if err != nil {
+		return err
+	}
+	endpoint.IPs = validIPs
 	if endpoint.EndpointID == 0 {
 		id, err := o.nextNodeID(ctx, "Endpoint")
 		if err != nil {
@@ -333,10 +356,14 @@ func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64
 		if err := o.endpointPort.SaveIPs(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
 			return fmt.Errorf("error guardando IPs del endpoint: %w", err)
 		}
-		if o.networkPort != nil {
-			if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
-				return fmt.Errorf("error enlazando endpoint a las redes coincidentes: %w", err)
-			}
+	}
+
+	// El emparejamiento se recalcula aunque el endpoint venga sin IPs: si el alta reutiliza
+	// un ID que ya existía, quedarse dentro del if dejaría vivas las aristas de las IPs
+	// anteriores. Es la misma llamada incondicional que hace UpdateEndpoint.
+	if o.networkPort != nil {
+		if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs, projectID); err != nil {
+			return fmt.Errorf("error enlazando endpoint a las redes coincidentes: %w", err)
 		}
 	}
 
@@ -345,6 +372,10 @@ func (o *Orchestrator) AddEndpointToProject(ctx context.Context, projectID int64
 
 // AssociateHardwareToEndpoint guarda componentes de hardware y los enlaza a un endpoint.
 func (o *Orchestrator) AssociateHardwareToEndpoint(ctx context.Context, endpointID int64, hardware *domain.Hardware) error {
+	if err := domain.ValidateAndNormalizeHardware(hardware); err != nil {
+		return err
+	}
+
 	if hardware.HardwareID == 0 {
 		id, err := o.nextNodeID(ctx, "Hardware")
 		if err != nil {
@@ -365,6 +396,10 @@ func (o *Orchestrator) AssociateHardwareToEndpoint(ctx context.Context, endpoint
 // indicado como nodo huérfano de ese proyecto en concreto (no aparece en el resto).
 // Devuelve el ID de la red creada y cuántos endpoints se enlazaron.
 func (o *Orchestrator) CreateNetwork(ctx context.Context, network *domain.Network, projectID int64) (int64, int, error) {
+	scope, err := o.validateNetworkUniqueness(ctx, network, projectID, 0)
+	if err != nil {
+		return 0, 0, err
+	}
 	if network.NetworkID == 0 {
 		id, err := o.nextNodeID(ctx, "Network")
 		if err != nil {
@@ -377,18 +412,46 @@ func (o *Orchestrator) CreateNetwork(ctx context.Context, network *domain.Networ
 		return 0, 0, err
 	}
 
-	linked, err := o.networkPort.LinkMatchingEndpoints(ctx, network.NetworkID, network.CIDR, network.VLANID)
+	// El ancla al proyecto va ANTES de reconciliar. El ámbito se descubre recorriendo el
+	// grafo desde el proyecto, y una red recién guardada todavía no cuelga de él por ningún
+	// lado: si se reconciliara primero, la red nueva no entraría en su propio cálculo y no
+	// emparejaría con nada.
+	if projectID > 0 {
+		if err := o.networkPort.LinkNetworkToProjectIfOrphan(ctx, network.NetworkID, projectID); err != nil {
+			return network.NetworkID, 0, fmt.Errorf("error anclando la red huérfana al proyecto: %w", err)
+		}
+	}
+
+	linked, err := o.reconcileNetworkScope(ctx, scope, network.NetworkID)
 	if err != nil {
 		return network.NetworkID, 0, fmt.Errorf("error enlazando endpoints a la red: %w", err)
 	}
 
-	if projectID > 0 {
-		if err := o.networkPort.LinkNetworkToProjectIfOrphan(ctx, network.NetworkID, projectID); err != nil {
-			return network.NetworkID, linked, fmt.Errorf("error anclando la red huérfana al proyecto: %w", err)
-		}
+	return network.NetworkID, linked, nil
+}
+
+// reconcileNetworkScope recalcula el emparejamiento activo↔red y la jerarquía de subredes
+// de un ámbito de proyecto, y devuelve cuántos activos quedan colgando de la red indicada.
+//
+// El recálculo es del ámbito completo, no solo de la red tocada: al declarar una subred más
+// específica dentro de un rango que ya tenía activos, esos activos se reasignan a la subred.
+// Si solo se recalculara la red nueva se quedarían enganchados también al padre.
+func (o *Orchestrator) reconcileNetworkScope(ctx context.Context, scope []int64, networkID int64) (int, error) {
+	summary, err := o.networkPort.ReconcileProjectNetworkLinks(ctx, scope)
+	if err != nil {
+		return 0, err
 	}
 
-	return network.NetworkID, linked, nil
+	// Las reasignaciones se registran porque desde fuera parecen un cambio espontáneo: el
+	// usuario crea una /24 y ve moverse activos que él no ha tocado.
+	for _, move := range summary.Moves {
+		log.Printf("[redes] '%s' reasignado: %v -> %v", move.AssetName, move.From, move.To)
+	}
+
+	if networkID <= 0 {
+		return 0, nil
+	}
+	return o.networkPort.CountAssetsInNetwork(ctx, networkID)
 }
 
 // ExecuteCPEPipeline ejecuta el pipeline completo de 5 fases para la sugerencia de CPEs
@@ -850,6 +913,7 @@ func (o *Orchestrator) ComputeEndpointRisk(ctx context.Context, endpointID int64
 
 		if err := o.riskPort.UpdateFindingScores(
 			ctx, fc.FindingID, impactScore, likelihood, exposureFactor, fc.RemediationFactor, riskScore, assetCriticality, urgencyBoost, priorityScore,
+			ClassifyRiskTier(riskScore), ClassifyRiskTier(priorityScore),
 		); err != nil {
 			return fmt.Errorf("error actualizando scores del finding %d: %w", fc.FindingID, err)
 		}
@@ -1257,7 +1321,12 @@ func (o *Orchestrator) RegisterPatchesForVulnerability(ctx context.Context, cveI
 		if pCopy.URL != "" {
 			existing, err := o.patchPort.GetByURL(ctx, pCopy.URL)
 			if err == nil && existing != nil {
-				// El parche ya está en el grafo: reutilizamos su nodo y solo garantizamos el enlace.
+				// El parche ya está en el grafo: reutilizamos su nodo y actualizamos
+				// la clasificación para corregir registros creados antes de estos campos.
+				pCopy.PatchID = existing.PatchID
+				if err := o.patchPort.Update(ctx, &pCopy); err != nil {
+					continue
+				}
 				_ = o.relationshipPort.LinkPatchToVulnerability(ctx, existing.PatchID, cveID)
 				continue
 			}
@@ -1295,8 +1364,114 @@ func (o *Orchestrator) GetPatchesForProject(ctx context.Context, projectID int64
 	return o.patchPort.GetByProject(ctx, projectID)
 }
 
-// DeclarePatchApplied registra un parche aplicado, propaga el efecto a los findings del
-// CVE en esa instalación y recalcula el riesgo de los endpoints afectados.
+// resolvePatchLevel deriva el nivel de la evidencia del patch. Manda que haya versión
+// corregida, no que el aviso sea del fabricante. Es un techo: el cliente puede declarar
+// menos, nunca más.
+func (o *Orchestrator) resolvePatchLevel(ctx context.Context, installationID, cveID string, patchID int64, targetVersion string, requested domain.RemediationLevel) (domain.RemediationLevel, error) {
+	patch, err := o.patchPort.GetByID(ctx, patchID)
+	if err != nil {
+		return "", fmt.Errorf("error recuperando el patch %d: %w", patchID, err)
+	}
+	if patch == nil {
+		return "", fmt.Errorf("no existe el patch %d", patchID)
+	}
+
+	patches, err := o.patchPort.GetByVulnerability(ctx, cveID)
+	if err != nil {
+		return "", fmt.Errorf("error comprobando el patch %d para la CVE %s: %w", patchID, cveID, err)
+	}
+
+	belongsToCVE := false
+	for _, candidate := range patches {
+		if candidate.PatchID == patchID {
+			belongsToCVE = true
+			break
+		}
+	}
+	if !belongsToCVE {
+		return "", fmt.Errorf("el patch %d no está asociado a la CVE %s", patchID, cveID)
+	}
+
+	ceiling := domain.RemediationLevelUnavailable
+	referenceType := strings.ToUpper(strings.TrimSpace(patch.ReferenceType))
+	switch {
+	case referenceType == "MITIGATION":
+		ceiling = domain.RemediationLevelWorkaround
+	case patch.Official && fixedVersionIsValid(patch.FixedVersion):
+		ceiling = domain.RemediationLevelOfficialFix
+	// Sin aval del fabricante hay que comprobar que la instalación sube a la versión.
+	case fixedVersionIsValid(patch.FixedVersion):
+		if o.versionSatisfiesFix(ctx, installationID, targetVersion, patch.FixedVersion) {
+			ceiling = domain.RemediationLevelOfficialFix
+		} else {
+			ceiling = domain.RemediationLevelWorkaround
+		}
+	case patch.Official:
+		ceiling = domain.RemediationLevelOfficialFix
+	}
+
+	return weakerRemediationLevel(requested, ceiling), nil
+}
+
+// versionSatisfiesFix comprueba si la versión destino, o la instalada si no se declara,
+// alcanza alguna de las corregidas.
+func (o *Orchestrator) versionSatisfiesFix(ctx context.Context, installationID, targetVersion, rawFixedVersion string) bool {
+	candidate := strings.TrimSpace(targetVersion)
+	if idx := strings.LastIndex(candidate, "@"); idx >= 0 {
+		candidate = candidate[idx+1:]
+	}
+
+	if candidate == "" {
+		if strings.TrimSpace(installationID) == "" || o.softwareInstPort == nil {
+			return false
+		}
+		software, err := o.softwareInstPort.GetInstalledSoftware(ctx, installationID)
+		if err != nil || software == nil {
+			return false
+		}
+		candidate = strings.TrimSpace(software.Version)
+	}
+	if candidate == "" {
+		return false
+	}
+
+	for _, fv := range domain.ParseFixedVersions(rawFixedVersion) {
+		if strings.TrimSpace(fv.Version) == "" {
+			continue
+		}
+		if cmp, comparable := domain.CompareVersions(candidate, fv.Version); comparable && cmp >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// weakerRemediationLevel devuelve el de mayor factor, es decir el que menos riesgo retira.
+func weakerRemediationLevel(a, b domain.RemediationLevel) domain.RemediationLevel {
+	if !a.IsValid() {
+		return b
+	}
+	if RemediationFactorForLevel(a) >= RemediationFactorForLevel(b) {
+		return a
+	}
+	return b
+}
+
+func fixedVersionIsValid(raw string) bool {
+	for _, fixedVersion := range domain.ParseFixedVersions(raw) {
+		version := strings.TrimSpace(fixedVersion.Version)
+		if version != "" {
+			if _, comparable := domain.CompareVersions(version, version); comparable {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// DeclarePatchApplied registra un parche aplicado, cierra en cascada todos los findings
+// afectados, actualiza la versión del software si procede, reescanea vulnerabilidades
+// y recalcula el riesgo de la infraestructura completa.
 //
 // El nivel determina el factor que multiplica el riesgo: OFFICIAL_FIX 0.00 (el finding
 // pasa a PATCHED), TEMPORARY_FIX 0.30, WORKAROUND 0.50 y UNAVAILABLE 1.00, que revierte
@@ -1307,6 +1482,7 @@ func (o *Orchestrator) GetPatchesForProject(ctx context.Context, projectID int64
 // parcheos legítimos que no cambian el número de versión.
 //
 // Devuelve la declaración persistida y los findings afectados.
+
 func (o *Orchestrator) DeclarePatchApplied(
 	ctx context.Context,
 	installationID string,
@@ -1316,6 +1492,7 @@ func (o *Orchestrator) DeclarePatchApplied(
 	appliedAt time.Time,
 	appliedBy string,
 	notes string,
+	targetVersion string,
 ) (*domain.AppliedPatch, []int64, error) {
 	if installationID == "" {
 		return nil, nil, fmt.Errorf("installation_id vacío")
@@ -1323,53 +1500,114 @@ func (o *Orchestrator) DeclarePatchApplied(
 	if cveID == "" {
 		return nil, nil, fmt.Errorf("cve_id vacío")
 	}
-	if !level.IsValid() {
-		return nil, nil, fmt.Errorf("nivel de remediación no reconocido: %q", level)
-	}
 	if appliedAt.IsZero() {
 		appliedAt = time.Now().UTC()
 	}
 
-	// Sin patch_id se resuelve por el CVE; con varios candidatos hay que concretar.
+	// 1. Obtener TODOS los findings actualmente ABIERTOS en esta instalación
+	initialOpenFindings, _ := o.findingPort.GetOpenFindingsByInstallation(ctx, installationID)
+
+	// Crear set de búsqueda rápida para validar que solo operamos sobre findings no resueltos
+	openCVEsSet := make(map[string]bool, len(initialOpenFindings))
+	for _, f := range initialOpenFindings {
+		openCVEsSet[f.CVEID] = true
+	}
+
+	// 2. Resolver o generar patchID si no viene dado
 	if patchID == 0 {
 		patches, err := o.patchPort.GetByVulnerability(ctx, cveID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("error recuperando los parches de %s: %w", cveID, err)
-		}
-		switch len(patches) {
-		case 0:
-			return nil, nil, fmt.Errorf("no hay ningún parche registrado para %s: regístralo primero", cveID)
-		case 1:
+		if err == nil && len(patches) > 0 {
 			patchID = patches[0].PatchID
-		default:
-			return nil, nil, fmt.Errorf("hay %d parches registrados para %s: indica patch_id", len(patches), cveID)
+		} else {
+			patchID, _ = o.nextNodeID(ctx, "Patch")
+		}
+	}
+
+	level, err := o.resolvePatchLevel(ctx, installationID, cveID, patchID, targetVersion, level)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cleanTargetVer := strings.TrimSpace(targetVersion)
+	if idx := strings.LastIndex(cleanTargetVer, "@"); idx >= 0 {
+		cleanTargetVer = cleanTargetVer[idx+1:]
+	}
+
+	if cleanTargetVer == "" && patchID > 0 {
+		if patch, patchErr := o.patchPort.GetByID(ctx, patchID); patchErr == nil &&
+			patch != nil && patch.FixedVersion != "" {
+			fixedVersions := domain.ParseFixedVersions(patch.FixedVersion)
+			if len(fixedVersions) > 0 && fixedVersions[0].Version != "" {
+				cleanTargetVer = fixedVersions[0].Version
+			}
 		}
 	}
 
 	remediationFactor := RemediationFactorForLevel(level)
 
-	application := &domain.AppliedPatch{
-		PatchID:           patchID,
-		InstallationID:    installationID,
-		CVEID:             cveID,
-		AppliedAt:         appliedAt.UTC(),
-		AppliedBy:         appliedBy,
-		RemediationLevel:  level,
-		RemediationFactor: remediationFactor,
-		Notes:             notes,
-		Verification:      o.verifyPatchApplication(ctx, installationID, cveID, level),
+	// Mapa acumulativo de CVEs que se van a resolver en esta operación concreta
+	resolvedCVEsMap := make(map[string]bool)
+	// Solo incluimos el cveID disparador si estaba abierto o si no hay lista previa
+	if openCVEsSet[cveID] || len(initialOpenFindings) == 0 {
+		resolvedCVEsMap[cveID] = true
 	}
 
-	if err := o.patchPort.SaveApplication(ctx, application); err != nil {
-		if errors.Is(err, domain.ErrNodeNotFound) {
-			return nil, nil, fmt.Errorf("no existe el parche %d o la instalación %q", patchID, installationID)
+	// 3. Regla A: Comparación de versión semántica (cleanTargetVer >= fixed_version)
+	// Se evalúa ÚNICAMENTE sobre la pool de vulnerabilidades abiertas
+	if cleanTargetVer != "" {
+		for _, oldF := range initialOpenFindings {
+			if oldF.FixedVersion != "" {
+				fvs := domain.ParseFixedVersions(oldF.FixedVersion)
+				for _, fv := range fvs {
+					if fv.Version != "" {
+						cmp, ok := domain.CompareVersions(cleanTargetVer, fv.Version)
+						if ok && cmp >= 0 {
+							resolvedCVEsMap[oldF.CVEID] = true
+							break
+						}
+					}
+				}
+			}
 		}
-		return nil, nil, fmt.Errorf("error declarando el parche aplicado: %w", err)
 	}
 
-	// Un parche oficial cierra el finding; una mitigación lo deja abierto con menos riesgo.
-	status := "OPEN"
+	// 4. Actualizar versión en el nodo Software y consultar nuevo CPE en NVD
+	if cleanTargetVer != "" {
+		software, err := o.softwareInstPort.GetInstalledSoftware(ctx, installationID)
+		if err == nil && software != nil {
+			software.Version = cleanTargetVer
+			software.CPE = domain.GenerateCPE23(software.Type, software.Vendor, software.Name, cleanTargetVer)
 
+			if updateErr := o.softwarePort.Update(ctx, software); updateErr == nil {
+				// Regla B: Comparación diferencial contra el nuevo escaneo de NVD
+				fetchResult, fetchErr := o.vulnScannerPort.FetchByCPE(ctx, software.CPE, domain.VulnerabilityFetchOptions{
+					ForceRefresh: true,
+				})
+
+				if fetchErr == nil && fetchResult != nil {
+					newScanCVEs := make(map[string]bool)
+					for _, v := range fetchResult.Vulnerabilities {
+						newScanCVEs[v.CVEID] = true
+					}
+
+					// Cualquier CVE abierta que ya NO esté presente en la nueva versión se resuelve
+					for _, oldF := range initialOpenFindings {
+						if !newScanCVEs[oldF.CVEID] {
+							resolvedCVEsMap[oldF.CVEID] = true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 5. Lista consolidada de CVEs resueltas en este paso
+	resolvedCVEs := make([]string, 0, len(resolvedCVEsMap))
+	for cve := range resolvedCVEsMap {
+		resolvedCVEs = append(resolvedCVEs, cve)
+	}
+
+	status := "OPEN"
 	switch level {
 	case domain.RemediationLevelOfficialFix:
 		status = "PATCHED"
@@ -1379,34 +1617,93 @@ func (o *Orchestrator) DeclarePatchApplied(
 		status = "OPEN"
 	}
 
-	affected, err := o.findingPort.ApplyRemediationByInstallationAndCVE(
-		ctx, installationID, cveID, remediationFactor, status,
+	// 6. Cerrar en bloque todos los findings resueltos en Neo4j
+	affectedFindingIDs, err := o.findingPort.CloseResolvedFindingsBatch(
+		ctx, installationID, resolvedCVEs, remediationFactor, status,
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("error propagando la remediación a los findings: %w", err)
+		return nil, nil, fmt.Errorf("error cerrando findings resueltos: %w", err)
 	}
 
-	// La arista APPLIED_TO es la fuente del histórico, pero Remediation.status/applied_at
-	// es lo que se consulta desde el finding, así que deben coincidir. Al revertir se
-	// limpia la fecha: conservarla contradiría el estado pendiente.
-	var remediationAppliedAt *time.Time
-	if level != domain.RemediationLevelUnavailable {
-		applied := application.AppliedAt
-		remediationAppliedAt = &applied
+	// 7. Persistir en el histórico la relación APPLIED_TO controlando estrictamente duplicados
+	existingApps, _ := o.patchPort.GetApplicationsByInstallation(ctx, installationID)
+	existingOfficialMap := make(map[string]bool, len(existingApps))
+	for _, a := range existingApps {
+		if a.RemediationLevel == domain.RemediationLevelOfficialFix {
+			existingOfficialMap[a.CVEID] = true
+		}
 	}
 
-	if _, err := o.remediationPort.ApplyByInstallationAndCVE(
-		ctx, installationID, cveID, level.RemediationStatus(), remediationAppliedAt,
-	); err != nil {
-		return nil, nil, fmt.Errorf("error sincronizando las remediaciones: %w", err)
+	var primaryApplication *domain.AppliedPatch
+	for _, resCVE := range resolvedCVEs {
+		// Si este CVE ya fue registrado con OFFICIAL_FIX anteriormente, se conserva intacto
+		if existingOfficialMap[resCVE] {
+			continue
+		}
+
+		verification := o.verifyPatchApplication(ctx, installationID, resCVE, level)
+		if cleanTargetVer != "" {
+			verification.ExpectedVersion = cleanTargetVer
+		}
+
+		app := &domain.AppliedPatch{
+			PatchID:           patchID,
+			InstallationID:    installationID,
+			CVEID:             resCVE,
+			AppliedAt:         appliedAt.UTC(),
+			AppliedBy:         appliedBy,
+			RemediationLevel:  level,
+			RemediationFactor: remediationFactor,
+			Notes:             notes,
+			Verification:      verification,
+		}
+
+		_ = o.patchPort.SaveApplication(ctx, app)
+		existingOfficialMap[resCVE] = true
+
+		var remAppliedAt *time.Time
+		if level != domain.RemediationLevelUnavailable {
+			remAppliedAt = &appliedAt
+		}
+		_, _ = o.remediationPort.ApplyByInstallationAndCVE(
+			ctx, installationID, resCVE, level.RemediationStatus(), remAppliedAt,
+		)
+
+		if resCVE == cveID {
+			primaryApplication = app
+		}
 	}
 
-	// Un fallo aquí no invalida la declaración, ya persistida: el cron la recalculará.
-	if err := o.recomputeRiskForInstallation(ctx, installationID); err != nil {
-		return application, affected, fmt.Errorf("parche declarado, pero falló el recálculo del riesgo: %w", err)
+	if primaryApplication == nil && len(resolvedCVEs) > 0 {
+		primaryApplication = &domain.AppliedPatch{
+			PatchID:        patchID,
+			InstallationID: installationID,
+			CVEID:          cveID,
+			AppliedAt:      appliedAt.UTC(),
+		}
 	}
 
-	return application, affected, nil
+	// 8. Re-escanear para asegurar que las vulnerabilidades de la nueva versión queden registradas
+	if cleanTargetVer != "" {
+		if sw, err := o.softwareInstPort.GetInstalledSoftware(ctx, installationID); err == nil && sw != nil {
+			_, _ = o.AutoScanAndRegisterVulnerabilities(ctx, installationID, sw.SoftwareID, domain.VulnerabilityScanOptions{
+				ForceRefresh: true,
+			})
+		}
+	}
+
+	// 9. Recalcular riesgo completo
+	_ = o.recomputeRiskForInstallation(ctx, installationID)
+
+	return primaryApplication, affectedFindingIDs, nil
+}
+
+// GetAppliedPatchHistoryByEndpoint obtiene el histórico de parches de un endpoint estructurado por software.
+func (o *Orchestrator) GetAppliedPatchHistoryByEndpoint(ctx context.Context, endpointID int64) (*domain.EndpointPatchHistory, error) {
+	if endpointID <= 0 {
+		return nil, fmt.Errorf("endpointID inválido")
+	}
+	return o.patchPort.GetAppliedPatchHistoryByEndpoint(ctx, endpointID)
 }
 
 // DeclarePatchAppliedToContainer declara la remediación únicamente sobre el finding
@@ -1443,6 +1740,13 @@ func (o *Orchestrator) DeclarePatchAppliedToContainer(
 		}
 		patchID = patches[0].PatchID
 	}
+
+	// El contenedor no expone instalación ni versión destino: sin comprobación de versión.
+	level, err := o.resolvePatchLevel(ctx, "", cveID, patchID, "", level)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	factor := RemediationFactorForLevel(level)
 	status := "OPEN"
 	if level == domain.RemediationLevelOfficialFix {
@@ -1457,9 +1761,39 @@ func (o *Orchestrator) DeclarePatchAppliedToContainer(
 		RemediationLevel: level, RemediationFactor: factor, Notes: notes,
 		Verification: domain.PatchVerification{Reason: domain.VerificationNotApplicable},
 	}
-	if err := o.patchPort.SaveApplication(ctx, application); err != nil {
-		return nil, nil, fmt.Errorf("error declarando remediación del contenedor %s: %w", containerID, err)
+
+	// Comprobar histórico del contenedor para evitar duplicados
+	existingApps, _ := o.patchPort.GetApplicationsByContainer(ctx, containerID)
+	shouldAddToHistory := true
+	if len(existingApps) > 0 {
+		hasOfficial := false
+		hasTemporary := false
+		for _, prevApp := range existingApps {
+			if prevApp.CVEID == cveID {
+				if prevApp.RemediationLevel == domain.RemediationLevelOfficialFix {
+					hasOfficial = true
+				}
+				if prevApp.RemediationLevel == domain.RemediationLevelTemporaryFix || prevApp.RemediationLevel == domain.RemediationLevelWorkaround {
+					hasTemporary = true
+				}
+			}
+		}
+
+		if hasOfficial {
+			shouldAddToHistory = false
+		} else if hasTemporary && level == domain.RemediationLevelOfficialFix {
+			shouldAddToHistory = true
+		} else if hasTemporary {
+			shouldAddToHistory = false
+		}
 	}
+
+	if shouldAddToHistory {
+		if err := o.patchPort.SaveApplication(ctx, application); err != nil {
+			return nil, nil, fmt.Errorf("error declarando remediación del contenedor %s: %w", containerID, err)
+		}
+	}
+
 	affected, err := o.findingPort.ApplyRemediationByContainerAndCVE(ctx, containerID, cveID, findingID, factor, status)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error actualizando finding %d del contenedor %s: %w", findingID, containerID, err)
@@ -1550,6 +1884,11 @@ func (o *Orchestrator) recomputeRiskForInstallation(ctx context.Context, install
 	for _, endpointID := range endpointIDs {
 		if err := o.ComputeEndpointRisk(ctx, endpointID); err != nil {
 			return fmt.Errorf("error recalculando el riesgo del endpoint %d: %w", endpointID, err)
+		}
+		// Recalcular también el riesgo agregado del proyecto
+		projectID, pErr := o.riskPort.GetProjectIDByEndpoint(ctx, endpointID)
+		if pErr == nil && projectID != 0 {
+			_ = o.AggregateProjectRiskFromCurrentEndpointScores(ctx, projectID)
 		}
 	}
 
@@ -1893,7 +2232,58 @@ func (o *Orchestrator) ComputeAllProjectsRisk(ctx context.Context) error {
 // GenerateExploitationPaths devuelve las rutas de explotación calculadas desde el motor de grafos,
 // filtradas por proyecto si se indica un projectID > 0.
 func (o *Orchestrator) GenerateExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error) {
-	return o.infraPort.GetExploitationPaths(ctx, projectID)
+	paths, err := o.infraPort.GetExploitationPaths(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	o.scorePathPriorities(ctx, paths)
+	return paths, nil
+}
+
+// scorePathPriorities pondera cada ruta por la criticidad de su activo final.
+// El repositorio ya deja PathRiskScore; aquí se añade el peso de negocio, que
+// necesita leer el endpoint. Si no se puede leer, queda criticidad neutra en vez
+// de descartar la ruta.
+func (o *Orchestrator) scorePathPriorities(ctx context.Context, paths []domain.ExploitationPath) {
+	criticalityCache := make(map[int64]float64)
+
+	for i := range paths {
+		path := &paths[i]
+		if len(path.Steps) == 0 {
+			continue
+		}
+
+		// El impacto lo marca el activo más valioso que toca la cadena, no el
+		// último: una ruta que atraviesa la BBDD de producción para acabar en un
+		// puesto ya ha hecho el daño al pasar por la BBDD.
+		peak := 0.0
+		var peakID int64
+		for _, step := range path.Steps {
+			criticality, cached := criticalityCache[step.TargetEndpointID]
+			if !cached {
+				criticality = minAssetCriticality
+				if endpoint, err := o.endpointPort.GetByID(ctx, step.TargetEndpointID); err == nil && endpoint != nil {
+					criticality = CalculateAssetCriticality(
+						endpoint.InternetExposed,
+						endpoint.Environment,
+						endpoint.ConfidentialityReq,
+						endpoint.IntegrityReq,
+						endpoint.AvailabilityReq,
+					)
+				}
+				criticalityCache[step.TargetEndpointID] = criticality
+			}
+
+			if criticality > peak {
+				peak, peakID = criticality, step.TargetEndpointID
+			}
+		}
+
+		path.TargetCriticality = peak
+		path.CriticalAssetID = peakID
+		path.PathPriorityScore = CalculatePathPriority(path.PathRiskScore, peak)
+	}
 }
 
 // IsAnalysisPending comprueba si hay enriquecimiento NVD activo en background.
@@ -1910,99 +2300,98 @@ func (o *Orchestrator) SaveContainerImage(ctx context.Context, image *domain.Con
 // asociándolo al Endpoint host y a la imagen base si existe.
 func (o *Orchestrator) SaveContainer(ctx context.Context, container *domain.Container) error {
 	if container == nil {
-			return fmt.Errorf("contenedor vacío")
+		return fmt.Errorf("contenedor vacío")
 	}
 
 	containerID := strings.TrimSpace(container.ContainerID)
 	imageID := strings.TrimSpace(container.ImageID)
 
 	if containerID == "" {
-			return fmt.Errorf("container_id vacío")
+		return fmt.Errorf("container_id vacío")
 	}
 
 	existingContainer, err := o.containerPort.GetContainer(ctx, containerID)
 	if err != nil && !errors.Is(err, domain.ErrNodeNotFound) {
-			return fmt.Errorf(
-					"error recuperando container_id=%s antes de actualizar image_id: %w",
-					containerID,
-					err,
-			)
+		return fmt.Errorf(
+			"error recuperando container_id=%s antes de actualizar image_id: %w",
+			containerID,
+			err,
+		)
 	}
 
 	if existingContainer != nil {
-			oldImageID := strings.TrimSpace(existingContainer.ImageID)
-			oldImageRef := strings.TrimPrefix(oldImageID, containerID+"_")
+		oldImageID := strings.TrimSpace(existingContainer.ImageID)
+		oldImageRef := strings.TrimPrefix(oldImageID, containerID+"_")
 
-			if oldImageID != "" && oldImageRef != imageID {
-					changedAt := time.Now().UTC()
+		if oldImageID != "" && oldImageRef != imageID {
+			changedAt := time.Now().UTC()
 
-					if _, err := o.findingPort.SupersedeContainerImageFindings(
-							ctx,
-							containerID,
-							oldImageID,
-							changedAt,
-					); err != nil {
-							return fmt.Errorf(
-									"error invalidando findings de container_id=%s e image_id=%s: %w",
-									containerID,
-									oldImageID,
-									err,
-							)
-					}
+			if _, err := o.findingPort.SupersedeContainerImageFindings(
+				ctx,
+				containerID,
+				oldImageID,
+				changedAt,
+			); err != nil {
+				return fmt.Errorf(
+					"error invalidando findings de container_id=%s e image_id=%s: %w",
+					containerID,
+					oldImageID,
+					err,
+				)
 			}
+		}
 	}
 
 	if err := o.containerPort.SaveContainer(ctx, container); err != nil {
-			return fmt.Errorf(
-					"error guardando container_id=%s, image_id=%s: %w",
-					containerID,
-					imageID,
-					err,
-			)
+		return fmt.Errorf(
+			"error guardando container_id=%s, image_id=%s: %w",
+			containerID,
+			imageID,
+			err,
+		)
 	}
 
 	savedContainer, err := o.containerPort.GetContainer(ctx, containerID)
 	if err != nil {
-			return fmt.Errorf(
-					"error recuperando imagen persistida para container_id=%s: %w",
-					containerID,
-					err,
-			)
+		return fmt.Errorf(
+			"error recuperando imagen persistida para container_id=%s: %w",
+			containerID,
+			err,
+		)
 	}
 
 	imageNodeID := strings.TrimSpace(savedContainer.ImageID)
 
 	if imageNodeID != "" {
-			vulns, err := o.containerPort.GetVulnerabilitiesByContainerImage(
-					ctx,
-					imageNodeID,
+		vulns, err := o.containerPort.GetVulnerabilitiesByContainerImage(
+			ctx,
+			imageNodeID,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"contenedor guardado parcialmente: container_id=%s, image_id=%s: %w",
+				containerID,
+				imageNodeID,
+				err,
 			)
-			if err != nil {
-					return fmt.Errorf(
-							"contenedor guardado parcialmente: container_id=%s, image_id=%s: %w",
-							containerID,
-							imageNodeID,
-							err,
-					)
-			}
+		}
 
-			if _, err := o.syncContainerFindingsForImage(
-					ctx,
-					imageNodeID,
-					vulns,
-			); err != nil {
-					return fmt.Errorf(
-							"contenedor guardado parcialmente: container_id=%s, image_id=%s: %w",
-							containerID,
-							imageNodeID,
-							err,
-					)
-			}
+		if _, err := o.syncContainerFindingsForImage(
+			ctx,
+			imageNodeID,
+			vulns,
+		); err != nil {
+			return fmt.Errorf(
+				"contenedor guardado parcialmente: container_id=%s, image_id=%s: %w",
+				containerID,
+				imageNodeID,
+				err,
+			)
+		}
 	}
 
 	return nil
 }
-
 
 // syncContainerFindingsForImage sincroniza/materializa los findings contextuales para todos los contenedores que usan la imagen.
 func (o *Orchestrator) syncContainerFindingsForImage(
@@ -2112,8 +2501,6 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		return nil, errors.New("scoutPort is not initialized")
 	}
 
-
-
 	// if idx := strings.Index(imageID, "_"); idx != -1 && strings.HasPrefix(imageID, "container") {
 	// 	imageID = imageID[idx+1:]
 	// }
@@ -2121,14 +2508,13 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		imageName = imageName[idx+1:]
 	}
 
-	 imageID = strings.TrimSpace(imageID)
+	imageID = strings.TrimSpace(imageID)
 	scoutImageName := strings.TrimSpace(imageName)
 
 	if idx := strings.Index(scoutImageName, "_"); idx != -1 &&
-			strings.HasPrefix(scoutImageName, "container") {
-			scoutImageName = scoutImageName[idx+1:]
+		strings.HasPrefix(scoutImageName, "container") {
+		scoutImageName = scoutImageName[idx+1:]
 	}
-
 
 	// Desacoplar el contexto de la desconexión HTTP del cliente, manteniendo un timeout de seguridad amplio (15 min)
 	// para garantizar que la ingesta de vulnerabilidades y findings en Neo4j se complete de forma atómica.
@@ -2459,8 +2845,137 @@ func (o *Orchestrator) SyncScoutDaily(ctx context.Context) error {
 	return nil
 }
 
+// RunDailyPipeline ejecuta la canalización nocturna completa a las 03:00 AM (o bajo demanda):
+// 1. Obtiene los identificadores de todos los proyectos registrados en el sistema.
+// 2. Ejecuta el análisis automático de vulnerabilidades para TODAS las instalaciones de software en todos los proyectos (equivalente al botón del frontend).
+// 3. Escanea TODAS las imágenes de contenedores mediante Docker Scout (SyncScoutDaily), registrando hallazgos e imágenes.
+// 4. Sincroniza las vulnerabilidades NVD/NIST globales recientes (SyncNistDaily).
+// 5. Recalcula el riesgo global y niveles de prioridad para todos los proyectos y sus activos (ComputeAllProjectsRisk).
+func (o *Orchestrator) RunDailyPipeline(ctx context.Context) error {
+	log.Println("[CRON 03:00 AM] Iniciando canalización diaria unificada de análisis de vulnerabilidades y recálculo de riesgo...")
+
+	// 1. Obtener todos los IDs de proyectos
+	var projectIDs []int64
+	if o.riskPort != nil {
+		pIDs, err := o.riskPort.GetAllProjectIDs(ctx)
+		if err == nil {
+			projectIDs = pIDs
+		}
+	}
+
+	log.Printf("[CRON 03:00 AM] Proyectos a analizar: %d %v", len(projectIDs), projectIDs)
+
+	// 2. Fase 1/4: Análisis de vulnerabilidades de Software (cruce CPE -> NVD)
+	log.Println("[CRON 03:00 AM] Fase 1/4: Escaneando vulnerabilidades de instalaciones de software...")
+	if o.softwareInstPort != nil {
+		var installations []domain.SoftwareInstallationItem
+		if len(projectIDs) > 0 {
+			for _, pid := range projectIDs {
+				items, pErr := o.softwareInstPort.GetSoftwareInstallationsByProject(ctx, pid)
+				if pErr == nil && len(items) > 0 {
+					installations = append(installations, items...)
+				}
+			}
+		}
+		// Fallback o complemento: si la búsqueda por proyecto devuelve 0 o para asegurar cobertura completa
+		if len(installations) == 0 {
+			items, allErr := o.softwareInstPort.GetAllSoftwareInstallations(ctx)
+			if allErr == nil {
+				installations = items
+			}
+		}
+
+		log.Printf("[CRON 03:00 AM] Iniciando análisis automático de %d instalaciones de software...", len(installations))
+		var scanErrs []error
+		for _, inst := range installations {
+			log.Printf("[CRON 03:00 AM] Analizando vulnerabilidades de instalación: %s (Software ID: %d)", inst.InstallationID, inst.SoftwareID)
+			_, scanErr := o.AutoScanAndRegisterVulnerabilities(ctx, inst.InstallationID, inst.SoftwareID, domain.VulnerabilityScanOptions{ForceRefresh: true})
+			if scanErr != nil {
+				scanErrs = append(scanErrs, scanErr)
+			}
+		}
+		if len(scanErrs) > 0 {
+			log.Printf("[CRON 03:00 AM] Análisis de software completado con %d advertencias/errores.", len(scanErrs))
+		} else {
+			log.Println("[CRON 03:00 AM] Análisis de vulnerabilidades de instalaciones de software completado con éxito.")
+		}
+	}
+
+	// 3. Fase 2/4: Escaneo de imágenes Docker con Scout
+	if o.scoutPort != nil {
+		log.Println("[CRON 03:00 AM] Fase 2/4: Escaneando imágenes de contenedores con Docker Scout...")
+		var containerImages []domain.ContainerImage
+		if len(projectIDs) > 0 && o.containerPort != nil {
+			for _, pid := range projectIDs {
+				imgs, pErr := o.containerPort.GetContainerImagesByProject(ctx, pid)
+				if pErr == nil && len(imgs) > 0 {
+					containerImages = append(containerImages, imgs...)
+				}
+			}
+		}
+		if len(containerImages) == 0 && o.containerPort != nil {
+			imgs, allErr := o.containerPort.GetAllContainerImages(ctx)
+			if allErr == nil {
+				containerImages = imgs
+			}
+		}
+
+		log.Printf("[CRON 03:00 AM] Escaneando %d imágenes de contenedores...", len(containerImages))
+		var scoutErrs []error
+		for _, img := range containerImages {
+			imageName := img.ImageID
+			if imageName == "" {
+				imageName = img.Name
+			}
+			log.Printf("[CRON 03:00 AM] Escaneando imagen Docker Scout: %s", imageName)
+			_, err := o.ScanAndSaveContainerImage(ctx, imageName, img.ImageID, domain.VulnerabilityScanOptions{ForceRefresh: true})
+			if err != nil {
+				scoutErrs = append(scoutErrs, err)
+			}
+		}
+		if len(scoutErrs) > 0 {
+			log.Printf("[CRON 03:00 AM] Escaneo Docker Scout completado con %d errores.", len(scoutErrs))
+		} else {
+			log.Println("[CRON 03:00 AM] Escaneo de imágenes Docker Scout completado con éxito.")
+		}
+	} else {
+		log.Println("[CRON 03:00 AM] Fase 2/4: Docker Scout no está configurado, omitiendo escaneo de imágenes.")
+	}
+
+	// 4. Fase 3/4: Sincronización diaria con NIST/NVD para vulnerabilidades globales
+	log.Println("[CRON 03:00 AM] Fase 3/4: Sincronizando vulnerabilidades globales con NIST/NVD...")
+	if err := o.SyncNistDaily(ctx); err != nil {
+		log.Printf("[CRON 03:00 AM] Advertencia en sincronización NIST: %v", err)
+	} else {
+		log.Println("[CRON 03:00 AM] Sincronización de vulnerabilidades NIST/NVD completada.")
+	}
+
+	// 5. Fase 4/4: Recálculo global del riesgo de todos los proyectos
+	if o.riskPort != nil {
+		log.Println("[CRON 03:00 AM] Fase 4/4: Recalculando riesgo global de todos los proyectos...")
+		if err := o.ComputeAllProjectsRisk(ctx); err != nil {
+			log.Printf("[CRON 03:00 AM] Error recalculando riesgo global de proyectos: %v", err)
+			return err
+		}
+		log.Println("[CRON 03:00 AM] Recálculo global de riesgo completado con éxito.")
+	}
+
+	log.Println("[CRON 03:00 AM] Canalización diaria de las 03:00 AM finalizada correctamente.")
+	return nil
+}
+
 // AddContainerToEndpoint guarda un contenedor y lo vincula a un host (endpoint)
 func (o *Orchestrator) AddContainerToEndpoint(ctx context.Context, hostID int64, container *domain.Container) error {
+	if err := o.validateAssetNameUnique(ctx, container.Name, container.ContainerID, o.projectIDOfEndpoint(ctx, hostID)); err != nil {
+		return err
+	}
+
+	validIPs, err := o.validateAssetIPs(ctx, o.projectIDOfEndpoint(ctx, hostID), container.IPs, 0, container.ContainerID)
+	if err != nil {
+		return err
+	}
+	container.IPs = validIPs
+
 	if container.ContainerID == "" {
 		// En principio el frontend genera UUID, pero si no...
 		container.ContainerID = fmt.Sprintf("container-%d", time.Now().UnixNano())
@@ -2475,10 +2990,13 @@ func (o *Orchestrator) AddContainerToEndpoint(ctx context.Context, hostID int64,
 		if err := o.containerPort.SaveIPs(ctx, container.ContainerID, container.IPs); err != nil {
 			return fmt.Errorf("error guardando IPs del contenedor: %w", err)
 		}
-		if o.networkPort != nil {
-			if _, err := o.networkPort.LinkContainerToMatchingNetworks(ctx, container.ContainerID, container.IPs); err != nil {
-				return fmt.Errorf("error enlazando contenedor a las redes coincidentes: %w", err)
-			}
+	}
+
+	// Incondicional por el mismo motivo que en el alta de endpoint: un alta que reutiliza
+	// un ID existente tiene que limpiar las aristas de las IPs anteriores.
+	if o.networkPort != nil {
+		if _, err := o.networkPort.LinkContainerToMatchingNetworks(ctx, container.ContainerID, container.IPs, o.projectIDOfEndpoint(ctx, hostID)); err != nil {
+			return fmt.Errorf("error enlazando contenedor a las redes coincidentes: %w", err)
 		}
 	}
 	return nil
@@ -2486,6 +3004,21 @@ func (o *Orchestrator) AddContainerToEndpoint(ctx context.Context, hostID int64,
 
 // UpdateContainer actualiza los datos de un contenedor y sus IPs.
 func (o *Orchestrator) UpdateContainer(ctx context.Context, container *domain.Container) error {
+	projectID := int64(0)
+	if o.infraPort != nil {
+		projectID, _ = o.infraPort.GetProjectIDByContainer(ctx, container.ContainerID)
+	}
+
+	if err := o.validateAssetNameUnique(ctx, container.Name, container.ContainerID, projectID); err != nil {
+		return err
+	}
+
+	validIPs, err := o.validateAssetIPs(ctx, projectID, container.IPs, 0, container.ContainerID)
+	if err != nil {
+		return err
+	}
+	container.IPs = validIPs
+
 	if err := o.SaveContainer(ctx, container); err != nil {
 		return err
 	}
@@ -2494,7 +3027,7 @@ func (o *Orchestrator) UpdateContainer(ctx context.Context, container *domain.Co
 		return fmt.Errorf("error actualizando IPs del contenedor: %w", err)
 	}
 	if o.networkPort != nil {
-		if _, err := o.networkPort.LinkContainerToMatchingNetworks(ctx, container.ContainerID, container.IPs); err != nil {
+		if _, err := o.networkPort.LinkContainerToMatchingNetworks(ctx, container.ContainerID, container.IPs, projectID); err != nil {
 			return fmt.Errorf("error re-enlazando contenedor a redes coincidentes: %w", err)
 		}
 	}
@@ -2505,6 +3038,20 @@ func (o *Orchestrator) UpdateContainer(ctx context.Context, container *domain.Co
 
 // UpdateEndpoint actualiza los datos y re-enlaza las IPs de un Endpoint en Neo4j.
 func (o *Orchestrator) UpdateEndpoint(ctx context.Context, endpoint *domain.Endpoint) error {
+	endpointProjectID := o.projectIDOfEndpoint(ctx, endpoint.EndpointID)
+
+	if err := o.validateAssetNameUnique(ctx, endpoint.Hostname, endpoint.EndpointID, endpointProjectID); err != nil {
+		return err
+	}
+
+	// Las IPs se validan antes de tocar nada: SaveIPs borra y recrea los nodos :IPAddress,
+	// así que comprobar después dejaría el duplicado ya escrito.
+	validIPs, err := o.validateAssetIPs(ctx, endpointProjectID, endpoint.IPs, endpoint.EndpointID, "")
+	if err != nil {
+		return err
+	}
+	endpoint.IPs = validIPs
+
 	// Recalcular la categoría aquí es lo que permite reclasificar un activo mal dado de alta:
 	// al corregir su tipo, el bucket de SLA se recoloca en la misma operación.
 	endpoint.ApplyCategory()
@@ -2518,7 +3065,7 @@ func (o *Orchestrator) UpdateEndpoint(ctx context.Context, endpoint *domain.Endp
 	}
 
 	if o.networkPort != nil {
-		if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs); err != nil {
+		if _, err := o.networkPort.LinkEndpointToMatchingNetworks(ctx, endpoint.EndpointID, endpoint.IPs, endpointProjectID); err != nil {
 			return fmt.Errorf("error actualizando relaciones endpoint-red para endpoint %d: %w", endpoint.EndpointID, err)
 		}
 	}
@@ -2558,28 +3105,58 @@ func (o *Orchestrator) GetEndpointIPs(ctx context.Context, endpointID int64) ([]
 // Si tras la actualización ningún endpoint coincide, ancla la red al proyecto indicado
 // como huérfana de ese proyecto (ver LinkNetworkToProjectIfOrphan).
 func (o *Orchestrator) UpdateNetwork(ctx context.Context, network *domain.Network, projectID int64) (int, error) {
+	scope, err := o.validateNetworkUniqueness(ctx, network, projectID, network.NetworkID)
+	if err != nil {
+		return 0, err
+	}
 	if err := o.networkPort.Update(ctx, network); err != nil {
 		return 0, err
 	}
-	linked, err := o.networkPort.LinkMatchingEndpoints(ctx, network.NetworkID, network.CIDR, network.VLANID)
-	if err != nil {
-		return 0, fmt.Errorf("error enlazando endpoints a la red actualizada: %w", err)
-	}
+	// Igual que en CreateNetwork: primero el ancla, luego la reconciliación. Al editar el
+	// CIDR de una red hasta dejarla sin activos, el ancla es lo único que la mantiene
+	// visible en el grafo del proyecto para poder volver a corregirla.
 	if projectID > 0 {
 		if err := o.networkPort.LinkNetworkToProjectIfOrphan(ctx, network.NetworkID, projectID); err != nil {
-			return linked, fmt.Errorf("error anclando la red huérfana al proyecto: %w", err)
+			return 0, fmt.Errorf("error anclando la red huérfana al proyecto: %w", err)
 		}
+	}
+	linked, err := o.reconcileNetworkScope(ctx, scope, network.NetworkID)
+	if err != nil {
+		return 0, fmt.Errorf("error enlazando endpoints a la red actualizada: %w", err)
 	}
 	return linked, nil
 }
 
-// DeleteNetwork elimina una Red por su ID.
+// DeleteNetwork elimina una Red por su ID y recalcula el ámbito que la contenía.
+//
+// El recálculo es imprescindible: al borrar una subred específica, los activos que colgaban
+// de ella tienen que volver al rango padre que los sigue conteniendo. El ámbito se resuelve
+// ANTES del borrado, porque después la red ya no tiene proyecto del que colgar.
 func (o *Orchestrator) DeleteNetwork(ctx context.Context, networkID int64) error {
-	return o.networkPort.DeleteByID(ctx, networkID)
+	var scope []int64
+	if o.infraPort != nil {
+		owners, err := o.infraPort.GetProjectIDsByNetwork(ctx, networkID)
+		if err != nil {
+			return fmt.Errorf("error resolviendo el proyecto de la red antes de borrarla: %w", err)
+		}
+		scope = owners
+	}
+
+	if err := o.networkPort.DeleteByID(ctx, networkID); err != nil {
+		return err
+	}
+
+	if _, err := o.reconcileNetworkScope(ctx, scope, 0); err != nil {
+		return fmt.Errorf("red borrada, pero falló el recálculo de las relaciones activo-red: %w", err)
+	}
+	return nil
 }
 
 // UpdateHardware actualiza las especificaciones de Hardware.
 func (o *Orchestrator) UpdateHardware(ctx context.Context, hardware *domain.Hardware) error {
+	if err := domain.ValidateAndNormalizeHardware(hardware); err != nil {
+		return err
+	}
 	return o.hardwarePort.Update(ctx, hardware)
 }
 
@@ -3294,6 +3871,15 @@ func (o *Orchestrator) RefreshProjectPatches(ctx context.Context, projectID int6
 	return result, nil
 }
 
+// fixedVersionText genera un texto con las versiones fijas separadas por comas.
+func fixedVersionText(fixedVersions []domain.FixedVersion) string {
+	values := make([]string, 0, len(fixedVersions))
+	for _, fixedVersion := range fixedVersions {
+		values = append(values, fixedVersion.String())
+	}
+	return strings.Join(values, ", ")
+}
+
 // SyntheticPatchFromFixedVersions genera un objeto Patch sintético basado en la existencia de versiones fijas para un CVE dado.
 func syntheticPatchFromFixedVersions(cveID string, fixedVersions []domain.FixedVersion) *domain.Patch {
 	if strings.TrimSpace(cveID) == "" || len(fixedVersions) == 0 {
@@ -3301,15 +3887,18 @@ func syntheticPatchFromFixedVersions(cveID string, fixedVersions []domain.FixedV
 	}
 
 	return &domain.Patch{
-		Description: fmt.Sprintf("Mitigación por actualización de versión (%s)", cveID),
-		URL:         fmt.Sprintf("fixed-version://%s", cveID),
+		Description:   fmt.Sprintf("Actualización recomendada según OSV (%s)", cveID),
+		URL:           fmt.Sprintf("https://osv.dev/vulnerability/%s", cveID),
+		Source:        "OSV",
+		ReferenceType: "FIXED_VERSION",
+		Official:      true,
+		FixedVersion:  fixedVersionText(fixedVersions),
 	}
 }
 
 func (o *Orchestrator) GetTTPMatrix(ctx context.Context, projectID *int64) ([]domain.TTPMatrixItem, error) {
 	return o.infraPort.GetTTPMatrix(ctx, projectID)
 }
-
 
 // Métodos auxiliares de consulta de estado previo para auditoría
 func (o *Orchestrator) GetEndpointByID(ctx context.Context, id int64) (*domain.Endpoint, error) {
@@ -3339,6 +3928,7 @@ func (o *Orchestrator) GetContainerByID(ctx context.Context, id string) (*domain
 func (o *Orchestrator) GetProjectByID(ctx context.Context, id int64) (*domain.Project, error) {
 	return o.projectPort.GetByID(ctx, id)
 }
+
 // GetTTPStats devuelve las métricas agregadas para el dashboard de inteligencia de amenazas.
 func (o *Orchestrator) GetTTPStats(ctx context.Context, projectID int64) (*domain.TTPStats, error) {
 	return o.infraPort.GetTTPStats(ctx, projectID)
@@ -3379,4 +3969,155 @@ func (o *Orchestrator) GetPaginatedInventory(ctx context.Context, query domain.I
 		query.Limit = 50
 	}
 	return o.infraPort.GetPaginatedInventory(ctx, query)
+}
+
+// validateNetworkUniqueness valida y normaliza los datos de una red y comprueba que no
+// colisione con otra red del mismo proyecto por nombre, rango CIDR o VLAN ID.
+//
+// El ámbito es el proyecto, no la base de datos entera: dos auditorías distintas pueden
+// tener cada una su "DMZ" en 10.0.1.0/24. El ámbito se calcula uniendo el proyecto que
+// llega en la petición con los que ya tenga la red en el grafo, porque el cliente no
+// siempre manda project_id al editar y una red puede colgar de varios proyectos.
+//
+// Los errores del repositorio se propagan en lugar de ignorarse: si la base de datos no
+// puede responder, no damos por hecho que no hay duplicados.
+func (o *Orchestrator) validateNetworkUniqueness(ctx context.Context, network *domain.Network, projectID int64, excludeID int64) ([]int64, error) {
+	if err := domain.ValidateAndNormalizeNetwork(network); err != nil {
+		return nil, err
+	}
+	if o.infraPort == nil {
+		// Sin repositorio no hay comprobación posible; devolvemos al menos el proyecto pedido
+		// para que el emparejamiento posterior siga acotado.
+		if projectID > 0 {
+			return []int64{projectID}, nil
+		}
+		return nil, nil
+	}
+
+	scope, err := o.networkProjectScope(ctx, projectID, excludeID)
+	if err != nil {
+		return nil, err
+	}
+
+	candidates, err := o.infraPort.GetNetworksInProjectScope(ctx, scope, excludeID)
+	if err != nil {
+		return nil, fmt.Errorf("error comprobando las redes del proyecto: %w", err)
+	}
+
+	nameKey := strings.ToLower(network.Nombre)
+	for _, other := range candidates {
+		if strings.ToLower(strings.TrimSpace(other.Nombre)) == nameKey {
+			return nil, fmt.Errorf("%w: ya existe una red con este nombre en el proyecto. Por favor, elige un nombre único", domain.ErrDuplicateNetwork)
+		}
+
+		// Comparamos por la forma canónica: 10.0.1.37/24 y 10.0.1.0/24 son la misma subred.
+		if otherCIDR, err := domain.NormalizeCIDR(other.CIDR); err == nil && otherCIDR == network.CIDR {
+			return nil, fmt.Errorf("%w: el rango %s ya está asignado a la red '%s' de este proyecto. Por favor, elige un CIDR único", domain.ErrDuplicateNetwork, network.CIDR, other.Nombre)
+		}
+
+		if network.VLANID > 0 && other.VLANID == network.VLANID {
+			return nil, fmt.Errorf("%w: el VLAN ID %d ya está asignado a la red '%s' de este proyecto. Por favor, elige un VLAN ID único", domain.ErrDuplicateNetwork, network.VLANID, other.Nombre)
+		}
+	}
+
+	return scope, nil
+}
+
+// networkProjectScope devuelve los proyectos contra los que comprobar duplicados: el que
+// llega en la petición más los que la red ya tenga asignados en el grafo. Una lista vacía
+// significa "redes sin proyecto", que es el ámbito de una red creada sin proyecto.
+func (o *Orchestrator) networkProjectScope(ctx context.Context, projectID int64, networkID int64) ([]int64, error) {
+	seen := make(map[int64]bool)
+	var scope []int64
+
+	if projectID > 0 {
+		seen[projectID] = true
+		scope = append(scope, projectID)
+	}
+
+	if networkID > 0 {
+		owners, err := o.infraPort.GetProjectIDsByNetwork(ctx, networkID)
+		if err != nil {
+			return nil, fmt.Errorf("error resolviendo el proyecto de la red: %w", err)
+		}
+		for _, id := range owners {
+			if id > 0 && !seen[id] {
+				seen[id] = true
+				scope = append(scope, id)
+			}
+		}
+	}
+
+	return scope, nil
+}
+
+// validateAssetIPs normaliza las IPs de un endpoint o contenedor y comprueba que ninguna
+// esté ya ocupada por otro activo del mismo proyecto. Devuelve las IPs ya normalizadas
+// para que el llamante persista esas y no las del formulario.
+//
+// Se llama SIEMPRE antes de escribir: SaveIPs borra y recrea los nodos :IPAddress, así que
+// validar después dejaría el duplicado ya guardado.
+func (o *Orchestrator) validateAssetIPs(ctx context.Context, projectID int64, ips []domain.EndpointIP, excludeEndpointID int64, excludeContainerID string) ([]domain.EndpointIP, error) {
+	normalized, err := domain.NormalizeAssetIPs(ips)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(normalized) == 0 || o.infraPort == nil || projectID <= 0 {
+		return normalized, nil
+	}
+
+	values := make([]string, 0, len(normalized))
+	for _, entry := range normalized {
+		values = append(values, entry.IP)
+	}
+
+	conflicts, err := o.infraPort.FindIPConflicts(ctx, projectID, values, excludeEndpointID, excludeContainerID)
+	if err != nil {
+		return nil, err
+	}
+	if len(conflicts) > 0 {
+		return nil, domain.FormatIPConflicts(conflicts)
+	}
+
+	return normalized, nil
+}
+
+// projectIDOfEndpoint resuelve el proyecto de un endpoint, o 0 si no se puede determinar.
+// Se usa para acotar la comprobación de IPs duplicadas; si falla, la comprobación cruzada
+// se omite y solo queda la validación de formato, que no depende de la base de datos.
+func (o *Orchestrator) projectIDOfEndpoint(ctx context.Context, endpointID int64) int64 {
+	if o.riskPort == nil || endpointID <= 0 {
+		return 0
+	}
+	projectID, err := o.riskPort.GetProjectIDByEndpoint(ctx, endpointID)
+	if err != nil {
+		return 0
+	}
+	return projectID
+}
+
+// validateAssetNameUnique comprueba que no exista ya un endpoint o un contenedor con ese
+// nombre en el proyecto. Los dos tipos comparten espacio de nombres, pero el ámbito es el
+// proyecto: dos auditorías distintas pueden tener cada una su "validation-dmz-web".
+//
+// excludeID es el identificador del propio activo al editarlo (int64 para endpoints,
+// string para contenedores), para que no choque consigo mismo.
+//
+// El error del repositorio se propaga en lugar de ignorarse: si la base de datos no puede
+// responder, no damos por hecho que el nombre está libre.
+func (o *Orchestrator) validateAssetNameUnique(ctx context.Context, name string, excludeID any, projectID int64) error {
+	if strings.TrimSpace(name) == "" || o.infraPort == nil {
+		return nil
+	}
+
+	exists, err := o.infraPort.IsAssetNodeNameDuplicate(ctx, name, excludeID, projectID)
+	if err != nil {
+		return fmt.Errorf("error comprobando el nombre del activo: %w", err)
+	}
+	if exists {
+		return fmt.Errorf("%w: ya existe un activo con este nombre en el proyecto. Por favor, elige un nombre único", domain.ErrDuplicateAsset)
+	}
+
+	return nil
 }

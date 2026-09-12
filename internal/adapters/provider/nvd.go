@@ -837,9 +837,12 @@ func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 		for _, tag := range ref.Tags {
 			if tag == "Patch" {
 				patches = append(patches, domain.Patch{
-					PatchID:     0, // El ID se asignará antes de guardarlo en base de datos
-					Description: "Parche oficial (" + cve.ID + ")",
-					URL:         ref.URL,
+					PatchID:       0, // El ID se asignará antes de guardarlo en base de datos
+					Description:   "Parche oficial (" + cve.ID + ")",
+					URL:           ref.URL,
+					Source:        "NVD",
+					ReferenceType: "PATCH",
+					Official:      true,
 				})
 				break
 			}

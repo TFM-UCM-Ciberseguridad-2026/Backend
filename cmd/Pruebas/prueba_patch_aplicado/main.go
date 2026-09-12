@@ -152,7 +152,7 @@ func main() {
 	fmt.Println("\n[4/8] Declarando un WORKAROUND (mitigación parcial)...")
 	appliedAt := time.Date(2026, 7, 29, 10, 0, 0, 0, time.UTC)
 	app, affected, err := orch.DeclarePatchApplied(ctx, installationID, cveID, patchID,
-		domain.RemediationLevelWorkaround, appliedAt, "diego", "Deshabilitado JNDI lookup por configuración")
+		domain.RemediationLevelWorkaround, appliedAt, "diego", "Deshabilitado JNDI lookup por configuración", "")
 	if err != nil {
 		log.Fatalf("declaración workaround: %v", err)
 	}
@@ -192,7 +192,7 @@ func main() {
 	// ── 5. Declarar el parche OFICIAL ──────────────────────────────────────
 	fmt.Println("\n[5/8] Declarando el parche OFICIAL sobre la misma instalación...")
 	appOficial, affectedOficial, err := orch.DeclarePatchApplied(ctx, installationID, cveID, patchID,
-		domain.RemediationLevelOfficialFix, time.Time{}, "diego", "Actualizado a 2.17.1")
+		domain.RemediationLevelOfficialFix, time.Time{}, "diego", "Actualizado a 2.17.1", "2.17.1")
 	if err != nil {
 		log.Fatalf("declaración oficial: %v", err)
 	}
@@ -271,7 +271,7 @@ func main() {
 	// ── 8. Revertir la declaración ─────────────────────────────────────────
 	fmt.Println("\n[8/9] Revirtiendo la declaración (UNAVAILABLE)...")
 	if _, _, err := orch.DeclarePatchApplied(ctx, installationID, cveID, patchID,
-		domain.RemediationLevelUnavailable, time.Time{}, "diego", "Rollback: el parche rompía la app"); err != nil {
+		domain.RemediationLevelUnavailable, time.Time{}, "diego", "Rollback: el parche rompía la app", ""); err != nil {
 		log.Fatalf("reversión: %v", err)
 	}
 
@@ -306,19 +306,19 @@ func main() {
 	fmt.Println("\n[9/9] Comprobando que los datos inválidos fallan...")
 
 	if _, _, err := orch.DeclarePatchApplied(ctx, fakeInstD, cveID, patchID,
-		domain.RemediationLevelOfficialFix, time.Time{}, "diego", ""); err == nil {
+		domain.RemediationLevelOfficialFix, time.Time{}, "diego", "", ""); err == nil {
 		log.Fatalf("ASSERT FAIL: declarar sobre una instalación inexistente debería fallar")
 	}
 	fmt.Println("    ✓ Instalación inexistente → error")
 
 	if _, _, err := orch.DeclarePatchApplied(ctx, installationID, cveID, 999999,
-		domain.RemediationLevelOfficialFix, time.Time{}, "diego", ""); err == nil {
+		domain.RemediationLevelOfficialFix, time.Time{}, "diego", "", ""); err == nil {
 		log.Fatalf("ASSERT FAIL: declarar un parche inexistente debería fallar")
 	}
 	fmt.Println("    ✓ Parche inexistente → error")
 
 	if _, _, err := orch.DeclarePatchApplied(ctx, installationID, cveID, patchID,
-		domain.RemediationLevel("NIVEL_INVENTADO"), time.Time{}, "diego", ""); err == nil {
+		domain.RemediationLevel("NIVEL_INVENTADO"), time.Time{}, "diego", "", ""); err == nil {
 		log.Fatalf("ASSERT FAIL: un nivel no reconocido debería fallar")
 	}
 	fmt.Println("    ✓ Nivel de remediación inválido → error")

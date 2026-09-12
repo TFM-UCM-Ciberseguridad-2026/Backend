@@ -7,6 +7,7 @@ Emite logs estructurados en JSON (sin campo operador) con diffs exactos y justif
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -39,6 +40,24 @@ func sendError(w http.ResponseWriter, msg string, code int) {
 	http.Error(w, msg, code)
 }
 
+// assetErrorStatus traduce los errores de dominio de redes y activos al código HTTP
+// adecuado: 400 para datos inválidos, 409 para colisiones con algo ya existente, 404 si no
+// existe y 500 para el resto (fallos de base de datos, etc.).
+func assetErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, domain.ErrInvalidNetwork), errors.Is(err, domain.ErrInvalidIP),
+		errors.Is(err, domain.ErrInvalidHardware):
+		return http.StatusBadRequest
+	case errors.Is(err, domain.ErrDuplicateNetwork), errors.Is(err, domain.ErrDuplicateIP),
+		errors.Is(err, domain.ErrDuplicateAsset):
+		return http.StatusConflict
+	case errors.Is(err, domain.ErrNodeNotFound):
+		return http.StatusNotFound
+	default:
+		return http.StatusInternalServerError
+	}
+
+}
 func sendJSON(w http.ResponseWriter, data any, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
@@ -155,7 +174,7 @@ func (h *OrchestratorHandler) AddEndpointToProject(w http.ResponseWriter, r *htt
 
 	if err := h.orchestrator.AddEndpointToProject(r.Context(), projectID, &endpoint); err != nil {
 		emitAuditLog("CREACION", "Endpoint", fmt.Sprint(endpoint.EndpointID), endpoint.Hostname, idStr, payload.Justification, nil, "ERROR", err.Error())
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 
@@ -200,17 +219,17 @@ func (h *OrchestratorHandler) AssociateHardwareToEndpoint(w http.ResponseWriter,
 	hw := payload.Hardware
 	if err := h.orchestrator.AssociateHardwareToEndpoint(r.Context(), endpointID, &hw); err != nil {
 		emitAuditLog("CREACION", "Hardware", fmt.Sprint(hw.HardwareID), hw.Model, "", payload.Justification, nil, "ERROR", err.Error())
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 
 	cambios := map[string]auditChange{
 		"hardware_id":   {Despues: hw.HardwareID},
 		"modelo":        {Despues: hw.Model},
-		"tipo":          {Despues: hw.Type},
+		"arquitectura":  {Despues: hw.Architecture},
 		"manufacturer":  {Despues: hw.Manufacturer},
 		"serial_number": {Despues: hw.SerialNumber},
-		"cpu":           {Despues: hw.CPU},
+		"cpu_cores":     {Despues: hw.CPUCores},
 		"ram_gb":        {Despues: hw.RAMGB},
 		"storage_gb":    {Despues: hw.StorageGB},
 		"endpoint_id":   {Despues: endpointID},
@@ -771,6 +790,7 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 		AppliedAt        *time.Time `json:"applied_at"`
 		AppliedBy        string     `json:"applied_by"`
 		Notes            string     `json:"notes"`
+		TargetVersion    string     `json:"target_version"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendError(w, "Invalid JSON", http.StatusBadRequest)
@@ -785,7 +805,7 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 	application, affected, err := h.orchestrator.DeclarePatchApplied(
 		r.Context(), installationID, req.CVEID, req.PatchID,
 		domain.RemediationLevel(req.RemediationLevel),
-		appliedAt, req.AppliedBy, req.Notes,
+		appliedAt, req.AppliedBy, req.Notes, req.TargetVersion,
 	)
 	if err != nil {
 		emitAuditLog(
@@ -804,30 +824,13 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 	}
 
 	cambios := map[string]auditChange{
-		"cve_id": {
-			Antes:   nil,
-			Despues: req.CVEID,
-		},
-		"installation_id": {
-			Antes:   nil,
-			Despues: installationID,
-		},
-		"patch_id": {
-			Antes:   nil,
-			Despues: req.PatchID,
-		},
-		"remediation_level": {
-			Antes:   nil,
-			Despues: req.RemediationLevel,
-		},
-		"applied_by": {
-			Antes:   nil,
-			Despues: req.AppliedBy,
-		},
-		"affected_findings": {
-			Antes:   nil,
-			Despues: affected,
-		},
+		"cve_id":            {Despues: req.CVEID},
+		"installation_id":   {Despues: installationID},
+		"patch_id":          {Despues: req.PatchID},
+		"remediation_level": {Despues: req.RemediationLevel},
+		"applied_by":        {Despues: req.AppliedBy},
+		"target_version":    {Despues: req.TargetVersion},
+		"affected_findings": {Despues: affected},
 	}
 
 	emitAuditLog(
@@ -842,10 +845,28 @@ func (h *OrchestratorHandler) DeclarePatchApplied(w http.ResponseWriter, r *http
 		"",
 	)
 	sendJSON(w, map[string]any{
-		"status":            "parche declarado como aplicado",
+		"status":            "parche declarado y aplicado con éxito",
 		"application":       application,
 		"affected_findings": affected,
 	}, http.StatusCreated)
+}
+
+// GET /api/endpoints/{id}/patch-history
+func (h *OrchestratorHandler) GetEndpointPatchHistory(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	endpointID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		sendError(w, "ID de endpoint inválido", http.StatusBadRequest)
+		return
+	}
+
+	history, err := h.orchestrator.GetAppliedPatchHistoryByEndpoint(r.Context(), endpointID)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, history, http.StatusOK)
 }
 
 // POST /api/containers/{id}/applied-patches
@@ -868,27 +889,51 @@ func (h *OrchestratorHandler) DeclareContainerPatchApplied(w http.ResponseWriter
 		sendError(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
+
 	appliedAt := time.Time{}
 	if req.AppliedAt != nil {
 		appliedAt = *req.AppliedAt
 	}
+
 	level := domain.RemediationLevel(req.RemediationLevel)
-	application, affected, err := h.orchestrator.DeclarePatchAppliedToContainer(r.Context(), containerID, req.CVEID, req.FindingID, req.PatchID, level, appliedAt, req.AppliedBy, req.Notes)
+	application, affected, err := h.orchestrator.DeclarePatchAppliedToContainer(
+		r.Context(),
+		containerID,
+		req.CVEID,
+		req.FindingID,
+		req.PatchID,
+		level,
+		appliedAt,
+		req.AppliedBy,
+		req.Notes,
+	)
+
 	auditID := fmt.Sprintf("%s:%s:%d", containerID, req.CVEID, req.FindingID)
 	changes := map[string]auditChange{
-		"asset_type": {Antes: nil, Despues: "CONTAINER"}, "asset_id": {Antes: nil, Despues: containerID},
-		"container_id": {Antes: nil, Despues: containerID}, "image_id": {Antes: nil, Despues: applicationImageID(application)},
-		"finding_id": {Antes: nil, Despues: req.FindingID}, "cve_id": {Antes: nil, Despues: req.CVEID},
-		"patch_id": {Antes: nil, Despues: req.PatchID}, "remediation_level": {Antes: nil, Despues: req.RemediationLevel},
-		"applied_by": {Antes: nil, Despues: req.AppliedBy}, "affected_findings": {Antes: nil, Despues: affected},
+		"asset_type":        {Antes: nil, Despues: "CONTAINER"},
+		"asset_id":          {Antes: nil, Despues: containerID},
+		"container_id":      {Antes: nil, Despues: containerID},
+		"image_id":          {Antes: nil, Despues: applicationImageID(application)},
+		"finding_id":        {Antes: nil, Despues: req.FindingID},
+		"cve_id":            {Antes: nil, Despues: req.CVEID},
+		"patch_id":          {Antes: nil, Despues: req.PatchID},
+		"remediation_level": {Antes: nil, Despues: req.RemediationLevel},
+		"applied_by":        {Antes: nil, Despues: req.AppliedBy},
+		"affected_findings": {Antes: nil, Despues: affected},
 	}
+
 	if err != nil {
 		emitAuditLog("CREACION", "AppliedPatch", auditID, req.CVEID, "", req.Notes, changes, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
 	emitAuditLog("CREACION", "AppliedPatch", auditID, req.CVEID, "", req.Notes, changes, "SUCCESS", "")
-	sendJSON(w, map[string]any{"status": "parche declarado como aplicado", "application": application, "affected_findings": affected}, http.StatusCreated)
+	sendJSON(w, map[string]any{
+		"status":            "parche declarado como aplicado",
+		"application":       application,
+		"affected_findings": affected,
+	}, http.StatusCreated)
 }
 
 func applicationImageID(application *domain.AppliedPatch) string {
@@ -1023,7 +1068,7 @@ func (h *OrchestratorHandler) CreateNetwork(w http.ResponseWriter, r *http.Reque
 	networkID, linked, err := h.orchestrator.CreateNetwork(r.Context(), &network, req.ProjectID)
 	if err != nil {
 		emitAuditLog("CREACION", "Network", fmt.Sprint(networkID), req.Nombre, fmt.Sprint(req.ProjectID), req.Justification, nil, "ERROR", err.Error())
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 
@@ -1084,7 +1129,7 @@ func (h *OrchestratorHandler) UpdateEndpoint(w http.ResponseWriter, r *http.Requ
 
 	if err := h.orchestrator.UpdateEndpoint(r.Context(), &endpoint); err != nil {
 		emitAuditLog("MODIFICACION", "Endpoint", idStr, endpoint.Hostname, "", justification, nil, "ERROR", err.Error())
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 
@@ -1213,7 +1258,7 @@ func (h *OrchestratorHandler) UpdateNetwork(w http.ResponseWriter, r *http.Reque
 	linked, err := h.orchestrator.UpdateNetwork(r.Context(), &network, req.ProjectID)
 	if err != nil {
 		emitAuditLog("MODIFICACION", "Network", idStr, req.Nombre, fmt.Sprint(req.ProjectID), justification, nil, "ERROR", err.Error())
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 
@@ -1311,7 +1356,7 @@ func (h *OrchestratorHandler) UpdateHardware(w http.ResponseWriter, r *http.Requ
 	hw.HardwareID = hwID
 	if err := h.orchestrator.UpdateHardware(r.Context(), &hw); err != nil {
 		emitAuditLog("MODIFICACION", "Hardware", idStr, hw.Model, "", justification, nil, "ERROR", err.Error())
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 
@@ -1320,8 +1365,8 @@ func (h *OrchestratorHandler) UpdateHardware(w http.ResponseWriter, r *http.Requ
 		if oldHW.Model != hw.Model && hw.Model != "" {
 			cambios["modelo"] = auditChange{Antes: oldHW.Model, Despues: hw.Model}
 		}
-		if oldHW.Type != hw.Type && hw.Type != "" {
-			cambios["tipo"] = auditChange{Antes: oldHW.Type, Despues: hw.Type}
+		if oldHW.Architecture != hw.Architecture && hw.Architecture != "" {
+			cambios["arquitectura"] = auditChange{Antes: oldHW.Architecture, Despues: hw.Architecture}
 		}
 		if oldHW.Manufacturer != hw.Manufacturer && hw.Manufacturer != "" {
 			cambios["manufacturer"] = auditChange{Antes: oldHW.Manufacturer, Despues: hw.Manufacturer}
@@ -1329,8 +1374,8 @@ func (h *OrchestratorHandler) UpdateHardware(w http.ResponseWriter, r *http.Requ
 		if oldHW.SerialNumber != hw.SerialNumber && hw.SerialNumber != "" {
 			cambios["serial_number"] = auditChange{Antes: oldHW.SerialNumber, Despues: hw.SerialNumber}
 		}
-		if oldHW.CPU != hw.CPU && hw.CPU != "" {
-			cambios["cpu"] = auditChange{Antes: oldHW.CPU, Despues: hw.CPU}
+		if oldHW.CPUCores != hw.CPUCores && hw.CPUCores > 0 {
+			cambios["cpu_cores"] = auditChange{Antes: oldHW.CPUCores, Despues: hw.CPUCores}
 		}
 		if oldHW.RAMGB != hw.RAMGB && hw.RAMGB > 0 {
 			cambios["ram_gb"] = auditChange{Antes: oldHW.RAMGB, Despues: hw.RAMGB}
@@ -1670,7 +1715,7 @@ func (h *OrchestratorHandler) AddContainerToEndpoint(w http.ResponseWriter, r *h
 	container := payload.Container
 	if err := h.orchestrator.AddContainerToEndpoint(r.Context(), endpointID, &container); err != nil {
 		emitAuditLog("CREACION", "Container", container.ContainerID, container.Name, "", payload.Justification, nil, "ERROR", err.Error())
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 
@@ -1717,7 +1762,7 @@ func (h *OrchestratorHandler) UpdateContainer(w http.ResponseWriter, r *http.Req
 
 	if err := h.orchestrator.UpdateContainer(r.Context(), &container); err != nil {
 		emitAuditLog("MODIFICACION", "Container", idStr, container.Name, "", justification, nil, "ERROR", err.Error())
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 

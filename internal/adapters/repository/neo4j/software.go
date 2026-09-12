@@ -247,3 +247,90 @@ func (r *softwareInstallationRepo) DeleteByID(ctx context.Context, id string) er
 	`
 	return executeWriteHelper(ctx, r.driver, cleanupQuery, nil)
 }
+
+func (r *softwareInstallationRepo) GetAllSoftwareInstallations(ctx context.Context) ([]domain.SoftwareInstallationItem, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (si:SoftwareInstallation)-[:INSTANCE_OF]->(sw:Software)
+		RETURN DISTINCT coalesce(si.id, elementId(si)) AS installation_id, sw.id AS software_id
+	`
+	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		res, err := tx.Run(ctx, query, nil)
+		if err != nil {
+			return nil, err
+		}
+		var items []domain.SoftwareInstallationItem
+		for res.Next(ctx) {
+			rec := res.Record()
+			instIDVal, _ := rec.Get("installation_id")
+			swIDVal, _ := rec.Get("software_id")
+
+			instID, ok1 := instIDVal.(string)
+			var swID int64
+			if v, ok := swIDVal.(int64); ok {
+				swID = v
+			} else if v, ok := swIDVal.(float64); ok {
+				swID = int64(v)
+			}
+			if ok1 && instID != "" && swID > 0 {
+				items = append(items, domain.SoftwareInstallationItem{
+					InstallationID: instID,
+					SoftwareID:     swID,
+				})
+			}
+		}
+		return items, nil
+	})
+	if err != nil || result == nil {
+		return nil, err
+	}
+	return result.([]domain.SoftwareInstallationItem), nil
+}
+
+func (r *softwareInstallationRepo) GetSoftwareInstallationsByProject(ctx context.Context, projectID int64) ([]domain.SoftwareInstallationItem, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (p:Project)
+		WHERE p.id = $projectID OR toString(p.id) = toString($projectID)
+		MATCH (p)-[:HAS_ENDPOINT]->(e)-[:HOSTS*0..1]->(asset)
+		MATCH (asset)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)-[:INSTANCE_OF]->(sw:Software)
+		RETURN DISTINCT coalesce(si.id, elementId(si)) AS installation_id, sw.id AS software_id
+	`
+	params := map[string]any{"projectID": projectID}
+
+	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		res, err := tx.Run(ctx, query, params)
+		if err != nil {
+			return nil, err
+		}
+		var items []domain.SoftwareInstallationItem
+		for res.Next(ctx) {
+			rec := res.Record()
+			instIDVal, _ := rec.Get("installation_id")
+			swIDVal, _ := rec.Get("software_id")
+
+			instID, ok1 := instIDVal.(string)
+			var swID int64
+			if v, ok := swIDVal.(int64); ok {
+				swID = v
+			} else if v, ok := swIDVal.(float64); ok {
+				swID = int64(v)
+			}
+			if ok1 && instID != "" && swID > 0 {
+				items = append(items, domain.SoftwareInstallationItem{
+					InstallationID: instID,
+					SoftwareID:     swID,
+				})
+			}
+		}
+		return items, nil
+	})
+	if err != nil || result == nil {
+		return nil, err
+	}
+	return result.([]domain.SoftwareInstallationItem), nil
+}

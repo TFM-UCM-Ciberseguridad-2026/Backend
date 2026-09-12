@@ -51,31 +51,63 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 
 	var matchClause string
 	if projectID > 0 {
+		// Cada rama del UNION recoge un camino del proyecto y devuelve sus nodos por
+		// separado. La versión anterior encadenaba estos mismos 21 caminos como
+		// OPTIONAL MATCH sobre una única fila: como varias ramas son independientes entre
+		// sí (por ejemplo (ci)-[:HAS_FINDING] y (ci)-[:HAS_VULNERABILITY] cuelgan las dos
+		// de la imagen), Cypher hacía su producto cartesiano antes de poder deduplicar.
+		// Con 3 endpoints y una imagen de 61 findings × 16 vulnerabilidades eso daba
+		// 673.704 filas de 21 nodos cada una y la consulta no terminaba nunca.
+		//
+		// UNION deduplica por sí mismo, así que el producto no llega a materializarse.
+		// El conjunto de nodos resultante es exactamente el mismo de antes.
 		matchClause = `
 			MATCH (proj:Project)
 			WHERE proj.id = $projectID OR toString(proj.id) = toString($projectID)
-			OPTIONAL MATCH (proj)-[:HAS_ENDPOINT]->(e)
-			OPTIONAL MATCH (e)-[:CONNECTED_TO]->(net:Network)
-			OPTIONAL MATCH (e)-[:HAS_HARDWARE]->(hw:Hardware)
-			OPTIONAL MATCH (e)-[:HAS_INSTALLATION]->(si:SoftwareInstallation)
-			OPTIONAL MATCH (si)-[:INSTANCE_OF]->(sw:Software)
-			OPTIONAL MATCH (si)-[:HAS_FINDING]->(f1:Finding)
-			OPTIONAL MATCH (f1)-[:OF_VULNERABILITY]->(v1:Vulnerability)
-			OPTIONAL MATCH (e)-[:HOSTS]->(c:Container)
-			OPTIONAL MATCH (c)-[:USES_IMAGE]-(ci:ContainerImage)
-			OPTIONAL MATCH (c)-[:HAS_INSTALLATION]->(csi:SoftwareInstallation)
-			OPTIONAL MATCH (csi)-[:INSTANCE_OF]->(csw:Software)
-			OPTIONAL MATCH (csi)-[:HAS_FINDING]->(cf1:Finding)
-			OPTIONAL MATCH (cf1)-[:OF_VULNERABILITY]->(cv1:Vulnerability)
-			OPTIONAL MATCH (c)-[:HAS_FINDING]->(cf2:Finding)
-			OPTIONAL MATCH (cf2)-[:OF_VULNERABILITY]->(cv2:Vulnerability)
-			OPTIONAL MATCH (ci)-[:HAS_FINDING]->(cif:Finding)
-			OPTIONAL MATCH (cif)-[:OF_VULNERABILITY]->(civ:Vulnerability)
-			OPTIONAL MATCH (ci)-[:HAS_VULNERABILITY]->(iv1:Vulnerability)
-			WITH DISTINCT proj, e, net, hw, si, sw, f1, v1, c, ci, csi, csw, cf1, cv1, cf2, cv2, cif, civ, iv1
-			UNWIND [proj, e, net, hw, si, sw, f1, v1, c, ci, csi, csw, cf1, cv1, cf2, cv2, cif, civ, iv1] AS nodeItem
-			WITH nodeItem AS n WHERE n IS NOT NULL
-			WITH DISTINCT n
+			CALL {
+				WITH proj RETURN proj AS n
+				UNION
+				WITH proj MATCH (proj)-[:CONTAINS_NETWORK]->(x:Network) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->(x) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:CONNECTED_TO]->(x:Network) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HAS_HARDWARE]->(x:Hardware) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HAS_INSTALLATION]->(x:SoftwareInstallation) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HAS_INSTALLATION]->()-[:INSTANCE_OF]->(x:Software) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->(x:Finding) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(x:Vulnerability) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HOSTS]->(x) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HOSTS]->()-[:CONNECTED_TO]->(x:Network) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HOSTS]->()-[:USES_IMAGE]-(x:ContainerImage) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HOSTS]->()-[:HAS_INSTALLATION]->(x:SoftwareInstallation) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HOSTS]->()-[:HAS_INSTALLATION]->()-[:INSTANCE_OF]->(x:Software) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HOSTS]->()-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->(x:Finding) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HOSTS]->()-[:HAS_INSTALLATION]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(x:Vulnerability) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HOSTS]->()-[:HAS_FINDING]->(x:Finding) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HOSTS]->()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(x:Vulnerability) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HOSTS]->()-[:USES_IMAGE]-()-[:HAS_FINDING]->(x:Finding) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HOSTS]->()-[:USES_IMAGE]-()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(x:Vulnerability) RETURN x AS n
+				UNION
+				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HOSTS]->()-[:USES_IMAGE]-()-[:HAS_VULNERABILITY]->(x:Vulnerability) RETURN x AS n
+			}
+			WITH DISTINCT n WHERE n IS NOT NULL
 		`
 	} else {
 		matchClause = `
@@ -1326,13 +1358,17 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 								Vulnerability:    vulnCVE,
 								SoftwareAffected: getStringLocal(softwareProps["install_path"]),
 								RiskScore:        risk,
+								RiskSource:       getStringLocal(findingProps["risk_source"]),
 								RCE:              isRCE,
 								RootObtained:     rootObtained,
 								Exploitable:      getBoolLocal(vulnProps["exploit"]) || getBoolLocal(vulnProps["kev"]),
 								CVSSVector:       cvss,
 							})
 
+							// TotalRiskScore se mantiene por compatibilidad con el front.
 							clonedPath.TotalRiskScore += risk
+							clonedPath.PathRiskScore = domain.CalculatePathRisk(clonedPath.StepRisks())
+							clonedPath.HasUncontextualizedSteps = clonedPath.HasUncontextualized()
 
 							// Si el contenedor es el origen, el siguiente paso parte del container name
 							nextPrev := targetName
@@ -1424,8 +1460,10 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 
 				targetKey := fmt.Sprintf("%s-VIA-%s-TO-%d-%s-VIA-%s", state.Path.InitialEndpoint, initialVectorType, lastStep.TargetEndpointID, lastStep.TargetEndpoint, vectorType)
 
+				// Por PathRiskScore y no por la suma: con la suma ganaba siempre la
+				// ruta más larga al mismo destino, cuando la corta es la más probable.
 				existing, ok := bestPathPerTarget[targetKey]
-				if !ok || state.Path.TotalRiskScore > existing.TotalRiskScore {
+				if !ok || state.Path.PathRiskScore > existing.PathRiskScore {
 					bestPathPerTarget[targetKey] = state.Path
 				}
 			}
@@ -2125,3 +2163,355 @@ func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (
 	return stats, nil
 }
 
+// IsAssetNodeNameDuplicate comprueba si ya existe un endpoint o un contenedor con ese
+// nombre en el proyecto indicado. Endpoints y contenedores comparten espacio de nombres.
+//
+// El ámbito es el proyecto, no la base de datos entera: dos auditorías distintas pueden
+// tener cada una su "validation-dmz-web". Con projectID 0 el ámbito son los activos que no
+// cuelgan de ningún proyecto, igual que se hace con las redes huérfanas.
+//
+// La exclusión distingue el tipo de nodo además del id: los endpoints usan ids numéricos y
+// los contenedores cadenas, así que compararlos solo por texto podía excluir un contenedor
+// al editar un endpoint que casualmente tuviera el mismo id.
+func (r *infrastructureRepo) IsAssetNodeNameDuplicate(ctx context.Context, name string, excludeID any, projectID int64) (bool, error) {
+	nameTrimmed := strings.TrimSpace(strings.ToLower(name))
+	if nameTrimmed == "" {
+		return false, nil
+	}
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	var scopeClause string
+	if projectID > 0 {
+		scopeClause = `
+			MATCH (p:Project)
+			WHERE toInteger(p.id) = toInteger($projectID) OR toString(p.id) = toString($projectID)
+			CALL {
+				WITH p
+				MATCH (p)-[:HAS_ENDPOINT]->(n:Endpoint) RETURN n
+				UNION
+				WITH p
+				MATCH (p)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(n:Container) RETURN n
+			}
+			WITH DISTINCT n
+		`
+	} else {
+		scopeClause = `
+			MATCH (n)
+			WHERE (n:Endpoint OR n:Container)
+			  AND NOT EXISTS { MATCH (:Project)-[:HAS_ENDPOINT]->(n) }
+			  AND NOT EXISTS { MATCH (:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(n) }
+		`
+	}
+
+	query := scopeClause + `
+		WHERE toLower(trim(coalesce(n.hostname, n.name, ''))) = $name
+		  AND NOT (n:Endpoint AND toString(n.id) = toString($excludeEndpointID))
+		  AND NOT (n:Container AND toString(n.id) = toString($excludeContainerID))
+		RETURN count(n) > 0 AS exists
+	`
+
+	// El id que se excluye llega como int64 al editar un endpoint y como cadena al editar
+	// un contenedor. Se rellena solo la ranura que corresponde para no excluir de más.
+	excludeEndpointID, excludeContainerID := "\x00", "\x00"
+	if excludeID != nil {
+		switch v := excludeID.(type) {
+		case string:
+			if v != "" {
+				excludeContainerID = v
+			}
+		default:
+			if s := fmt.Sprintf("%v", v); s != "" && s != "0" {
+				excludeEndpointID = s
+			}
+		}
+	}
+
+	params := map[string]any{
+		"name":               nameTrimmed,
+		"excludeEndpointID":  excludeEndpointID,
+		"excludeContainerID": excludeContainerID,
+		"projectID":          projectID,
+	}
+
+	res, err := session.Run(ctx, query, params)
+	if err != nil {
+		return false, fmt.Errorf("error verificando nombre duplicado: %w", err)
+	}
+
+	if res.Next(ctx) {
+		if b, ok := res.Record().Get("exists"); ok {
+			if exists, isBool := b.(bool); isBool {
+				return exists, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+func (r *infrastructureRepo) IsProjectNameDuplicate(ctx context.Context, name string, excludeID any) (bool, error) {
+	nameTrimmed := strings.TrimSpace(strings.ToLower(name))
+	if nameTrimmed == "" {
+		return false, nil
+	}
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (p:Project)
+		WHERE toLower(trim(coalesce(p.nombre, p.name, ''))) = $name
+		  AND ($excludeID IS NULL OR $excludeID = '' OR $excludeID = '0' OR toString(p.id) <> toString($excludeID))
+		RETURN count(p) > 0 AS exists
+	`
+
+	exStr := ""
+	if excludeID != nil {
+		exStr = fmt.Sprintf("%v", excludeID)
+	}
+
+	params := map[string]any{
+		"name":      nameTrimmed,
+		"excludeID": exStr,
+	}
+
+	res, err := session.Run(ctx, query, params)
+	if err != nil {
+		return false, fmt.Errorf("error verificando nombre duplicado de proyecto: %w", err)
+	}
+
+	if res.Next(ctx) {
+		if b, ok := res.Record().Get("exists"); ok {
+			if exists, isBool := b.(bool); isBool {
+				return exists, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+// projectScopeMatch es el fragmento que identifica a un proyecto por su id numérico o
+// textual, replicando la tolerancia de tipos que usa el resto del repositorio.
+const projectScopeMatch = `(toInteger(p.id) = toInteger(pid) OR toString(p.id) = toString(pid))`
+
+// GetNetworksInProjectScope devuelve las redes visibles desde los proyectos indicados.
+//
+// Una red pertenece a un proyecto por tres caminos, los mismos que usa GetGraphData:
+// directamente (CONTAINS_NETWORK), a través de un endpoint conectado, o a través de un
+// contenedor conectado. Con projectIDs vacío se devuelven las redes que no cuelgan de
+// ningún proyecto, que es el ámbito de una red creada sin proyecto asignado.
+func (r *infrastructureRepo) GetNetworksInProjectScope(ctx context.Context, projectIDs []int64, excludeNetworkID int64) ([]domain.Network, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	var query string
+	if len(projectIDs) == 0 {
+		query = `
+			MATCH (n:Network)
+			WHERE NOT EXISTS { MATCH (:Project)-[:CONTAINS_NETWORK]->(n) }
+			  AND NOT EXISTS { MATCH (:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:CONNECTED_TO]->(n) }
+			  AND NOT EXISTS { MATCH (:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:CONNECTED_TO]->(n) }
+			  AND toString(n.id) <> toString($excludeID)
+			RETURN DISTINCT properties(n) AS props
+		`
+	} else {
+		query = `
+			UNWIND $projectIDs AS pid
+			MATCH (p:Project)
+			WHERE ` + projectScopeMatch + `
+			CALL {
+				WITH p
+				MATCH (p)-[:CONTAINS_NETWORK]->(n:Network) RETURN n
+				UNION
+				WITH p
+				MATCH (p)-[:HAS_ENDPOINT]->(:Endpoint)-[:CONNECTED_TO]->(n:Network) RETURN n
+				UNION
+				WITH p
+				MATCH (p)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:CONNECTED_TO]->(n:Network) RETURN n
+			}
+			WITH DISTINCT n
+			WHERE toString(n.id) <> toString($excludeID)
+			RETURN properties(n) AS props
+		`
+	}
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{
+			"projectIDs": projectIDs,
+			"excludeID":  excludeNetworkID,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		var networks []domain.Network
+		for result.Next(ctx) {
+			props, ok := result.Record().AsMap()["props"].(map[string]any)
+			if !ok {
+				continue
+			}
+			networks = append(networks, domain.Network{
+				NetworkID:   getInt64(props, "id"),
+				Nombre:      getString(props, "nombre"),
+				CIDR:        getString(props, "cidr"),
+				Gateway:     getString(props, "gateway"),
+				VLANID:      getInt64(props, "vlan_id"),
+				Descripcion: getString(props, "descripcion"),
+			})
+		}
+		return networks, result.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error recuperando las redes del proyecto: %w", err)
+	}
+
+	networks, _ := res.([]domain.Network)
+	return networks, nil
+}
+
+// GetProjectIDsByNetwork resuelve los proyectos a los que pertenece una red.
+func (r *infrastructureRepo) GetProjectIDsByNetwork(ctx context.Context, networkID int64) ([]int64, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (n:Network)
+		WHERE toInteger(n.id) = toInteger($networkID) OR toString(n.id) = toString($networkID)
+		CALL {
+			WITH n
+			MATCH (p:Project)-[:CONTAINS_NETWORK]->(n) RETURN p
+			UNION
+			WITH n
+			MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:CONNECTED_TO]->(n) RETURN p
+			UNION
+			WITH n
+			MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:CONNECTED_TO]->(n) RETURN p
+		}
+		RETURN DISTINCT p.id AS project_id
+	`
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"networkID": networkID})
+		if err != nil {
+			return nil, err
+		}
+
+		var ids []int64
+		for result.Next(ctx) {
+			raw, _ := result.Record().Get("project_id")
+			if id := getInt64Any(raw); id > 0 {
+				ids = append(ids, id)
+			}
+		}
+		return ids, result.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error resolviendo los proyectos de la red: %w", err)
+	}
+
+	ids, _ := res.([]int64)
+	return ids, nil
+}
+
+// GetProjectIDByContainer resuelve el proyecto de un contenedor a través de su host.
+func (r *infrastructureRepo) GetProjectIDByContainer(ctx context.Context, containerID string) (int64, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (p:Project)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(c:Container)
+		WHERE c.id = $containerID OR toString(c.id) = toString($containerID)
+		RETURN p.id AS project_id
+		LIMIT 1
+	`
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"containerID": containerID})
+		if err != nil {
+			return int64(0), err
+		}
+		if result.Next(ctx) {
+			raw, _ := result.Record().Get("project_id")
+			return getInt64Any(raw), result.Err()
+		}
+		return int64(0), result.Err()
+	})
+	if err != nil {
+		return 0, fmt.Errorf("error resolviendo el proyecto del contenedor: %w", err)
+	}
+
+	id, _ := res.(int64)
+	return id, nil
+}
+
+// FindIPConflicts devuelve los activos del proyecto que ya ocupan alguna de las IPs dadas.
+//
+// Se excluye el activo que se está creando o editando: al editar un endpoint sin tocar sus
+// IPs, sus propias direcciones no deben contar como conflicto.
+func (r *infrastructureRepo) FindIPConflicts(ctx context.Context, projectID int64, ips []string, excludeEndpointID int64, excludeContainerID string) ([]domain.IPConflict, error) {
+	if projectID <= 0 || len(ips) == 0 {
+		return nil, nil
+	}
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		MATCH (p:Project)
+		WHERE toInteger(p.id) = toInteger($projectID) OR toString(p.id) = toString($projectID)
+		CALL {
+			WITH p
+			MATCH (p)-[:HAS_ENDPOINT]->(a:Endpoint) RETURN a
+			UNION
+			WITH p
+			MATCH (p)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(a:Container) RETURN a
+		}
+		WITH DISTINCT a
+		MATCH (a)-[:HAS_IP]->(ip:IPAddress)
+		WHERE ip.ip IN $ips
+		  AND NOT (a:Endpoint AND toString(a.id) = toString($excludeEndpointID))
+		  AND NOT (a:Container AND toString(a.id) = toString($excludeContainerID))
+		RETURN DISTINCT ip.ip AS ip,
+		       toString(a.id) AS asset_id,
+		       coalesce(a.hostname, a.name, toString(a.id)) AS asset_name,
+		       CASE WHEN a:Container THEN 'Container' ELSE 'Endpoint' END AS asset_kind
+	`
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{
+			"projectID":          projectID,
+			"ips":                ips,
+			"excludeEndpointID":  fmt.Sprint(excludeEndpointID),
+			"excludeContainerID": excludeContainerID,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		var conflicts []domain.IPConflict
+		for result.Next(ctx) {
+			rec := result.Record()
+			ipVal, _ := rec.Get("ip")
+			idVal, _ := rec.Get("asset_id")
+			nameVal, _ := rec.Get("asset_name")
+			kindVal, _ := rec.Get("asset_kind")
+
+			conflicts = append(conflicts, domain.IPConflict{
+				IP:        getStringAny(ipVal),
+				AssetID:   getStringAny(idVal),
+				AssetName: getStringAny(nameVal),
+				AssetKind: getStringAny(kindVal),
+			})
+		}
+		return conflicts, result.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("error comprobando IPs duplicadas: %w", err)
+	}
+
+	conflicts, _ := res.([]domain.IPConflict)
+	return conflicts, nil
+}

@@ -58,7 +58,7 @@ type PatchQueueQuery struct {
 	InContainer     string `json:"in_container"`     // "ALL", "TRUE", "FALSE"
 	PriorityTier    string `json:"priority_tier"`    // "ALL", "CRITICAL", "HIGH", "MEDIUM", "LOW"
 	PatchAvailable  string `json:"patch_available"`  // "ALL", "TRUE", "FALSE"
-	RemediationKind string `json:"remediation_kind"` // "ALL", "OFFICIAL_FIX", "WORKAROUND", "UNAVAILABLE"
+	RemediationKind string `json:"remediation_kind"` // "ALL", "OFFICIAL_FIX", "MITIGATION", "UNAVAILABLE"
 	SortField       string `json:"sort_field"`
 	SortDirection   string `json:"sort_direction"`
 }

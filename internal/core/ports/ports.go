@@ -11,7 +11,7 @@ import (
 Este archivo define los Puertos (Ports) de entrada y salida para los servicios de la aplicación (vulnerabilidades, exploits y persistencia).
 
 Propósito arquitectónico y teórico:
-1. Puertos en Arquitectura Hexagonal: Define las interfaces formales (contratos lógicos) Inbound (de entrada, como handlers o casos de uso) y Outbound (de salida, como repositorios o clientes de APIs externas) que describen qué operaciones ofrece o requiere el núcleo de la aplicación, sin implementar cómo se realizan.
+1. Puertos en Arquitectura Hexagonal: Define las interfaces formales (contratos lógicos) Inbound y Outbound que describen qué operaciones ofrece o requiere el núcleo de la aplicación, sin implementar cómo se realizan.
 2. Principio de Inversión de Dependencias (DIP): Asegura que el núcleo del negocio (service y domain) dependa de abstracciones de esta capa (ports) y no de detalles concretos de infraestructura de red, HTTP o bases de datos (adapters).
 3. Testabilidad mediante Mocks: Permite sustituir en tiempo de pruebas unitarias los componentes de persistencia o APIs externas por implementaciones simuladas que cumplan las firmas de las interfaces.
 */
@@ -19,7 +19,7 @@ Propósito arquitectónico y teórico:
 type EndpointPort interface {
 	Save(ctx context.Context, endpoint *domain.Endpoint) error                    // Guarda en la DB
 	Update(ctx context.Context, endpoint *domain.Endpoint) error                  // Actualiza en la DB
-	GetByID(ctx context.Context, id int64) (*domain.Endpoint, error)              // Te da con el id el objeto recuperado de la bd
+	GetByID(ctx context.Context, id int64) (*domain.Endpoint, error)              // Recupera el objeto de la BD por su ID
 	DeleteByID(ctx context.Context, id int64) error                               // Borra un nodo de la BD
 	SaveIPs(ctx context.Context, endpointID int64, ips []domain.EndpointIP) error // Reemplaza el conjunto de direcciones IP de un endpoint por las indicadas.
 	GetIPs(ctx context.Context, endpointID int64) ([]domain.EndpointIP, error)    // Devuelve las direcciones IP asociadas a un endpoint.
@@ -66,11 +66,9 @@ type FindingPort interface {
 	EnsureForContainerImageContextAndCVE(ctx context.Context, containerID string, imageID string, cveID string, finding *domain.Finding) (*domain.Finding, bool, error)
 	SupersedeContainerImageFindings(ctx context.Context, containerID string, oldImageID string, changedAt time.Time) (int, error)
 
-	// ApplyRemediationByInstallationAndCVE fija factor y estado en los findings del CVE
-	// en esa instalación, y devuelve sus IDs. Con factor 0 pone también risk_score y
-	// priority_score a cero: el finding sale de las agregaciones y conservaría si no la
-	// última puntuación calculada.
 	ApplyRemediationByInstallationAndCVE(ctx context.Context, installationID, cveID string, remediationFactor float64, status string) ([]int64, error)
+	GetOpenFindingsByInstallation(ctx context.Context, installationID string) ([]domain.FindingRiskSummary, error)
+	CloseResolvedFindingsBatch(ctx context.Context, installationID string, cveIDs []string, remediationFactor float64, status string) ([]int64, error)
 	ApplyRemediationByContainerAndCVE(ctx context.Context, containerID, cveID string, findingID int64, remediationFactor float64, status string) ([]int64, error)
 	GetVulnerabilitiesByFinding(ctx context.Context, findingID any) ([]domain.Vulnerability, error)
 }
@@ -112,9 +110,26 @@ type NetworkPort interface {
 	Update(ctx context.Context, network *domain.Network) error
 	GetByID(ctx context.Context, id int64) (*domain.Network, error)
 	DeleteByID(ctx context.Context, id int64) error
-	LinkMatchingEndpoints(ctx context.Context, networkID int64, cidr string, vlanID int64) (int, error)
-	LinkEndpointToMatchingNetworks(ctx context.Context, endpointID int64, ips []domain.EndpointIP) (int, error)
-	LinkContainerToMatchingNetworks(ctx context.Context, containerID string, ips []domain.EndpointIP) (int, error)
+	// El emparejamiento activo↔red va siempre acotado a un ámbito de proyecto: sin acotarlo,
+	// dos proyectos que usen el mismo direccionamiento privado (algo permitido desde que la
+	// unicidad es por proyecto) se enlazarían los activos entre sí, y la jerarquía de
+	// subredes se calcularía mezclando redes de proyectos distintos. Una lista de proyectos
+	// vacía significa "redes sin proyecto", que es un ámbito más, no un comodín.
+
+	// ReconcileProjectNetworkLinks recalcula el ámbito entero: a qué red va cada activo y
+	// qué red es subred de cuál (CONTAINS_SUBNET). Se dispara al crear, editar o borrar una
+	// red, porque declarar una subred más específica reasigna activos que ya colgaban del
+	// rango padre.
+	ReconcileProjectNetworkLinks(ctx context.Context, projectIDs []int64) (domain.NetworkReconciliation, error)
+
+	// Los dos Link* son el camino de un solo activo (alta o edición de endpoint/contenedor):
+	// recolocan ese activo y no tocan la jerarquía, porque las redes no han cambiado.
+	LinkEndpointToMatchingNetworks(ctx context.Context, endpointID int64, ips []domain.EndpointIP, projectID int64) (int, error)
+	LinkContainerToMatchingNetworks(ctx context.Context, containerID string, ips []domain.EndpointIP, projectID int64) (int, error)
+
+	// CountAssetsInNetwork es lo que la API devuelve como `linked_endpoints`.
+	CountAssetsInNetwork(ctx context.Context, networkID int64) (int, error)
+
 	LinkNetworkToProjectIfOrphan(ctx context.Context, networkID int64, projectID int64) error
 }
 
@@ -141,6 +156,9 @@ type PatchPort interface {
 
 	// GetApplicationsByInstallation devuelve el histórico, del más reciente al más antiguo.
 	GetApplicationsByInstallation(ctx context.Context, installationID string) ([]domain.AppliedPatch, error)
+
+	// GetAppliedPatchHistoryByEndpoint obtiene el histórico de parches agrupado por software de un endpoint
+	GetAppliedPatchHistoryByEndpoint(ctx context.Context, endpointID int64) (*domain.EndpointPatchHistory, error)
 	GetApplicationsByContainer(ctx context.Context, containerID string) ([]domain.AppliedPatch, error)
 }
 
@@ -162,6 +180,9 @@ type SoftwareInstallationPort interface {
 	// GetInstalledSoftware recorre (SoftwareInstallation)-[:INSTANCE_OF]->(Software).
 	// Devuelve (nil, nil) si la instalación no tiene software asociado.
 	GetInstalledSoftware(ctx context.Context, installationID string) (*domain.Software, error)
+
+	GetAllSoftwareInstallations(ctx context.Context) ([]domain.SoftwareInstallationItem, error)
+	GetSoftwareInstallationsByProject(ctx context.Context, projectID int64) ([]domain.SoftwareInstallationItem, error)
 }
 
 // RelationshipPort abstrae la creación de relaciones entre entidades del dominio
@@ -188,7 +209,7 @@ type DatabaseHelper interface {
 	GetNodeInfo(ctx context.Context, label string, propertyKey string, propertyValue any) (map[string]any, error)
 }
 
-// VulnerabilityAPIscanner escanea vuln de la api del nist (puerto de salida)
+// VulnerabilityAPIscanner escanea vulnerabilidades desde la API del NIST (puerto de salida)
 type VulnerabilityAPIscanner interface {
 	// FetchVulnerabilities obtiene una lista de vulnerabilidades desde el API externa.
 	FetchVulnerabilities(ctx context.Context, limit int, offset int) ([]domain.Vulnerability, error)
@@ -199,8 +220,6 @@ type VulnerabilityAPIscanner interface {
 	// FetchByCVE obtiene el detalle completo de una vulnerabilidad específica.
 	FetchByCVE(ctx context.Context, cve string) (*domain.Vulnerability, error)
 }
-
-//Los CRUDS para el mitre... consutarlo con Julve
 
 type TTPPort interface {
 	Save(ctx context.Context, ttp *domain.TTP) error
@@ -255,6 +274,24 @@ type InfrastructurePort interface {
 	IsAnalysisPending(ctx context.Context, projectID int64) (bool, error)
 	ImportGraphData(ctx context.Context, data *domain.GraphData) error
 	GetPaginatedInventory(ctx context.Context, query domain.InventoryQuery) (*domain.PaginatedInventoryResponse, error)
+	// IsAssetNodeNameDuplicate comprueba el nombre dentro del proyecto indicado: endpoints
+	// y contenedores comparten espacio de nombres, pero dos proyectos distintos sí pueden
+	// reutilizar el mismo nombre.
+	IsAssetNodeNameDuplicate(ctx context.Context, name string, excludeID any, projectID int64) (bool, error)
+	IsProjectNameDuplicate(ctx context.Context, name string, excludeID any) (bool, error)
+
+	// GetNetworksInProjectScope devuelve las redes visibles desde los proyectos indicados,
+	// excluyendo la red excludeNetworkID. Con projectIDs vacío devuelve las redes que no
+	// cuelgan de ningún proyecto. Es la base del control de duplicados por proyecto.
+	GetNetworksInProjectScope(ctx context.Context, projectIDs []int64, excludeNetworkID int64) ([]domain.Network, error)
+	// GetProjectIDsByNetwork resuelve los proyectos a los que pertenece una red. Puede
+	// devolver varios: las aristas CONTAINS_NETWORK se acumulan y nunca se limpian.
+	GetProjectIDsByNetwork(ctx context.Context, networkID int64) ([]int64, error)
+	// GetProjectIDByContainer resuelve el proyecto de un contenedor a través de su host.
+	GetProjectIDByContainer(ctx context.Context, containerID string) (int64, error)
+	// FindIPConflicts devuelve los activos del proyecto que ya ocupan alguna de las IPs
+	// indicadas, ignorando el activo que se está creando o editando.
+	FindIPConflicts(ctx context.Context, projectID int64, ips []string, excludeEndpointID int64, excludeContainerID string) ([]domain.IPConflict, error)
 }
 
 // ContainerPort define las operaciones para gestionar imágenes y contenedores.
@@ -262,6 +299,7 @@ type ContainerPort interface {
 	SaveContainerImage(ctx context.Context, image *domain.ContainerImage) error
 	GetContainerImage(ctx context.Context, imageID string) (*domain.ContainerImage, error)
 	GetAllContainerImages(ctx context.Context) ([]domain.ContainerImage, error)
+	GetContainerImagesByProject(ctx context.Context, projectID int64) ([]domain.ContainerImage, error)
 	SaveContainer(ctx context.Context, container *domain.Container) error
 	GetContainer(ctx context.Context, containerID string) (*domain.Container, error)
 	GetContainerIDsByImage(ctx context.Context, imageID string) ([]string, error)
@@ -300,12 +338,7 @@ type CAPECPort interface {
 	GetTTPsByCWE(ctx context.Context, cweID string) ([]string, error)
 }
 
-// PatchProvider obtiene información de remediación (parches publicados y versiones
-// corregidas) de un CVE desde una fuente externa.
-//
-// Las fuentes no son universales: OSV cubre ecosistemas open source y MSRC cubre
-// Microsoft. Cuando la fuente no conoce el CVE, la implementación devuelve (nil, nil)
-// en lugar de un error: no encontrarlo es un resultado válido, no un fallo.
+// PatchProvider obtiene información de remediación (parches publicados y versiones corregidas) de un CVE desde una fuente externa.
 type PatchProvider interface {
 	FetchPatchInfo(ctx context.Context, cveID string) (*domain.PatchIntelligence, error)
 }
@@ -327,8 +360,8 @@ type RiskPort interface {
 	// directamente o vía contenedor. Inverso de GetInstallationIDsByEndpoint.
 	GetEndpointIDsByInstallation(ctx context.Context, installationID string) ([]int64, error)
 
-	// UpdateFindingScores persiste los scores calculados en el nodo Finding.
-	UpdateFindingScores(ctx context.Context, findingID int64, impactScore, likelihood, exposureFactor, remediationFactor, riskScore, assetCriticality, urgencyBoost, priorityScore float64) error
+	// UpdateFindingScores persiste los scores y sus tiers en el nodo Finding.
+	UpdateFindingScores(ctx context.Context, findingID int64, impactScore, likelihood, exposureFactor, remediationFactor, riskScore, assetCriticality, urgencyBoost, priorityScore float64, riskTier, priorityTier string) error
 	// UpdateEndpointRisk persiste el riesgo agregado en el nodo Endpoint.
 	UpdateEndpointRisk(ctx context.Context, endpointID int64, riskScore float64, riskTier string) error
 
@@ -396,7 +429,6 @@ type TTPMappedEvent struct {
 }
 
 // NotificationPort desacopla el worker de TTPs de cualquier detalle de transporte (WebSocket, SSE, etc.).
-// La implementación concreta (WSHub) vive en la capa de adapters/handler.
 type NotificationPort interface {
 	NotifyTTPMapped(ctx context.Context, event TTPMappedEvent) error
 }
