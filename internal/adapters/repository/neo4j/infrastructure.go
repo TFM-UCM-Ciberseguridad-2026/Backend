@@ -818,10 +818,15 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		    ))
 		  )))
 		WITH path, e1, eTarget, [n IN nodes(path) WHERE n:Endpoint OR n:Container OR n:Network] AS asset_nodes
-		WHERE NOT any(i IN range(0, size(asset_nodes)-2) WHERE 
-		    asset_nodes[i]:Endpoint AND asset_nodes[i+1]:Container AND 
+		WHERE NOT any(i IN range(0, size(asset_nodes)-2) WHERE
+		    asset_nodes[i]:Endpoint AND asset_nodes[i+1]:Container AND
 		    EXISTS { MATCH (a)-[:CONNECTED_TO]->(:Network)<-[:CONNECTED_TO]-(b) WHERE a = asset_nodes[i] AND b = asset_nodes[i+1] }
 		)
+		// Rechazar caminos que revisitan un activo ya comprometido: sin esto aparecían
+		// rutas absurdas como httpd -> (red) -> el MISMO httpd -> escape, saliendo a la red
+		// para volver al nodo del que ya se partía. Exigir activos distintos deja la ruta
+		// directa (p. ej. httpd -> escape a su host) que sí tiene sentido.
+		AND size(asset_nodes) = size(apoc.coll.toSet([n IN asset_nodes | elementId(n)]))
 		WITH path, e1, eTarget, asset_nodes, [i IN range(0, size(asset_nodes)-1) | {index: i, asset: asset_nodes[i]}] AS indexed
 		
 		UNWIND indexed AS ie
@@ -963,6 +968,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 		WITH path, e1, collect({
 		  index: ie.index,
 		  endpoint: ep,
+		  ep_host: head([(h:Endpoint)-[:HOSTS]->(ep) | h]),
 		  allNets: allNets,
 		  hasLPE: hasLPE,
 		  is_container: CASE WHEN size(allNets) > 0 THEN allNets[0].is_container ELSE (ep:Container) END
@@ -1077,6 +1083,23 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			return nil
 		}
 
+		// elementId estable del nodo Neo4j: identidad única a prueba de la colisión de
+		// ids de dominio (un Project, una Network y un Endpoint pueden compartir id=1).
+		getNodeElementID := func(val any) string {
+			if n, ok := val.(neo4j.Node); ok {
+				return n.ElementId
+			}
+			return ""
+		}
+		// Etiqueta principal del nodo (Endpoint | Container | Network), para que el
+		// front resuelva el nodo del salto por tipo y nunca contra el Project.
+		getNodeKind := func(val any) string {
+			if n, ok := val.(neo4j.Node); ok && len(n.Labels) > 0 {
+				return n.Labels[0]
+			}
+			return ""
+		}
+
 		for result.Next(ctx) {
 			rawRecordCount++
 			record := result.Record()
@@ -1145,6 +1168,10 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 				Path         domain.ExploitationPath
 				PrevEndpoint string
 				Offset       int
+				// El paso previo terminó dentro de un contenedor. Sirve para saber que, si
+				// el siguiente salto entra en OTRO contenedor del mismo host, hay que emitir
+				// primero el escape al host (en vez de colapsar contenedor -> contenedor).
+				PrevWasContainer bool
 			}
 
 			activePaths := []activePathState{
@@ -1336,6 +1363,60 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 								rootObtained = true
 							}
 
+							// Identidad estable y con tipo del nodo destino: para contenedores el
+							// propio contenedor; para el resto, el nodo ep del paso (Endpoint o
+							// Network). Evita que el front resuelva por el id de dominio y colisione
+							// con el Project (que puede compartir id con la red del salto).
+							epKind := getNodeKind(stepMap["endpoint"])
+							targetElementID := getNodeElementID(stepMap["endpoint"])
+							targetKind := epKind
+							if isContainer && !containerIsSource {
+								if cid := getNodeElementID(netMap["container"]); cid != "" {
+									targetElementID = cid
+								}
+								targetKind = "Container"
+							}
+
+							// Host al que hay que escapar para el pivote contenedor -> contenedor.
+							// Si el nodo del paso es el endpoint host, es él mismo; si el paso se
+							// genera desde el propio contenedor destino, su host es ep_host.
+							var escapeHostName, escapeHostElementID string
+							var escapeHostID int64
+							if epKind == "Endpoint" {
+								escapeHostName = hostname
+								if escapeHostName == "" {
+									escapeHostName = getStringLocal(endpointProps["name"])
+								}
+								if escapeHostName == "" {
+									escapeHostName = getStringLocal(endpointProps["nombre"])
+								}
+								escapeHostElementID = getNodeElementID(stepMap["endpoint"])
+								escapeHostID = getIntLocal(endpointProps["id"])
+							} else if epKind == "Container" {
+								if hostProps := getNodeProps(stepMap["ep_host"]); hostProps != nil {
+									escapeHostName = getStringLocal(hostProps["hostname"])
+									if escapeHostName == "" {
+										escapeHostName = getStringLocal(hostProps["name"])
+									}
+									if escapeHostName == "" {
+										escapeHostName = getStringLocal(hostProps["nombre"])
+									}
+									escapeHostElementID = getNodeElementID(stepMap["ep_host"])
+									escapeHostID = getIntLocal(hostProps["id"])
+								}
+							}
+
+							// Pivote contenedor -> contenedor del MISMO host: para saltar de un
+							// contenedor a otro hay que escapar antes al host. El motor lo colapsaba
+							// a un contenedor->contenedor directo (p. ej. httpd -> dind) escondiendo
+							// el escape y dejaba el host sin numerar. Se emiten DOS pasos: escape al
+							// host + entrada al contenedor. Solo cuando el paso previo era un
+							// contenedor (si no, no hay de qué escapar) y el host difiere del previo.
+							needsHostEscape := isContainer && !containerIsSource &&
+								state.PrevWasContainer && escapeHostName != "" && escapeHostName != state.PrevEndpoint
+
+							stepOffset := state.Offset
+
 							// Clonar la ruta actual
 							clonedPath := domain.ExploitationPath{
 								PathID:          state.Path.PathID,
@@ -1345,11 +1426,35 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 							}
 							copy(clonedPath.Steps, state.Path.Steps)
 
+							containerSource := state.PrevEndpoint
+							if needsHostEscape {
+								clonedPath.Steps = append(clonedPath.Steps, domain.AttackStep{
+									StepIndex:        int(index) + stepOffset,
+									SourceEndpoint:   state.PrevEndpoint,
+									TargetEndpoint:   escapeHostName,
+									TargetEndpointID: escapeHostID,
+									TargetElementID:  escapeHostElementID,
+									TargetKind:       "Endpoint",
+									IsContainer:      false,
+									ContainerEscape:  true,
+									Vulnerability:    "Escape de Contenedor",
+									CVSSVector:       "AV:L/AC:L",
+									RiskScore:        1.0,
+									RiskSource:       "LEGACY_LPE_BASE_SCORE",
+									Exploitable:      true,
+									RootObtained:     true,
+								})
+								stepOffset++
+								containerSource = escapeHostName
+							}
+
 							clonedPath.Steps = append(clonedPath.Steps, domain.AttackStep{
-								StepIndex:        int(index) + state.Offset,
-								SourceEndpoint:   state.PrevEndpoint,
+								StepIndex:        int(index) + stepOffset,
+								SourceEndpoint:   containerSource,
 								TargetEndpoint:   targetName,
 								TargetEndpointID: targetID,
+								TargetElementID:  targetElementID,
+								TargetKind:       targetKind,
 								IsContainer:      isContainer,
 								ContainerID:      containerID,
 								ContainerName:    containerName,
@@ -1377,9 +1482,10 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 							}
 
 							newState := activePathState{
-								Path:         clonedPath,
-								PrevEndpoint: nextPrev,
-								Offset:       state.Offset,
+								Path:             clonedPath,
+								PrevEndpoint:     nextPrev,
+								Offset:           stepOffset,
+								PrevWasContainer: isContainer && !containerIsSource,
 							}
 
 							nextActivePaths = append(nextActivePaths, newState)
@@ -1403,6 +1509,28 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 
 				// Descartar rutas circulares, autosaltos o pseudo-escapes sin avance lateral real (salvo rutas directas de 1 solo paso sobre el propio nodo expuesto)
 				if lastStep.TargetEndpoint == "Escape de Contenedor (Host)" || (len(state.Path.Steps) > 1 && lastStep.TargetEndpoint == state.Path.InitialEndpoint) || lastStep.TargetEndpoint == "" {
+					continue
+				}
+
+				// Descartar rutas que revisitan un activo ya comprometido en la reconstrucción
+				// de pasos: p. ej. httpd -> DMZ -> el MISMO httpd -> escape -> dind. La vuelta a
+				// un nodo del que ya se partía no aporta salto y debe colapsarse al camino
+				// directo (httpd -> escape -> ... ). El filtro de asset_nodes en Cypher no lo
+				// caza porque aquí la revisita la introduce el step de un endpoint intermedio
+				// que apunta de vuelta a su propio contenedor hosteado, no el path crudo.
+				seenTargets := make(map[string]bool)
+				revisitsNode := false
+				for _, s := range state.Path.Steps {
+					if s.TargetElementID == "" {
+						continue
+					}
+					if seenTargets[s.TargetElementID] {
+						revisitsNode = true
+						break
+					}
+					seenTargets[s.TargetElementID] = true
+				}
+				if revisitsNode {
 					continue
 				}
 
