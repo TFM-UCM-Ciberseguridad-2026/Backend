@@ -31,7 +31,9 @@ type VulnerabilityPort interface {
 	GetByID(ctx context.Context, cveID string) (*domain.Vulnerability, error)
 	DeleteByID(ctx context.Context, cveID string) error
 	LinkVulnerabilityToCWEs(ctx context.Context, cveID string, cwes []string) error
-	LinkTTPsToVulnerability(ctx context.Context, cveID, cweID string, ttps []string, confidence, source string) error
+	// LinkTTPsToVulnerability devuelve las TTP realmente enlazadas, que pueden ser
+	// menos que las propuestas: solo se enlazan las que existen en el catálogo.
+	LinkTTPsToVulnerability(ctx context.Context, cveID, cweID string, ttps []string, confidence, source string) ([]string, error)
 	GetUnmappedVulnerabilities(ctx context.Context, projectID int64) ([]domain.Vulnerability, error) // projectID=0 → sin filtro (sweep global)
 }
 
@@ -144,6 +146,10 @@ type PatchPort interface {
 	// GetByVulnerability devuelve los parches que corrigen un CVE.
 	GetByVulnerability(ctx context.Context, cveID string) ([]domain.Patch, error)
 
+	// GetByProject devuelve los parches de todas las CVE del alcance de un proyecto,
+	// agrupados por CVE, en una sola consulta. Con projectID 0 recorre el grafo entero.
+	GetByProject(ctx context.Context, projectID int64) ([]domain.CVEPatches, error)
+
 	// SaveApplication crea (Patch)-[:APPLIED_TO]->(SoftwareInstallation). Redeclarar
 	// actualiza la arista existente.
 	SaveApplication(ctx context.Context, application *domain.AppliedPatch) error
@@ -220,18 +226,28 @@ type TTPPort interface {
 	Update(ctx context.Context, ttp *domain.TTP) error
 	GetByID(ctx context.Context, id string) (*domain.TTP, error)
 	DeleteByID(ctx context.Context, id string) error
-	RelateToVulnerability(ctx context.Context, cveID string, ttpID string) error
 	SaveBatch(ctx context.Context, ttps []domain.TTP) error
+	// SaveCatalogInfo registra de qué versión de ATT&CK procede el catálogo cargado.
+	SaveCatalogInfo(ctx context.Context, info domain.ATTACKCatalogInfo) error
+	// GetCatalog devuelve el catálogo vigente (id, nombre y tácticas), que es lo
+	// que se ofrece al mapeador como lista cerrada de técnicas elegibles.
+	GetCatalog(ctx context.Context) ([]domain.TTP, error)
 }
 
 // MitreATTACKProvider obtiene el catálogo MITRE ATT&CK Enterprise desde el feed STIX 2.1.
 type MitreATTACKProvider interface {
-	FetchATTACKBundle(ctx context.Context) ([]domain.TTP, []domain.ThreatActor, []domain.ThreatActorTTPRelation, error)
+	FetchATTACKBundle(ctx context.Context) (*domain.ATTACKCatalog, error)
 }
 
 type TTPMapper interface {
 	MapCWEToTTP(ctx context.Context, cwe string) ([]string, error)
-	MapEnrichedToTTPRaw(ctx context.Context, cwe, description, cvssVector string) ([]string, string, error)
+	// MapEnrichedToTTPRaw infiere las técnicas de una vulnerabilidad.
+	//
+	// La petición lleva las técnicas candidatas: si vienen, el modelo elige de esa
+	// lista en lugar de responder de memoria. Pedir recuerdo libre producía
+	// identificadores inventados, técnicas retiradas por MITRE y una concentración
+	// del 31% de las respuestas en una sola técnica.
+	MapEnrichedToTTPRaw(ctx context.Context, req domain.TTPMappingRequest) ([]string, string, error)
 }
 
 type ThreatActorPort interface {
@@ -251,6 +267,8 @@ type InfrastructurePort interface {
 	GetTTPMatrix(ctx context.Context, projectID *int64) ([]domain.TTPMatrixItem, error)
 	GetTTPStats(ctx context.Context, projectID int64) (*domain.TTPStats, error)
 	GetTotalMitreTTPs(ctx context.Context) (int, error)
+	// GetATTACKCatalogInfo devuelve la versión del catálogo MITRE ATT&CK cargada.
+	GetATTACKCatalogInfo(ctx context.Context) (*domain.ATTACKCatalogInfo, error)
 	GetExploitationPaths(ctx context.Context, projectID int64) ([]domain.ExploitationPath, error)
 	// IsAnalysisPending comprueba si hay vulnerabilidades de red pendientes de enriquecimiento en background.
 	IsAnalysisPending(ctx context.Context, projectID int64) (bool, error)

@@ -44,6 +44,11 @@ type mitreObjectDTO struct {
 	RelationshipType   string                   `json:"relationship_type"`
 	SourceRef          string                   `json:"source_ref"`
 	TargetRef          string                   `json:"target_ref"`
+
+	// Presentes solo en el objeto x-mitre-collection, que encabeza el bundle y
+	// declara de qué versión de ATT&CK procede todo lo demás.
+	XMitreVersion     string `json:"x_mitre_version"`
+	XMitreSpecVersion string `json:"x_mitre_attack_spec_version"`
 }
 
 type mitreBundleDTO struct {
@@ -70,26 +75,27 @@ func NewMitreAttackSTIXProvider(rawURL string, timeoutSeconds int) *MitreAttackS
 	}
 }
 
-// FetchATTACKBundle descarga y parsea las técnicas TTP, Threat Actors y relaciones de uso de MITRE ATT&CK Enterprise.
-func (p *MitreAttackSTIXProvider) FetchATTACKBundle(ctx context.Context) ([]domain.TTP, []domain.ThreatActor, []domain.ThreatActorTTPRelation, error) {
+// FetchATTACKBundle descarga y parsea las técnicas TTP, Threat Actors, relaciones de uso
+// y la versión del catálogo de MITRE ATT&CK Enterprise.
+func (p *MitreAttackSTIXProvider) FetchATTACKBundle(ctx context.Context) (*domain.ATTACKCatalog, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.url, nil)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("error creando solicitud HTTP para MITRE ATT&CK: %w", err)
+		return nil, fmt.Errorf("error creando solicitud HTTP para MITRE ATT&CK: %w", err)
 	}
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("error ejecutando consulta HTTP a MITRE ATT&CK: %w", err)
+		return nil, fmt.Errorf("error ejecutando consulta HTTP a MITRE ATT&CK: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, nil, fmt.Errorf("la API de MITRE ATT&CK devolvió status code no válido: %d", resp.StatusCode)
+		return nil, fmt.Errorf("la API de MITRE ATT&CK devolvió status code no válido: %d", resp.StatusCode)
 	}
 
 	var bundle mitreBundleDTO
 	if err := json.NewDecoder(resp.Body).Decode(&bundle); err != nil {
-		return nil, nil, nil, fmt.Errorf("error decodificando el bundle JSON de MITRE ATT&CK: %w", err)
+		return nil, fmt.Errorf("error decodificando el bundle JSON de MITRE ATT&CK: %w", err)
 	}
 
 	var ttps []domain.TTP
@@ -103,7 +109,21 @@ func (p *MitreAttackSTIXProvider) FetchATTACKBundle(ctx context.Context) ([]doma
 	stixToTtpID := make(map[string]string)
 	stixToActorID := make(map[string]string)
 
+	catalogo := &domain.ATTACKCatalog{}
+
 	for _, obj := range bundle.Objects {
+		// La colección se lee ANTES del filtro de vigencia: es metadatos del
+		// bundle, no una técnica, y no lleva las banderas de deprecación.
+		if obj.Type == "x-mitre-collection" {
+			if v := strings.TrimSpace(obj.XMitreVersion); v != "" {
+				catalogo.Version = v
+			}
+			if s := strings.TrimSpace(obj.XMitreSpecVersion); s != "" {
+				catalogo.SpecVersion = s
+			}
+			continue
+		}
+
 		if obj.XMitreDeprecated || obj.Revoked {
 			continue
 		}
@@ -183,5 +203,9 @@ func (p *MitreAttackSTIXProvider) FetchATTACKBundle(ctx context.Context) ([]doma
 		}
 	}
 
-	return ttps, actors, relations, nil
+	catalogo.TTPs = ttps
+	catalogo.Actors = actors
+	catalogo.Relations = relations
+
+	return catalogo, nil
 }

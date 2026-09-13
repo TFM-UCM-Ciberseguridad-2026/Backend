@@ -117,7 +117,7 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 	}
 
 	query := matchClause + `
-			OPTIONAL MATCH (n)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(t1:TTP)
+			OPTIONAL MATCH (n)-[:MAPS_TO]->(t1:TTP)
 			WHERE "Vulnerability" IN labels(n)
 			WITH n, collect(DISTINCT t1) AS t1List
 
@@ -201,13 +201,21 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 					endNode(rel):IPAddress
 			)
 
-			WITH nodes, collect({
-					id: elementId(rel),
-					type: type(rel),
-					source: elementId(startNode(rel)),
-					target: elementId(endNode(rel)),
-					properties: properties(rel)
-			}) AS cleanRels
+			// El OPTIONAL MATCH anterior deja rel a null cuando el proyecto no tiene ninguna
+			// relación, pero el mapa que lo envuelve no es null: collect devolvía entonces una
+			// entrada con todos los campos vacíos, y el grafo de un proyecto recién creado
+			// anunciaba un enlace que no existe. Se descarta igual que ip_mappings más abajo.
+			WITH nodes, collect(
+					CASE WHEN rel IS NULL THEN null
+					ELSE {
+						id: elementId(rel),
+						type: type(rel),
+						source: elementId(startNode(rel)),
+						target: elementId(endNode(rel)),
+						properties: properties(rel)
+					} END
+			) AS relsBrutas
+			WITH nodes, [r IN relsBrutas WHERE r IS NOT NULL] AS cleanRels
 
 			WITH nodes, cleanRels, [nodeObj IN nodes | nodeObj.id] AS scopedIds
 			OPTIONAL MATCH (n)-[:HAS_IP]->(ip:IPAddress)
@@ -509,6 +517,57 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 	return graphData, nil
 }
 
+// GetATTACKCatalogInfo lee la versión del catálogo MITRE ATT&CK cargada.
+//
+// El recuento de técnicas se cuenta en vivo en lugar de leer el que se guardó al
+// sincronizar: si alguien purga o modifica nodos TTP, el valor almacenado se
+// queda obsoleto y el publicado dejaría de corresponderse con el grafo.
+//
+// Si no hay nodo de catálogo —grafo poblado antes de que existiera este
+// registro— se devuelve la versión vacía en vez de un error: quien consume debe
+// poder distinguir "no lo sé" y actuar en consecuencia, no recibir un fallo.
+func (r *infrastructureRepo) GetATTACKCatalogInfo(ctx context.Context) (*domain.ATTACKCatalogInfo, error) {
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	query := `
+		OPTIONAL MATCH (c:ATTACKCatalog {name: 'enterprise-attack'})
+		RETURN coalesce(c.version, '')      AS version,
+		       coalesce(c.spec_version, '') AS spec_version,
+		       coalesce(c.updated_at, 0)    AS updated_at,
+		       count { (t:TTP) }            AS total_ttps
+	`
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		result, err := tx.Run(ctx, query, nil)
+		if err != nil {
+			return nil, err
+		}
+		registro, err := result.Single(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		info := &domain.ATTACKCatalogInfo{}
+		datos := registro.AsMap()
+		info.Version, _ = datos["version"].(string)
+		info.SpecVersion, _ = datos["spec_version"].(string)
+		if v, ok := datos["updated_at"].(int64); ok {
+			info.UpdatedAt = v
+		}
+		if v, ok := datos["total_ttps"].(int64); ok {
+			info.TotalTTPs = int(v)
+		}
+		return info, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	info, _ := res.(*domain.ATTACKCatalogInfo)
+	return info, nil
+}
+
 func (r *infrastructureRepo) GetTotalMitreTTPs(ctx context.Context) (int, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
@@ -583,7 +642,7 @@ func (r *infrastructureRepo) GetTopAPTsByInfrastructureTTPs(ctx context.Context,
 		// Recoger TTPs por las tres rutas de mapeo posibles
 		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t1:TTP)
 		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t2:TTP)
-		OPTIONAL MATCH (v)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(t3:TTP)
+		OPTIONAL MATCH (v)-[:MAPS_TO]->(t3:TTP)
 
 		// Combinar TTPs de todas las rutas SIN coalesce (que descarta valores)
 		WITH v, [t IN [t1, t2, t3] WHERE t IS NOT NULL] AS ttps_raw
@@ -1783,25 +1842,76 @@ func (r *infrastructureRepo) GetTTPMatrix(ctx context.Context, projectID *int64)
 		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) } OR
 		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) }
 
+		// Estado de parcheo de cada CVE dentro del proyecto. Se calcula ANTES de abrir el
+		// abanico por técnica: así se resuelve una vez por CVE y no una vez por cada par
+		// CVE-técnica, que son tres veces más.
+		//
+		// El recorrido es el mismo que usa la cola de parcheo (risk.go): desde el activo
+		// del proyecto hasta el hallazgo, cubriendo instalación del host, instalación
+		// dentro de contenedor e imagen de contenedor.
+		//
+		// En consulta global (project_id=0) no hay proyecto que acotar: no se cuenta
+		// ningún hallazgo y todas las CVE quedan en UNKNOWN, que es lo que impide dar por
+		// resuelta una técnica cuyo estado no se ha medido contra ningún alcance.
+		OPTIONAL MATCH (v)<-[:OF_VULNERABILITY]-(f:Finding)
+		WHERE NOT ($project_id = 0 OR toString($project_id) = "0")
+		  AND EXISTS {
+		        MATCH (proj:Project)-[:HAS_ENDPOINT]->(scoped)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)-[:HAS_FINDING]->(f)
+		        WHERE proj.id = $project_id OR toString(proj.id) = toString($project_id) OR proj.name = toString($project_id)
+		      }
+
+		WITH v,
+		     count(f) AS findings_total,
+		     sum(CASE WHEN toUpper(coalesce(f.status, 'OPEN')) IN ['PATCHED', 'FIXED', 'RESOLVED', 'CLOSED', 'SUPERSEDED'] THEN 1 ELSE 0 END) AS findings_cerrados,
+		     sum(CASE WHEN toUpper(coalesce(f.status, 'OPEN')) = 'MITIGATED' THEN 1 ELSE 0 END) AS findings_mitigados
+
+		// Peor caso: basta un hallazgo ni cerrado ni mitigado para que la CVE sea OPEN.
+		WITH v,
+		     findings_total,
+		     findings_total - findings_cerrados AS findings_open,
+		     CASE
+		       WHEN findings_total = 0 THEN 'UNKNOWN'
+		       WHEN findings_total - findings_cerrados = 0 THEN 'PATCHED'
+		       WHEN findings_total - findings_cerrados - findings_mitigados = 0 THEN 'MITIGATED'
+		       ELSE 'OPEN'
+		     END AS cve_status
+
 		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t1:TTP)
 		OPTIONAL MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t2:TTP)
-		OPTIONAL MATCH (v)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(t3:TTP)
+		OPTIONAL MATCH (v)-[:MAPS_TO]->(t3:TTP)
 
-		WITH v, [t IN [t1, t2, t3] WHERE t IS NOT NULL] AS ttps_raw
+		WITH v, findings_total, findings_open, cve_status,
+		     [t IN [t1, t2, t3] WHERE t IS NOT NULL] AS ttps_raw
 		UNWIND (CASE WHEN size(ttps_raw) > 0 THEN ttps_raw ELSE [null] END) AS t
-		WITH v, t WHERE t IS NOT NULL
+		WITH v, t, findings_total, findings_open, cve_status WHERE t IS NOT NULL
 
+		// La descripción se recorta a 160 caracteres: una misma CVE cuelga de
+		// varias técnicas, así que su texto completo viajaba repetido y suponía el
+		// 71% de una respuesta de ~1 MB que el frontend recarga con frecuencia.
 		WITH t, collect(DISTINCT {
 			id: coalesce(v.cve_id, v.id, ''),
 			cvss: coalesce(v.cvss_score, v.base_score, 'N/A'),
-			desc: coalesce(v.description, '')
+			desc: CASE
+			        WHEN v.description IS NULL THEN ''
+			        WHEN size(v.description) > 160 THEN left(v.description, 160) + '…'
+			        ELSE v.description
+			      END,
+			status: cve_status,
+			findings_total: findings_total,
+			findings_open: findings_open
 		}) AS cves
 
-		RETURN coalesce(t.ttp_id, t.id, '') AS ttp_id, 
-		       coalesce(t.name, '') AS name, 
-		       coalesce(t.tactic, t.tactics, '') AS tactic, 
-		       coalesce(t.description, '') AS desc, 
-		       cves
+		// Una técnica es resuelta solo si TODAS sus CVE están cerradas. Una CVE mitigada
+		// la mantiene activa —el software vulnerable sigue instalado— y una UNKNOWN
+		// también, porque no hay hallazgo que demuestre el cierre.
+		RETURN coalesce(t.ttp_id, t.id, '') AS ttp_id,
+		       coalesce(t.name, '') AS name,
+		       coalesce(t.tactic, t.tactics, '') AS tactic,
+		       coalesce(t.description, '') AS desc,
+		       cves,
+		       size(cves) > 0 AND size([c IN cves WHERE c.status <> 'PATCHED']) = 0 AS resolved,
+		       size([c IN cves WHERE c.status IN ['OPEN', 'MITIGATED']]) AS open_cves,
+		       size(cves) AS total_cves
 	`
 
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
@@ -1822,6 +1932,9 @@ func (r *infrastructureRepo) GetTTPMatrix(ctx context.Context, projectID *int64)
 			tactic, _ := record.Get("tactic")
 			desc, _ := record.Get("desc")
 			cvesRaw, _ := record.Get("cves")
+			resolvedRaw, _ := record.Get("resolved")
+			openCVEsRaw, _ := record.Get("open_cves")
+			totalCVEsRaw, _ := record.Get("total_cves")
 
 			var cves []domain.TTPMatrixCVE
 			if cvesRaw != nil {
@@ -1831,22 +1944,34 @@ func (r *infrastructureRepo) GetTTPMatrix(ctx context.Context, projectID *int64)
 							cveID := fmt.Sprint(cMap["id"])
 							cveCVSS := fmt.Sprintf("%v", cMap["cvss"])
 							cveDesc := fmt.Sprint(cMap["desc"])
+							status := domain.CVEPatchStatusUnknown
+							if s, ok := cMap["status"].(string); ok && s != "" {
+								status = s
+							}
 							cves = append(cves, domain.TTPMatrixCVE{
-								ID:   cveID,
-								CVSS: cveCVSS,
-								Desc: cveDesc,
+								ID:            cveID,
+								CVSS:          cveCVSS,
+								Desc:          cveDesc,
+								Status:        status,
+								FindingsTotal: int(toInt64(cMap["findings_total"])),
+								FindingsOpen:  int(toInt64(cMap["findings_open"])),
 							})
 						}
 					}
 				}
 			}
 
+			resolved, _ := resolvedRaw.(bool)
+
 			matrix = append(matrix, domain.TTPMatrixItem{
-				ID:     fmt.Sprint(id),
-				Name:   fmt.Sprint(name),
-				Tactic: fmt.Sprint(tactic),
-				Desc:   fmt.Sprint(desc),
-				CVEs:   cves,
+				ID:        fmt.Sprint(id),
+				Name:      fmt.Sprint(name),
+				Tactic:    fmt.Sprint(tactic),
+				Desc:      fmt.Sprint(desc),
+				CVEs:      cves,
+				Resolved:  resolved,
+				OpenCVEs:  int(toInt64(openCVEsRaw)),
+				TotalCVEs: int(toInt64(totalCVEsRaw)),
 			})
 		}
 		return matrix, nil
@@ -1875,18 +2000,32 @@ func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (
 		  EXISTS { MATCH (p:Project)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) OR p.name = toString($project_id) }
 	`
 
+	// Una CVE está mapeada cuando el pipeline ha escrito una arista de mapeo para
+	// ella. Que su CWE sea alcanzable desde el catálogo CAPEC NO es un mapeo: se
+	// cumple sin que el sistema haya hecho nada, y contarlo como tal daba un KPI
+	// de cobertura del 100% con el trabajo sin hacer. Esa alcanzabilidad se
+	// publica ahora como métrica propia (capec_pending), que es justamente la
+	// cifra de trabajo determinista que queda por delante.
 	totalQuery := baseWhere + `
-		WITH v, 
-		  EXISTS { MATCH (v)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(:TTP) } AS has_t1,
-		  EXISTS { MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(:TTP) } AS has_t2,
-		  EXISTS { MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(:TTP) } AS has_t3
-		WITH v, (has_t1 OR has_t2 OR has_t3) AS is_mapped
-		RETURN 
+		WITH v,
+		  EXISTS { MATCH (v)-[:MAPS_TO]->(:TTP) } AS mapeo_directo,
+		  EXISTS { MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(:TTP) } AS mapeo_via_cwe,
+		  EXISTS { MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(:TTP) } AS capec_alcanzable
+		WITH v, (mapeo_directo OR mapeo_via_cwe) AS is_mapped, capec_alcanzable
+		RETURN
 		  count(v) AS total,
 		  count(CASE WHEN is_mapped THEN 1 END) AS mapped,
-		  count(CASE WHEN NOT is_mapped THEN 1 END) AS unmapped
+		  count(CASE WHEN NOT is_mapped THEN 1 END) AS unmapped,
+		  count(CASE WHEN NOT is_mapped AND capec_alcanzable THEN 1 END) AS capec_pending
 	`
 
+	// La procedencia y la confianza se leen de las propiedades que escribe
+	// LinkTTPsToVulnerability. No hay rama que las invente: la vía CAPEC aparece
+	// aquí porque el worker la ejecutó y dejó source='capec_static', no por el
+	// mero hecho de existir la ruta en el catálogo.
+	//
+	// Se cuenta por MAPEO (par CVE-técnica), no por técnica: "88 de alta
+	// confianza" son 88 mapeos, que es lo que la interfaz dice medir.
 	confidenceQuery := baseWhere + `
 		CALL {
 			WITH v
@@ -1896,23 +2035,25 @@ func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (
 			WITH v
 			MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[r:MAPS_TO]->(t:TTP)
 			RETURN t, coalesce(r.confidence, 'medium') AS conf, coalesce(r.source, 'llm_enriched') AS src
-			UNION
-			WITH v
-			MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)<-[:MAPS_TO_CWE]-(:CAPEC)-[:MAPS_TO_TTP]->(t:TTP)
-			RETURN t, 'high' AS conf, 'capec_static' AS src
 		}
-		// AQUI ESTA LA MAGIA: AGRUPAMOS POR TTP (t) en lugar de por (v, t)
-		WITH t, collect({conf: conf, src: src})[0] AS map_info
+		// Un mismo par (CVE, técnica) puede llegar por las dos rutas. El empate se
+		// resuelve con una regla explícita —el determinista gana al inferido— en
+		// lugar de con collect(...)[0], que elegía un elemento arbitrario y hacía
+		// que dos ejecuciones sobre los mismos datos pudieran diferir.
+		WITH v, t, collect(DISTINCT {conf: conf, src: src}) AS candidatos
+		WITH
+		  CASE WHEN any(c IN candidatos WHERE c.src = 'capec_static') THEN 'capec_static' ELSE 'llm_enriched' END AS src,
+		  CASE WHEN any(c IN candidatos WHERE c.conf = 'high')        THEN 'high'         ELSE 'medium'        END AS conf
 		RETURN
-		  count(CASE WHEN map_info.conf = 'high' THEN 1 END) AS high_confidence,
-		  count(CASE WHEN map_info.conf = 'medium' THEN 1 END) AS medium_confidence,
-		  count(CASE WHEN map_info.src = 'capec_static' THEN 1 END) AS capec_static,
-		  count(CASE WHEN map_info.src = 'llm_enriched' THEN 1 END) AS llm_enriched
+		  count(CASE WHEN conf = 'high' THEN 1 END) AS high_confidence,
+		  count(CASE WHEN conf = 'medium' THEN 1 END) AS medium_confidence,
+		  count(CASE WHEN src = 'capec_static' THEN 1 END) AS capec_static,
+		  count(CASE WHEN src = 'llm_enriched' THEN 1 END) AS llm_enriched
 	`
 
 	topTTPsQuery := baseWhere + `
 		CALL {
-			WITH v MATCH (v)-[:MAPS_TO|EXPLOITS_VIA_TTP]->(t:TTP) RETURN t
+			WITH v MATCH (v)-[:MAPS_TO]->(t:TTP) RETURN t
 			UNION
 			WITH v MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(t:TTP) RETURN t
 			UNION
@@ -1928,12 +2069,53 @@ func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (
 		LIMIT 10
 	`
 
+	// La misma confianza contada por VULNERABILIDAD en lugar de por mapeo. Una
+	// CVE cuenta como de confianza alta si tiene AL MENOS una técnica deducida
+	// del catálogo; el resto de las mapeadas son de confianza media.
+	//
+	// Las dos lecturas divergen porque la vía determinista es mucho más densa
+	// (6,35 técnicas por CVE frente a 2,04), de modo que un 30% de las CVE
+	// aporta el 58% de las aristas. Sin esta cifra, el panel sugiere una
+	// fiabilidad que no se sostiene a nivel de vulnerabilidad.
+	confidenceCVEQuery := baseWhere + `
+		WITH DISTINCT v
+		WITH v,
+		  EXISTS {
+		    MATCH (v)-[r:MAPS_TO]->(:TTP) WHERE r.confidence = 'high'
+		    UNION
+		    MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[r2:MAPS_TO]->(:TTP) WHERE r2.confidence = 'high'
+		  } AS tieneAlta,
+		  EXISTS {
+		    MATCH (v)-[:MAPS_TO]->(:TTP)
+		    UNION
+		    MATCH (v)-[:HAS_WEAKNESS|HAS_CWE]->(:CWE)-[:MAPS_TO]->(:TTP)
+		  } AS mapeada
+		RETURN
+		  count(CASE WHEN mapeada AND tieneAlta THEN 1 END)     AS high_cves,
+		  count(CASE WHEN mapeada AND NOT tieneAlta THEN 1 END) AS medium_cves
+	`
+
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
 	stats := &domain.TTPStats{}
 
 	_, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
+		resCVE, err := tx.Run(ctx, confidenceCVEQuery, params)
+		if err != nil {
+			return nil, fmt.Errorf("ttp-stats confidenceCVEQuery: %w", err)
+		}
+		if resCVE.Next(ctx) {
+			rec := resCVE.Record()
+			if v, ok := rec.Get("high_cves"); ok && v != nil {
+				stats.HighConfidenceCVEs = int(v.(int64))
+			}
+			if v, ok := rec.Get("medium_cves"); ok && v != nil {
+				stats.MediumConfidenceCVEs = int(v.(int64))
+			}
+		}
+		_, _ = resCVE.Consume(ctx)
+
 		res1, err := tx.Run(ctx, totalQuery, params)
 		if err != nil { return nil, fmt.Errorf("ttp-stats totalQuery: %w", err) }
 		if res1.Next(ctx) {
@@ -1941,6 +2123,7 @@ func (r *infrastructureRepo) GetTTPStats(ctx context.Context, projectID int64) (
 			if v, ok := rec.Get("total"); ok && v != nil { stats.TotalCVEs = int(v.(int64)) }
 			if v, ok := rec.Get("mapped"); ok && v != nil { stats.MappedCVEs = int(v.(int64)) }
 			if v, ok := rec.Get("unmapped"); ok && v != nil { stats.UnmappedCVEs = int(v.(int64)) }
+			if v, ok := rec.Get("capec_pending"); ok && v != nil { stats.CapecPendingCVEs = int(v.(int64)) }
 		}
 		_, _ = res1.Consume(ctx)
 

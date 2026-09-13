@@ -118,6 +118,9 @@ func NewRouter(h *OrchestratorHandler, hub *WSHub, govHandler *GovernanceHandler
 	/* POST /api/vulnerabilities/{cve}/patches/refresh: Consulta la fuente externa (OSV) y actualiza parches y versión corregida. */
 	mux.HandleFunc("POST /api/vulnerabilities/{cve}/patches/refresh", h.RefreshPatchesForVulnerability)
 
+	/* GET /api/projects/{id}/cve-patches: Parches de todas las CVE del proyecto, agrupados por CVE, en una sola consulta. */
+	mux.HandleFunc("GET /api/projects/{id}/cve-patches", h.GetPatchesForProject)
+
 	/* POST /api/installations/{id}/applied-patches: Declara un parche como aplicado sobre la instalación, cierra findings y actualiza versiones/riesgo. */
 	mux.HandleFunc("POST /api/installations/{id}/applied-patches", h.DeclarePatchApplied)
 

@@ -211,21 +211,16 @@ func (r *capecRepo) GetTTPsByCWE(ctx context.Context, cweID string) ([]string, e
 
 	result, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		res, err := tx.Run(ctx, query, map[string]any{"cwe_id": cweID})
-		fmt.Printf("DEBUG CAPEC RUN: err=%v, driverTarget=%v\n", err, r.driver.Target())
 		if err != nil {
 			return nil, err
 		}
 		var ttps []string
-		count := 0
 		for res.Next(ctx) {
-			count++
 			record := res.Record()
-			fmt.Printf("DEBUG RECORD #%d: %+v\n", count, record.Values)
 			if id, ok := record.Get("ttp_id"); ok && id != nil {
 				ttps = append(ttps, fmt.Sprintf("%v", id))
 			}
 		}
-		fmt.Printf("DEBUG TOTAL RECORDS: %d, res.Err=%v\n", count, res.Err())
 		return ttps, res.Err()
 	})
 	if err != nil {

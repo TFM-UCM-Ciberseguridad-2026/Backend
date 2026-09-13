@@ -62,6 +62,89 @@ func (r *patchRepo) SaveApplication(ctx context.Context, a *domain.AppliedPatch)
 	return executeWriteUpdateHelper(ctx, r.driver, query, params)
 }
 
+// GetByProject devuelve, agrupados por CVE, los parches publicados para las
+// vulnerabilidades del alcance de un proyecto.
+//
+// Es una sola consulta a propósito: quien lo consume es la ficha de una técnica ATT&CK,
+// que puede reunir más de cien CVE, y resolverlas de una en una contra
+// /api/vulnerabilities/{cve}/patches sería un N+1 desde el navegador.
+//
+// El alcance replica el de la matriz de TTPs: una CVE entra si el proyecto tiene un
+// hallazgo suyo, o si cuelga de la imagen de un contenedor por HAS_VULNERABILITY, que es
+// el camino por el que llegan las CVE de imagen todavía sin hallazgo. Con projectID 0 no
+// se acota nada y se devuelve el grafo entero.
+func (r *patchRepo) GetByProject(ctx context.Context, projectID int64) ([]domain.CVEPatches, error) {
+	query := `
+		MATCH (p:Patch)-[:FIXES]->(v:Vulnerability)
+		WHERE $project_id = 0 OR toString($project_id) = "0"
+		   OR EXISTS {
+		        MATCH (proj:Project)-[:HAS_ENDPOINT]->(scoped)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v)
+		        WHERE proj.id = $project_id OR toString(proj.id) = toString($project_id) OR proj.name = toString($project_id)
+		      }
+		   OR EXISTS {
+		        MATCH (proj:Project)-[:HAS_ENDPOINT]->(scoped)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(img:ContainerImage)-[:HAS_VULNERABILITY]->(v)
+		        WHERE proj.id = $project_id OR toString(proj.id) = toString($project_id) OR proj.name = toString($project_id)
+		      }
+		WITH v, p
+		ORDER BY p.id
+		RETURN coalesce(v.cve_id, '') AS cve_id,
+		       collect(DISTINCT {
+		         id:           p.id,
+		         description:  p.description,
+		         url:          p.url,
+		         release_date: p.release_date
+		       }) AS patches
+		ORDER BY cve_id
+	`
+
+	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	defer session.Close(ctx)
+
+	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, map[string]any{"project_id": projectID})
+		if err != nil {
+			return nil, err
+		}
+
+		agrupados := make([]domain.CVEPatches, 0)
+		for result.Next(ctx) {
+			rec := result.Record().AsMap()
+
+			cveID := getString(rec, "cve_id")
+			if cveID == "" {
+				continue
+			}
+
+			lista, _ := rec["patches"].([]any)
+			patches := make([]domain.Patch, 0, len(lista))
+			for _, item := range lista {
+				props, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				patches = append(patches, domain.Patch{
+					PatchID:     getInt64(props, "id"),
+					Description: getString(props, "description"),
+					URL:         getString(props, "url"),
+					ReleaseDate: getTimePtr(props, "release_date"),
+				})
+			}
+
+			agrupados = append(agrupados, domain.CVEPatches{CVEID: cveID, Patches: patches})
+		}
+
+		return agrupados, result.Err()
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return []domain.CVEPatches{}, nil
+	}
+	return res.([]domain.CVEPatches), nil
+}
+
 // GetAppliedPatchHistoryByEndpoint recupera el histórico de parches y findings resueltos
 // agrupado por software tradicional y por imágenes de contenedores alojadas en el endpoint.
 func (r *patchRepo) GetAppliedPatchHistoryByEndpoint(ctx context.Context, endpointID int64) (*domain.EndpointPatchHistory, error) {

@@ -55,6 +55,7 @@ func main() {
 	ttpRepo := neo4j.NewTTPRepository(driver)
 	actorRepo := neo4j.NewThreatActorRepository(driver)
 	govRepo := neo4j.NewGovernanceRepository(driver)
+	govService := service.NewGovernanceService(govRepo)
 
 	// 4. Inicialización del Servicio/Orquestador (Core)
 	nistAPIAdapter := provider.NewNistAPIAdapter(cfg.NVD.BaseURL, cfg.NVD.APIKey, cfg.NVD.TimeoutSeconds)
@@ -99,6 +100,9 @@ func main() {
 
 	// Inyectar el repositorio y proveedor para el catálogo de CAPEC
 	orchestrator.WithCAPEC(capecRepo, capecProvider)
+
+	// Con esto, cada proyecto nuevo nace con su marco de gobierno sembrado.
+	orchestrator.WithGovernance(govService)
 
 	// Iniciar el worker de TTPs en segundo plano esperando la sincronización
 	go func() {
@@ -203,13 +207,18 @@ func main() {
 		}
 	}()
 
+	// Marco de gobierno de los proyectos que se crearon antes de que la siembra pasara a
+	// hacerse al crear el proyecto. Antes aquí se sembraba un id escrito a mano, así que
+	// cualquier otro proyecto se quedaba con la pestaña de Gobierno vacía.
+	if sembrados, err := govService.SeedPending(context.Background()); err != nil {
+		log.Printf("[Governance] Error sembrando proyectos pendientes: %v", err)
+	} else if sembrados > 0 {
+		log.Printf("[Governance] Marco de gobierno sembrado en %d proyecto(s) que no lo tenían.", sembrados)
+	}
+
 	// 5. Inicialización de los Controladores HTTP (Adaptadores Inbound)
 	h := handler.NewOrchestratorHandler(orchestrator)
 	
-	govService := service.NewGovernanceService(govRepo)
-	if err := govService.Seed(context.Background(), 10001); err != nil {
-		log.Printf("[Governance] Error seeding inicial: %v", err)
-	}
 	govHandler := handler.NewGovernanceHandler(govService)
 
 	router := handler.NewRouter(h, wsHub, govHandler)

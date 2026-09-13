@@ -21,3 +21,13 @@ type Patch struct {
 	Official      bool   `json:"official"`
 	FixedVersion  string `json:"fixed_version,omitempty"`
 }
+
+// CVEPatches agrupa los parches publicados para una CVE.
+//
+// Se sirve por proyecto y no por CVE porque quien lo consume —la ficha de una técnica
+// ATT&CK— necesita los parches de todas sus CVE a la vez: pedirlos de uno en uno serían
+// más de cien peticiones al abrir una sola técnica.
+type CVEPatches struct {
+	CVEID   string  `json:"cve_id"`
+	Patches []Patch `json:"patches"`
+}

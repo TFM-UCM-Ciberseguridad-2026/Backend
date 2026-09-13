@@ -490,13 +490,32 @@ func (h *OrchestratorHandler) GetTopAPTs(w http.ResponseWriter, r *http.Request)
 }
 
 // GET /api/infrastructure/mitre-ttp-count
+//
+// Además del recuento publica la versión de ATT&CK del catálogo cargado. El
+// campo "count" se mantiene para no romper a quien ya lo consume; los de versión
+// son añadidos.
+//
+// Se publica porque quien exporta una capa para el ATT&CK Navigator tiene que
+// declarar contra qué versión se interpretan las técnicas, y fijarla a mano en el
+// frontend la dejaba desfasada en silencio.
 func (h *OrchestratorHandler) GetMitreTTPCount(w http.ResponseWriter, r *http.Request) {
 	count, err := h.orchestrator.GetTotalMitreTTPs(r.Context())
 	if err != nil {
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	sendJSON(w, map[string]int{"count": count}, http.StatusOK)
+
+	respuesta := map[string]any{"count": count}
+
+	// La versión es información complementaria: si el grafo se pobló antes de que
+	// se registrara, el recuento sigue siendo válido y la respuesta no debe fallar.
+	if info, err := h.orchestrator.GetATTACKCatalogInfo(r.Context()); err == nil && info != nil {
+		respuesta["attack_version"] = info.Version
+		respuesta["attack_spec_version"] = info.SpecVersion
+		respuesta["catalog_updated_at"] = info.UpdatedAt
+	}
+
+	sendJSON(w, respuesta, http.StatusOK)
 }
 
 // GET /api/infrastructure/exploitation-paths?project_id={id}
@@ -695,6 +714,31 @@ func (h *OrchestratorHandler) GetPatchesForVulnerability(w http.ResponseWriter, 
 		"cve_id":  cveID,
 		"count":   len(patches),
 		"patches": patches,
+	}, http.StatusOK)
+}
+
+// GET /api/projects/{id}/cve-patches
+//
+// Devuelve los parches de todas las CVE del proyecto agrupados por CVE. Existe para que
+// la ficha de una técnica ATT&CK pueda enseñar los parches de sus CVE sin encadenar una
+// petición por cada una: hay técnicas con más de cien.
+func (h *OrchestratorHandler) GetPatchesForProject(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		sendError(w, "ID de proyecto inválido", http.StatusBadRequest)
+		return
+	}
+
+	items, err := h.orchestrator.GetPatchesForProject(r.Context(), projectID)
+	if err != nil {
+		sendError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSON(w, map[string]any{
+		"project_id": projectID,
+		"count":      len(items),
+		"items":      items,
 	}, http.StatusOK)
 }
 

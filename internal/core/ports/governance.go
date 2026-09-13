@@ -30,6 +30,10 @@ type GovernanceRepository interface {
 	// Check if seeded
 	IsSeeded(ctx context.Context, projectID int64) (bool, error)
 
+	// ProjectsWithoutFramework devuelve los proyectos que todavía no tienen marco de
+	// gobierno, para poder sembrarlos al arrancar sin recorrer los que ya lo tienen.
+	ProjectsWithoutFramework(ctx context.Context) ([]int64, error)
+
 	// SLA
 	GetSLAConfigs(ctx context.Context, projectID int64) ([]domain.SLAConfig, error)
 	SaveSLAConfigs(ctx context.Context, projectID int64, configs []domain.SLAConfig) error
@@ -38,6 +42,10 @@ type GovernanceRepository interface {
 
 type GovernanceService interface {
 	Seed(ctx context.Context, projectID int64) error
+
+	// SeedPending siembra el marco de todos los proyectos que aún no lo tienen y devuelve
+	// cuántos ha sembrado. Es idempotente: repetirlo no altera nada.
+	SeedPending(ctx context.Context) (int, error)
 
 	// Policies
 	SavePolicy(ctx context.Context, projectID int64, policy *domain.PolicyDocument) error

@@ -8,11 +8,12 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
+	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/ports"
 )
 
@@ -119,6 +120,75 @@ func (c *OllamaClient) generateTTPs(parentCtx context.Context, prompt string) ([
 	return nil, "", fmt.Errorf("agotados %d reintentos para Ollama: %w", maxRetries, lastErr)
 }
 
+// respuestaTTPs es la forma que el prompt exige al modelo.
+type respuestaTTPs struct {
+	TTPs []string `json:"ttps"`
+}
+
+// extraerTTPs obtiene los identificadores de técnica de la respuesta del modelo.
+//
+// La lectura es estructurada: se parsea el JSON y se atiende ÚNICAMENTE al array
+// "ttps". Antes se barría el texto completo con una expresión regular, así que
+// cualquier identificador mencionado en otro campo —una lista de descartes, un
+// razonamiento, o el propio ejemplo del prompt— se persistía como si el modelo
+// lo hubiera afirmado.
+//
+// Solo si la respuesta no es JSON válido se recurre al texto plano, y aun
+// entonces cada candidato se valida entero con domain.NormalizarTTPID.
+func extraerTTPs(respuesta string) []string {
+	var estructurada respuestaTTPs
+	if err := json.Unmarshal([]byte(respuesta), &estructurada); err == nil {
+		// La respuesta es JSON bien formado: es la fuente autorizada, aunque
+		// "ttps" venga vacío o ausente. Devolver 0 aquí es correcto y significa
+		// que el modelo no afirmó ninguna técnica.
+		return normalizarIdentificadores(estructurada.TTPs)
+	}
+	return normalizarIdentificadores(candidatosDesdeTexto(respuesta))
+}
+
+// candidatosDesdeTexto trocea una respuesta en prosa en posibles identificadores.
+// No extrae subcadenas: parte por separadores y devuelve tokens completos, que
+// normalizarIdentificadores validará enteros.
+func candidatosDesdeTexto(texto string) []string {
+	campos := strings.FieldsFunc(texto, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '.'
+	})
+
+	candidatos := make([]string, 0, len(campos))
+	for _, campo := range campos {
+		// Los puntos de puntuación al final ("...usa T1190.") no forman parte del
+		// identificador; los interiores sí (T1059.001), por eso solo se recortan
+		// los de los extremos.
+		if limpio := strings.Trim(campo, "."); limpio != "" {
+			candidatos = append(candidatos, limpio)
+		}
+	}
+	return candidatos
+}
+
+// normalizarIdentificadores normaliza, valida y deduplica conservando el orden
+// de llegada.
+//
+// La validación es la del dominio (domain.NormalizarTTPID), compartida con el
+// repositorio: el mismo criterio decide qué es un identificador bien formado en
+// la frontera del LLM y en la de escritura al grafo.
+func normalizarIdentificadores(brutos []string) []string {
+	vistos := make(map[string]bool, len(brutos))
+	ttps := make([]string, 0, len(brutos))
+
+	for _, bruto := range brutos {
+		id, valido := domain.NormalizarTTPID(bruto)
+		if !valido {
+			continue
+		}
+		if !vistos[id] {
+			vistos[id] = true
+			ttps = append(ttps, id)
+		}
+	}
+	return ttps
+}
+
 func (c *OllamaClient) doGenerate(ctx context.Context, prompt string) ([]string, string, error) {
 	reqBody := generateRequest{
 		Model:  c.model,
@@ -162,19 +232,7 @@ func (c *OllamaClient) doGenerate(ctx context.Context, prompt string) ([]string,
 		return nil, "", fmt.Errorf("error unmarshaling ollama response: %w", err)
 	}
 
-	// Use regex to extract all TTP IDs from the response string
-	re := regexp.MustCompile(`T\d{4}(?:\.\d{3})?`)
-	matches := re.FindAllString(genResp.Response, -1)
-
-	// Deduplicate matches
-	ttpMap := make(map[string]bool)
-	var ttps []string
-	for _, m := range matches {
-		if !ttpMap[m] {
-			ttpMap[m] = true
-			ttps = append(ttps, m)
-		}
-	}
+	ttps := extraerTTPs(genResp.Response)
 
 	if len(ttps) == 0 {
 		log.Printf("[Ollama] failed to find any TTPs in response: %s", genResp.Response)
@@ -186,7 +244,7 @@ func (c *OllamaClient) doGenerate(ctx context.Context, prompt string) ([]string,
 
 // MapCWEToTTP mapea un CWE a TTPs, con caché.
 func (c *OllamaClient) MapCWEToTTP(ctx context.Context, cwe string) ([]string, error) {
-	ttps, _, err := c.MapEnrichedToTTPRaw(ctx, cwe, "", "")
+	ttps, _, err := c.MapEnrichedToTTPRaw(ctx, domain.TTPMappingRequest{CWE: cwe})
 	if err != nil {
 		log.Printf("[Ollama] MapCWEToTTP error for CWE %s: %v", cwe, err)
 		return nil, err
@@ -194,51 +252,161 @@ func (c *OllamaClient) MapCWEToTTP(ctx context.Context, cwe string) ([]string, e
 	return ttps, nil
 }
 
-func (c *OllamaClient) buildEnrichedPrompt(cwe, description, cvssVector string) string {
+func (c *OllamaClient) buildEnrichedPrompt(req domain.TTPMappingRequest) string {
 	var sb strings.Builder
 	sb.WriteString("You are a cybersecurity expert mapping vulnerabilities to MITRE ATT&CK.\n\n")
 	sb.WriteString("Given the following vulnerability details, identify the MITRE ATT&CK TTP IDs (Techniques) ")
 	sb.WriteString("that an attacker would use to exploit this specific weakness. Consider the attack vector, ")
 	sb.WriteString("the affected component, and the exploitation conditions described.\n\n")
 
-	if cwe != "" {
-		sb.WriteString(fmt.Sprintf("CWE: %s\n", cwe))
+	if req.CWE != "" {
+		sb.WriteString(fmt.Sprintf("CWE: %s\n", req.CWE))
 	}
-	if cvssVector != "" {
-		sb.WriteString(fmt.Sprintf("CVSS Vector: %s\n", cvssVector))
+	if req.CVSSVector != "" {
+		sb.WriteString(fmt.Sprintf("CVSS Vector: %s\n", req.CVSSVector))
 	}
-	if description != "" {
-		sb.WriteString(fmt.Sprintf("Vulnerability Description: %s\n", description))
+	if req.Description != "" {
+		sb.WriteString(fmt.Sprintf("Vulnerability Description: %s\n", req.Description))
+	}
+
+	if len(req.Candidatas) > 0 {
+		// Lista cerrada. Se ofrecen identificador y nombre: sin el nombre el modelo
+		// no puede elegir con criterio, y sin la lista responde de memoria, que es
+		// de donde salían las técnicas retiradas y los identificadores inventados.
+		sb.WriteString("\nYou MUST choose ONLY from the following MITRE ATT&CK techniques. ")
+		sb.WriteString("These are the techniques present in the currently loaded ATT&CK catalog ")
+		sb.WriteString("that are compatible with this vulnerability's CVSS vector. ")
+		sb.WriteString("Any ID not in this list will be rejected.\n\n")
+		sb.WriteString("AVAILABLE TECHNIQUES:\n")
+		for _, t := range req.Candidatas {
+			sb.WriteString(t.TTPID)
+			if t.Name != "" {
+				sb.WriteString(" ")
+				sb.WriteString(t.Name)
+			}
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\nSelect the 1 to 4 techniques from the list above that best describe how an ")
+		sb.WriteString("attacker would exploit this specific vulnerability. Prefer precision over quantity.\n")
 	}
 
 	sb.WriteString("\nYou MUST return ONLY a JSON object with a single key \"ttps\" containing an array of TTP ID strings.\n")
-	sb.WriteString("Example: {\"ttps\": [\"T1190\", \"T1059.001\"]}")
+	if len(req.Candidatas) > 0 {
+		// Al ver la lista como "T1190 Exploit Public-Facing Application", el modelo
+		// tiende a devolver la línea entera en lugar del identificador. Se le pide
+		// explícitamente lo contrario; el parser además tolera esa forma.
+		sb.WriteString("Return ONLY the identifier of each technique, never its name. ")
+		sb.WriteString("Write \"T1190\", not \"T1190 Exploit Public-Facing Application\".\n")
+	}
+	// El ejemplo se da con marcadores en lugar de identificadores reales: usar
+	// T1190 y T1059.001 como muestra los convertía en las dos técnicas más
+	// propuestas del sistema, con T1190 en el 31% de las respuestas.
+	sb.WriteString("Format: {\"ttps\": [\"Txxxx\", \"Txxxx.yyy\"]}")
 
 	return sb.String()
 }
 
-func (c *OllamaClient) MapEnrichedToTTPRaw(ctx context.Context, cwe, description, cvssVector string) ([]string, string, error) {
+func (c *OllamaClient) MapEnrichedToTTPRaw(ctx context.Context, req domain.TTPMappingRequest) ([]string, string, error) {
 	// Estrategia de Caché Híbrida:
 	// Solo cacheamos si es una consulta simple (CWE sin descripción ni CVSS, ej. tests).
 	// Si tiene contexto enriquecido de producción, evitamos el cacheo para garantizar máxima precisión.
-	isSimpleQuery := description == "" && cvssVector == ""
-	if isSimpleQuery && cwe != "" {
-		if ttps, found := c.cache.Get(cwe); found {
+	isSimpleQuery := req.Description == "" && req.CVSSVector == "" && len(req.Candidatas) == 0
+	if isSimpleQuery && req.CWE != "" {
+		if ttps, found := c.cache.Get(req.CWE); found {
 			return ttps, "[CACHE HIT - NO RAW RESPONSE]", nil
 		}
 	}
 
-	prompt := c.buildEnrichedPrompt(cwe, description, cvssVector)
-	ttps, raw, err := c.generateTTPs(ctx, prompt)
+	ttps, raw, err := c.elegirEntreCandidatas(ctx, req)
 	if err != nil {
-		return nil, "", err
+		return nil, raw, err
 	}
 
-	if isSimpleQuery && cwe != "" {
-		c.cache.Set(cwe, ttps)
+	if isSimpleQuery && req.CWE != "" {
+		c.cache.Set(req.CWE, ttps)
 	}
 
 	return ttps, raw, nil
+}
+
+// elegirEntreCandidatas resuelve el mapeo respetando la lista ofrecida.
+//
+// Cuando la lista incluye subtécnicas se hace en DOS FASES. Ofrecer el catálogo
+// entero de una vez (464 técnicas tras filtrar por vector) resultó
+// contraproducente al medirlo: el modelo dejaba de razonar y elegía por posición
+// en la lista, con las respuestas agrupadas en rangos contiguos de identificador
+// y la concordancia cayendo a cero.
+//
+// La alternativa de ofrecer solo técnicas padre daba buenos números pero dejaba
+// 387 subtécnicas —el 55% del catálogo— fuera de alcance de forma permanente.
+// Dos fases conserva el alcance completo sin que ninguna lista pase de unas
+// pocas decenas de opciones.
+func (c *OllamaClient) elegirEntreCandidatas(ctx context.Context, req domain.TTPMappingRequest) ([]string, string, error) {
+	if len(req.Candidatas) == 0 {
+		// Sin lista: el modelo responde de memoria. Es el modo de reserva para
+		// cuando el catálogo no está disponible.
+		return c.generateTTPs(ctx, c.buildEnrichedPrompt(req))
+	}
+
+	padres := domain.SoloTecnicasPadre(req.Candidatas)
+	hayCandidatasSinDesplegar := len(padres) < len(req.Candidatas)
+
+	// Fase 1: elegir entre técnicas padre.
+	peticionPadres := req
+	if hayCandidatasSinDesplegar {
+		peticionPadres.Candidatas = padres
+	}
+	elegidas, raw, err := c.generateTTPs(ctx, c.buildEnrichedPrompt(peticionPadres))
+	if err != nil {
+		return nil, raw, err
+	}
+	elegidas = filtrarPorCandidatas(elegidas, peticionPadres.Candidatas)
+	if len(elegidas) == 0 {
+		return nil, raw, fmt.Errorf("ninguna técnica propuesta pertenece a la lista ofrecida")
+	}
+
+	if !hayCandidatasSinDesplegar {
+		return elegidas, raw, nil
+	}
+
+	// Fase 2: afinar dentro de las ramas elegidas. Si falla, se conserva el
+	// resultado de la fase 1: una técnica padre correcta es mejor que nada.
+	rama := domain.RamaDeTecnicas(req.Candidatas, elegidas)
+	peticionRama := req
+	peticionRama.Candidatas = rama
+
+	afinadas, rawFase2, err := c.generateTTPs(ctx, c.buildEnrichedPrompt(peticionRama))
+	if err != nil {
+		log.Printf("[Ollama] fase 2 fallida (%v): se conserva el mapeo a técnicas padre %v", err, elegidas)
+		return elegidas, raw, nil
+	}
+	afinadas = filtrarPorCandidatas(afinadas, rama)
+	if len(afinadas) == 0 {
+		log.Printf("[Ollama] fase 2 sin resultados dentro de las ramas %v: se conserva el mapeo padre", elegidas)
+		return elegidas, raw, nil
+	}
+
+	return afinadas, rawFase2, nil
+}
+
+// filtrarPorCandidatas conserva solo las técnicas ofrecidas, registrando las que
+// el modelo se inventó pese a tener la lista delante.
+func filtrarPorCandidatas(ttps []string, candidatas []domain.TTP) []string {
+	permitida := make(map[string]bool, len(candidatas))
+	for _, c := range candidatas {
+		permitida[c.TTPID] = true
+	}
+
+	conservadas := make([]string, 0, len(ttps))
+	for _, t := range ttps {
+		if permitida[t] {
+			conservadas = append(conservadas, t)
+			continue
+		}
+		log.Printf("[TTP-DESCARTE] ttp=%s motivo=%s (el modelo ignoró la lista de %d candidatas)",
+			t, domain.MotivoFueraDeLista, len(candidatas))
+	}
+	return conservadas
 }
 
 // InvalidateCache limpia la caché para un CWE específico (útil para pruebas).

@@ -195,15 +195,18 @@ func (r *projectRepo) DeleteByID(ctx context.Context, id int64) error {
 
 		DETACH DELETE p, e, hw, c, si, csi, f1, cf1, cf2, rem1, rem2, rem3
 	`
-	_ = executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
-
 	// El marco de gobierno cuelga del proyecto por [:BELONGS_TO], que no forma parte del
-	// recorrido anterior: sin esto, al borrar un proyecto sus políticas, procedimientos,
-	// roles, actividades RACI y configuración de SLA quedaban huérfanos en el grafo.
+	// recorrido de la consulta anterior: sin esto, al borrar un proyecto sus políticas,
+	// procedimientos, roles, actividades RACI y configuración de SLA quedaban huérfanos.
 	//
-	// Se borra solo lo que no pertenece a ningún OTRO proyecto: los identificadores de la
-	// semilla son los mismos para todos ("pol-1", "role-1"…), así que un nodo puede estar
-	// compartido y borrarlo dejaría al otro proyecto sin su marco normativo.
+	// Va ANTES de borrar el proyecto, y ese orden es la razón de que exista este bloque:
+	// su MATCH parte del nodo Project, así que ejecutado después no encontraba nada y el
+	// marco sobrevivía suelto en el grafo a cada borrado.
+	//
+	// Se borra solo lo que no pertenece a ningún OTRO proyecto. Desde que cada proyecto
+	// tiene sus propios nodos eso ya no debería ocurrir, pero los grafos creados antes de
+	// ese cambio sí pueden tener nodos compartidos, y borrarlos dejaría al otro proyecto
+	// sin su marco normativo.
 	governanceQuery := `
 		MATCH (g)-[:BELONGS_TO]->(p:Project)
 		WHERE (toString(p.id) = toString($id) OR elementId(p) = toString($id))
@@ -215,6 +218,8 @@ func (r *projectRepo) DeleteByID(ctx context.Context, id int64) error {
 		DETACH DELETE g
 	`
 	_ = executeWriteHelper(ctx, r.driver, governanceQuery, map[string]any{"id": id})
+
+	_ = executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
 
 	// Limpieza exhaustiva de cualquier nodo huérfano (redes sueltas, softwares, vulnerabilidades)
 	cleanupQuery := `
@@ -242,12 +247,30 @@ func (r *projectRepo) ExportGraph(ctx context.Context, id int64) (*domain.GraphD
 	//   · INVOLVES>    recoge la asignación RACI, que vive en la arista
 	//     (:RACIActivity)-[:INVOLVES {role_type}]->(:Role). Sin ella se exportarían las
 	//     actividades y los roles pero se perdería quién es R, A, C o I en cada una.
+	//
+	// HAS_CWE> y MAPS_TO> son las aristas que escribe realmente el pipeline de
+	// TTPs (LinkTTPsToVulnerability). Antes el filtro solo listaba
+	// EXPLOITS_VIA_TTP>, que nunca llegó a crearse, así que el mapeo de TTPs no
+	// viajaba en el export.
+	//
+	// HAS_WEAKNESS> se conserva en el filtro aunque el pipeline ya no la escriba:
+	// duplicaba a HAS_CWE y se eliminó (ver cmd/Pruebas/migrate_ttp_cve_scope).
+	// Mantenerla listada permite seguir importando exports generados antes de esa
+	// migración, y no tiene coste sobre un grafo donde ya no existe.
+	//
+	// <FIXES se recorre hacia atrás porque la arista va (:Patch)-[:FIXES]->(:Vulnerability):
+	// desde la vulnerabilidad hay que ir en sentido contrario para alcanzar el parche.
+	// Sin ella los nodos Patch no salían en el export y el informe no podía listarlos.
+	// IMPORTANTE: FIXES> no debe incluirse; de lo contrario, al alcanzar un Patch que resuelve
+	// múltiples CVEs globales, el recorrido saltaría hacia adelante incorporando al export
+	// CVEs adicionales que no están presentes en los activos de este proyecto.
+	// <APPLIED_TO permite alcanzar parches declarados sobre instalaciones o contenedores.
 	query := `
 		MATCH (p:Project)
 		WHERE toString(p.id) = toString($id) OR elementId(p) = toString($id)
 		CALL apoc.path.subgraphAll(p, {
 			maxLevel: 10,
-			relationshipFilter: "HAS_ENDPOINT>|CONTAINS_NETWORK>|HAS_IP>|HAS_HARDWARE>|CONNECTED_TO>|HAS_INSTALLATION>|INSTANCE_OF>|HOSTS>|USES_IMAGE>|HAS_FINDING>|OF_VULNERABILITY>|HAS_EXPLOIT>|HAS_REMEDIATION>|USES_PATCH>|FIXES>|HAS_CWE>|EXPLOITS_VIA_TTP>|<MAPS_TO_CWE|<MAPS_TO_TTP|<USES|<BELONGS_TO|INVOLVES>"
+			relationshipFilter: "HAS_ENDPOINT>|CONTAINS_NETWORK>|HAS_IP>|HAS_HARDWARE>|CONNECTED_TO>|HAS_INSTALLATION>|INSTANCE_OF>|HOSTS>|USES_IMAGE>|HAS_FINDING>|OF_VULNERABILITY>|HAS_EXPLOIT>|HAS_REMEDIATION>|USES_PATCH>|HAS_CWE>|HAS_WEAKNESS>|MAPS_TO>|<FIXES|<APPLIED_TO|<MAPS_TO_CWE|<MAPS_TO_TTP|<USES|<BELONGS_TO|INVOLVES>"
 		}) YIELD nodes, relationships
 		
 		WITH 
