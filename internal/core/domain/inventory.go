@@ -13,6 +13,7 @@ type InventoryQuery struct {
 	Environment     string   `json:"environment"`
 	InternetExposed string   `json:"internet_exposed"`
 	Status          string   `json:"status"`
+	ExecState       string   `json:"exec_state"`
 	RiskTier        string   `json:"risk_tier"`
 	SortField       string   `json:"sort_field"`
 	SortDirection   string   `json:"sort_direction"`

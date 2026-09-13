@@ -39,25 +39,39 @@ func (r *infrastructureRepo) GetPaginatedInventory(ctx context.Context, query do
 	case "category":
 		orderExpr = "head(labels(n))"
 	case "properties":
-		orderExpr = "toLower(toString(properties(n)))"
+		// properties(n) es un mapa: toString() sobre un mapa (o sobre valores de tipo
+		// lista dentro de él) lanza excepción y devolvía 500 al ordenar por esta columna.
+		// apoc.convert.toJson serializa mapas y listas sin fallar.
+		orderExpr = "toLower(apoc.convert.toJson(properties(n)))"
 	default:
 		orderExpr = "toLower(coalesce(n.name, n.nombre, n.hostname, n.title, n.cve_id, n.cve, n.ip, elementId(n)))"
 	}
 
 	hasCategories := len(query.Categories) > 0
+	if query.Categories == nil {
+		query.Categories = []string{}
+	}
 
 	cypherQuery := fmt.Sprintf(`
 		MATCH (n)
-		WHERE NOT (n:ThreatActor OR n:TTP OR n:IPAddress OR n:Vulnerability OR n:Finding OR n:CWE OR n:CVE OR n:Exploit OR n:Remediation)
+		WHERE NOT (n:ThreatActor OR n:TTP OR n:IPAddress OR n:Vulnerability OR n:Finding OR n:CWE OR n:CVE OR n:Exploit OR n:Remediation OR n:CAPEC
+		           OR n:Procedure OR n:PolicyDocument OR n:Role OR n:RACIActivity OR n:SLAConfig OR n:ATTACKCatalog OR n:Sequence
+		           OR n:Software OR n:Project)
 		  AND ($project_id = 0 OR 
 		       (n:Project AND (n.id = $project_id OR toString(n.id) = toString($project_id))) OR 
 		       EXISTS { MATCH (p:Project)-[*1..6]->(n) WHERE p.id = $project_id OR toString(p.id) = toString($project_id) }
 		      )
 		  AND ($category = "" OR $category = "ALL" OR $category IN labels(n))
 		  AND ($has_categories = false OR head(labels(n)) IN $categories)
-		  AND ($search = "" OR 
-		       toLower(coalesce(n.name, n.nombre, n.hostname, n.title, n.cve_id, n.cve, n.ip, elementId(n), toString(n.id), "")) CONTAINS toLower($search) OR 
-		       any(k IN keys(n) WHERE toLower(toString(n[k])) CONTAINS toLower($search))
+		  AND ($search = "" OR
+		       toLower(coalesce(n.name, n.nombre, n.hostname, n.title, n.cve_id, n.cve, n.ip, elementId(n), toString(n.id), "")) CONTAINS toLower($search) OR
+		       any(k IN keys(n) WHERE
+		         CASE
+		           WHEN apoc.meta.cypher.type(n[k]) STARTS WITH 'LIST'
+		             THEN any(x IN n[k] WHERE toLower(toString(x)) CONTAINS toLower($search))
+		           ELSE toLower(toString(n[k])) CONTAINS toLower($search)
+		         END
+		       )
 		      )
 		  AND ($ip_search = "" OR 
 		       toLower(coalesce(n.ip, n.cidr, "")) CONTAINS toLower($ip_search) OR 
@@ -68,11 +82,12 @@ func (r *infrastructureRepo) GetPaginatedInventory(ctx context.Context, query do
 		       EXISTS { MATCH (n)-[:INSTANCE_OF]->(sw:Software) WHERE toLower(sw.vendor) CONTAINS toLower($vendor_search) }
 		      )
 		  AND ($environment = "" OR $environment = "ALL" OR toLower(coalesce(n.environment, n.entorno, "")) = toLower($environment))
-		  AND ($internet_exposed = "" OR $internet_exposed = "ALL" OR 
-		       ($internet_exposed = "TRUE" AND (n.internet_exposed = true OR toString(n.internet_exposed) = "true")) OR 
-		       ($internet_exposed = "FALSE" AND (n.internet_exposed IS NULL OR n.internet_exposed = false OR toString(n.internet_exposed) = "false"))
+		  AND ($internet_exposed = "" OR $internet_exposed = "ALL" OR
+		       ($internet_exposed = "TRUE" AND (n.internet_exposed = true OR toString(n.internet_exposed) = "true")) OR
+		       ($internet_exposed = "FALSE" AND (n.internet_exposed = false OR toString(n.internet_exposed) = "false"))
 		      )
 		  AND ($status = "" OR $status = "ALL" OR toLower(coalesce(n.status, n.estado, "")) = toLower($status))
+		  AND ($exec_state = "" OR $exec_state = "ALL" OR toLower(coalesce(n.state, "")) = toLower($exec_state))
 		  AND ($risk_tier = "" OR $risk_tier = "ALL" OR toLower(coalesce(n.risk_tier, n.severity, "")) = toLower($risk_tier))
 
 		WITH collect(n) AS matchedNodes, count(n) AS totalCount
@@ -119,6 +134,7 @@ func (r *infrastructureRepo) GetPaginatedInventory(ctx context.Context, query do
 		"environment":      strings.TrimSpace(query.Environment),
 		"internet_exposed": strings.ToUpper(strings.TrimSpace(query.InternetExposed)),
 		"status":           strings.TrimSpace(query.Status),
+		"exec_state":       strings.TrimSpace(query.ExecState),
 		"risk_tier":        strings.TrimSpace(query.RiskTier),
 		"offset":           offset,
 		"limit":            query.Limit,

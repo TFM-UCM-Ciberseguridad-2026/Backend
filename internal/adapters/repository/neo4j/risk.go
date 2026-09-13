@@ -682,7 +682,12 @@ func (r *riskRepo) GetPatchQueue(ctx context.Context, query domain.PatchQueueQue
 		WHERE NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED', 'MITIGATED']
 		  AND ($project_id IS NULL OR EXISTS { (:Project {id: $project_id})-[:HAS_ENDPOINT]->(e) })
 		OPTIONAL MATCH (asset)-[:INSTANCE_OF]->(s:Software)
-		OPTIONAL MATCH (c:Container)-[:HAS_INSTALLATION|USES_IMAGE]->(asset)
+		// El contenedor se acota al endpoint YA scopeado al proyecto. Las ContainerImage
+		// se deduplican de forma global (un nodo por imagen, compartido entre proyectos),
+		// así que sin este (e)-[:HOSTS]-> un finding sobre una imagen compartida enganchaba
+		// TODOS los contenedores que la usan —incluidos los de otros proyectos, p. ej. una
+		// copia importada— y duplicaba la fila atribuyéndola al contenedor ajeno.
+		OPTIONAL MATCH (e)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION|USES_IMAGE]->(asset)
 		OPTIONAL MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
 		OPTIONAL MATCH (p:Patch)-[:FIXES]->(v)
 		WITH DISTINCT f, v, asset, s, e, c, rem,

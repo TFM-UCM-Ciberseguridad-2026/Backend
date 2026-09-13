@@ -56,6 +56,7 @@ func (h *OrchestratorHandler) GetInventory(w http.ResponseWriter, r *http.Reques
 	environment := strings.TrimSpace(q.Get("environment"))
 	internetExposed := strings.TrimSpace(q.Get("internet_exposed"))
 	status := strings.TrimSpace(q.Get("status"))
+	execState := strings.TrimSpace(q.Get("exec_state"))
 	riskTier := strings.TrimSpace(q.Get("risk_tier"))
 
 	sortBy := strings.TrimSpace(q.Get("sort_by"))
@@ -80,6 +81,7 @@ func (h *OrchestratorHandler) GetInventory(w http.ResponseWriter, r *http.Reques
 		Environment:     environment,
 		InternetExposed: internetExposed,
 		Status:          status,
+		ExecState:       execState,
 		RiskTier:        riskTier,
 		SortField:       sortBy,
 		SortDirection:   order,
