@@ -49,7 +49,7 @@ func assetErrorStatus(err error) int {
 		errors.Is(err, domain.ErrInvalidHardware):
 		return http.StatusBadRequest
 	case errors.Is(err, domain.ErrDuplicateNetwork), errors.Is(err, domain.ErrDuplicateIP),
-		errors.Is(err, domain.ErrDuplicateAsset):
+		errors.Is(err, domain.ErrDuplicateAsset), errors.Is(err, domain.ErrDuplicateProject):
 		return http.StatusConflict
 	case errors.Is(err, domain.ErrNodeNotFound):
 		return http.StatusNotFound
@@ -78,16 +78,16 @@ func (h *OrchestratorHandler) CreateProject(w http.ResponseWriter, r *http.Reque
 
 	project := payload.Project
 	if err := h.orchestrator.CreateProject(r.Context(), &project); err != nil {
-		emitAuditLog("CREACION", "Project", fmt.Sprint(project.ProjectID), project.Nombre, fmt.Sprint(project.ProjectID), payload.Justification, nil, "ERROR", err.Error())
+		emitAuditLog("CREACION", "Project", fmt.Sprint(project.ProjectID), project.Name, fmt.Sprint(project.ProjectID), payload.Justification, nil, "ERROR", err.Error())
 		sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	cambios := map[string]auditChange{
-		"nombre":     {Despues: project.Nombre},
+		"nombre":     {Despues: project.Name},
 		"project_id": {Despues: project.ProjectID},
 	}
-	emitAuditLog("CREACION", "Project", fmt.Sprint(project.ProjectID), project.Nombre, fmt.Sprint(project.ProjectID), payload.Justification, cambios, "SUCCESS", "")
+	emitAuditLog("CREACION", "Project", fmt.Sprint(project.ProjectID), project.Name, fmt.Sprint(project.ProjectID), payload.Justification, cambios, "SUCCESS", "")
 	sendJSON(w, map[string]string{"status": "success"}, http.StatusCreated)
 }
 
@@ -103,7 +103,7 @@ func (h *OrchestratorHandler) DeleteProject(w http.ResponseWriter, r *http.Reque
 	oldProj, _ := h.orchestrator.GetProjectByID(r.Context(), projectID)
 	nombre := ""
 	if oldProj != nil {
-		nombre = oldProj.Nombre
+		nombre = oldProj.Name
 	}
 
 	if err := h.orchestrator.DeleteProject(r.Context(), projectID); err != nil {
@@ -143,8 +143,8 @@ func (h *OrchestratorHandler) RenameProject(w http.ResponseWriter, r *http.Reque
 	}
 
 	cambios := make(map[string]auditChange)
-	if oldProj != nil && oldProj.Nombre != payload.Name {
-		cambios["nombre"] = auditChange{Antes: oldProj.Nombre, Despues: payload.Name}
+	if oldProj != nil && oldProj.Name != payload.Name {
+		cambios["nombre"] = auditChange{Antes: oldProj.Name, Despues: payload.Name}
 	}
 
 	emitAuditLog("MODIFICACION", "Project", idStr, payload.Name, idStr, payload.Justification, cambios, "SUCCESS", "")
@@ -463,7 +463,7 @@ func (h *OrchestratorHandler) ImportInfrastructure(w http.ResponseWriter, r *htt
 	}
 
 	if err := h.orchestrator.ImportInfrastructure(r.Context(), &payload); err != nil {
-		sendError(w, err.Error(), http.StatusInternalServerError)
+		sendError(w, err.Error(), assetErrorStatus(err))
 		return
 	}
 

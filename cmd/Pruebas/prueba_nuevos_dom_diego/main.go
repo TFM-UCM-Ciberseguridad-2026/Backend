@@ -44,7 +44,7 @@ func main() {
 	fmt.Println("\n=== CREANDO GRAFO BÁSICO (campos nuevos + existentes) ===")
 
 	// 1. Project
-	proj := &domain.Project{ProjectID: 1, Nombre: "Prueba Nuevos Dominios"}
+	proj := &domain.Project{ProjectID: 1, Name: "Prueba Nuevos Dominios"}
 	if err := projectRepo.Save(ctx, proj); err != nil {
 		log.Fatalf("Error guardando Project: %v", err)
 	}
@@ -109,7 +109,6 @@ func main() {
 		CVSSVector:  "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
 		CWE:         []string{"CWE-78"},
 		CPE:         "cpe:2.3:a:freedesktop:polkit:0.105",
-		TTPRelated:  "T1068",
 		Exploit:     true,
 		KEV:         true,
 		EPSSScore:   0.94,

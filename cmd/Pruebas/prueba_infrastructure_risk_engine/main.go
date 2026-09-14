@@ -167,7 +167,7 @@ func main() {
 	fmt.Println("\n[2/5] Creando proyecto, endpoints, software installations y findings...")
 	now := time.Now().UTC()
 
-	project := &domain.Project{ProjectID: projectID, Nombre: "Phase 4 Infrastructure Risk Test"}
+	project := &domain.Project{ProjectID: projectID, Name: "Phase 4 Infrastructure Risk Test"}
 	if err := orchestrator.CreateProject(ctx, project); err != nil {
 		log.Fatalf("Error creando proyecto: %v", err)
 	}

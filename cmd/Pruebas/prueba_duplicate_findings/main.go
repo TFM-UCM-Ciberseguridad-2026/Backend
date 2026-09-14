@@ -72,7 +72,7 @@ func main() {
 
 	if err := orchestrator.CreateProject(ctx, &domain.Project{
 		ProjectID: projectID,
-		Nombre:    "Duplicate Findings Test",
+		Name:      "Duplicate Findings Test",
 	}); err != nil {
 		log.Fatalf("Proyecto: %v", err)
 	}

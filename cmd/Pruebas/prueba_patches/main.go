@@ -123,7 +123,7 @@ func main() {
 	now := time.Now().UTC()
 
 	if err := orchestrator.CreateProject(ctx, &domain.Project{
-		ProjectID: projectID, Nombre: "Patch Retrieval Test",
+		ProjectID: projectID, Name: "Patch Retrieval Test",
 	}); err != nil {
 		log.Fatalf("Error creando proyecto: %v", err)
 	}

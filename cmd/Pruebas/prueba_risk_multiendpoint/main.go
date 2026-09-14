@@ -176,7 +176,7 @@ func main() {
 	now := time.Now().UTC()
 
 	if err := orchestrator.CreateProject(ctx, &domain.Project{
-		ProjectID: multiProjectID, Nombre: "Risk Multi-Endpoint Test",
+		ProjectID: multiProjectID, Name: "Risk Multi-Endpoint Test",
 	}); err != nil {
 		log.Fatalf("Error creando proyecto: %v", err)
 	}

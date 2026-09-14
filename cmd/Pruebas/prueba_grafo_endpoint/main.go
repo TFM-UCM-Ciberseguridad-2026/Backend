@@ -44,7 +44,7 @@ func main() {
 	fmt.Println("\n=== INYECTANDO 11 ENTIDADES DE DOMINIO ===")
 
 	// 1. Project
-	proj := &domain.Project{ProjectID: 1, Nombre: "Auditoría Q1 2026"}
+	proj := &domain.Project{ProjectID: 1, Name: "Auditoría Q1 2026"}
 	if err := projectRepo.Save(ctx, proj); err != nil { 
 		log.Fatalf("Error guardando Project: %v", err)
 	}

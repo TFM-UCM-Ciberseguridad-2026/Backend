@@ -104,7 +104,7 @@ func main() {
 	fmt.Println("\n[2/5] Creando el mismo CVE en tres ubicaciones distintas...")
 	now := time.Now().UTC()
 
-	if err := orch.CreateProject(ctx, &domain.Project{ProjectID: projectID, Nombre: "Regresión contenedores"}); err != nil {
+	if err := orch.CreateProject(ctx, &domain.Project{ProjectID: projectID, Name: "Regresión contenedores"}); err != nil {
 		log.Fatalf("proyecto: %v", err)
 	}
 

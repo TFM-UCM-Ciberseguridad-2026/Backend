@@ -25,7 +25,7 @@ func (r *projectRepo) Save(ctx context.Context, p *domain.Project) error {
 
 	query := `
 		MERGE (n:Project {id: $id})
-		ON CREATE SET n.nombre = $name,
+		ON CREATE SET n.name = $name,
 			n.risk_score = $risk_score,
 			n.risk_tier = $risk_tier,
 			n.risk_computed_at = $risk_computed_at,
@@ -46,7 +46,7 @@ func (r *projectRepo) Save(ctx context.Context, p *domain.Project) error {
 	`
 	params := map[string]any{
 		"id":                                 p.ProjectID,
-		"name":                               p.Nombre,
+		"name":                               p.Name,
 		"risk_score":                         p.RiskScore,
 		"risk_tier":                          p.RiskTier,
 		"risk_computed_at":                   riskComputedAt,
@@ -82,7 +82,7 @@ func (r *projectRepo) Update(ctx context.Context, p *domain.Project) error {
 
 	query := `
 		MATCH (n:Project {id: $id})
-		SET n.nombre = $name,
+		SET n.name = $name,
 			n.risk_score = $risk_score,
 			n.risk_tier = $risk_tier,
 			n.risk_computed_at = $risk_computed_at,
@@ -103,7 +103,7 @@ func (r *projectRepo) Update(ctx context.Context, p *domain.Project) error {
 	`
 	params := map[string]any{
 		"id":                                 p.ProjectID,
-		"name":                               p.Nombre,
+		"name":                               p.Name,
 		"risk_score":                         p.RiskScore,
 		"risk_tier":                          p.RiskTier,
 		"risk_computed_at":                   riskComputedAt,
@@ -129,7 +129,8 @@ func (r *projectRepo) RenameProject(ctx context.Context, id int64, newName strin
 	query := `
 		MATCH (p:Project)
 		WHERE toString(p.id) = toString($id)
-		SET p.name = $name, p.nombre = $name
+		SET p.name = $name
+		REMOVE p.nombre
 	`
 	params := map[string]any{
 		"id":   id,
@@ -146,7 +147,7 @@ func (r *projectRepo) GetByID(ctx context.Context, id int64) (*domain.Project, e
 	}
 	return &domain.Project{
 		ProjectID:                       getInt64(props, "id"),
-		Nombre:                          getString(props, "nombre"),
+		Name:                            getString(props, "name"),
 		RiskScore:                       getFloat64(props, "risk_score"),
 		RiskTier:                        getString(props, "risk_tier"),
 		RiskComputedAt:                  getTimePtr(props, "risk_computed_at"),

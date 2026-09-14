@@ -859,7 +859,6 @@ func toDomainEntity(dto NistVulnerabilityDTO) domain.Vulnerability {
 		NVDVector:       nvdVector,
 		CWE:             cweList,
 		CPE:             cpe,
-		TTPRelated:      "",    // Se rellenará en la capa de aplicación mediante integraciones de MITRE
 		Exploit:         false, // Valores por defecto (se alimentan desde otras APIs como FIRST o CISA)
 		KEV:             false,
 		EPSSScore:       0.0,

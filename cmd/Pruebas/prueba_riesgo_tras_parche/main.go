@@ -101,7 +101,7 @@ func main() {
 	fmt.Println("\n[3/6] Escenario A — software instalado en el propio endpoint...")
 	now := time.Now().UTC()
 
-	if err := orch.CreateProject(ctx, &domain.Project{ProjectID: projectID, Nombre: "Riesgo tras parche"}); err != nil {
+	if err := orch.CreateProject(ctx, &domain.Project{ProjectID: projectID, Name: "Riesgo tras parche"}); err != nil {
 		log.Fatalf("proyecto: %v", err)
 	}
 	crearEndpoint(ctx, orch, epHostID, "srv-riesgo-host")

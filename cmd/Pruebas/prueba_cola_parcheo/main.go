@@ -100,7 +100,7 @@ func main() {
 	fmt.Println("\n[2/5] Creando 3 activos con el mismo CVE y distinta criticidad...")
 	now := time.Now().UTC()
 
-	if err := orch.CreateProject(ctx, &domain.Project{ProjectID: projectID, Nombre: "Cola de parcheo"}); err != nil {
+	if err := orch.CreateProject(ctx, &domain.Project{ProjectID: projectID, Name: "Cola de parcheo"}); err != nil {
 		log.Fatalf("proyecto: %v", err)
 	}
 

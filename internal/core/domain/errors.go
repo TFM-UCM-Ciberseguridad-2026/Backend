@@ -26,6 +26,10 @@ var (
 	// en el mismo proyecto. Se traduce a HTTP 409.
 	ErrDuplicateAsset = errors.New("activo duplicado")
 
+	// ErrDuplicateProject indica que ya existe otro proyecto con ese nombre. Se traduce a
+	// HTTP 409.
+	ErrDuplicateProject = errors.New("proyecto duplicado")
+
 	// ErrInvalidHardware indica que los datos de un componente físico no superan la
 	// validación de dominio (magnitudes imposibles, arquitectura desconocida, sin
 	// identificar). Se traduce a HTTP 400.

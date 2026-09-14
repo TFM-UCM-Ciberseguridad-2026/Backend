@@ -89,7 +89,7 @@ func main() {
 	fmt.Println("\n[2/8] Creando endpoint, instalación, finding y parche...")
 	now := time.Now().UTC()
 
-	if err := orch.CreateProject(ctx, &domain.Project{ProjectID: projectID, Nombre: "Patch Applied Test"}); err != nil {
+	if err := orch.CreateProject(ctx, &domain.Project{ProjectID: projectID, Name: "Patch Applied Test"}); err != nil {
 		log.Fatalf("proyecto: %v", err)
 	}
 

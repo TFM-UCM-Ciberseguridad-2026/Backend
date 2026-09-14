@@ -48,6 +48,10 @@ func main() {
 		driver.Close(context.Background())
 	}()
 
+	if err := neo4j.EnsureSchema(ctx, driver); err != nil {
+		log.Printf("[Schema] No se pudieron asegurar algunas constraints de unicidad (¿hay duplicados en la base?): %v", err)
+	}
+
 	// 3. Inicialización de Repositorios (Adaptadores Outbound)
 	endpointRepo, vulnRepo, softwareRepo, softwareInstRepo, findingRepo, remediationRepo, _, hardwareRepo, networkRepo, patchRepo, projectRepo, dbHelper, relRepo, containerRepo := neo4j.NewRepository(driver)
 	infraRepo := neo4j.NewInfrastructureRepository(driver)

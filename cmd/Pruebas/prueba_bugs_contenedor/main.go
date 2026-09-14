@@ -65,7 +65,7 @@ func main() {
 
 	// ── 2. Crear Infraestructura de Contenedor ─────────────────────────────
 	fmt.Println("\n[2/5] Creando Proyecto, Host, Imagen y Contenedor...")
-	if err := orch.CreateProject(ctx, &domain.Project{ProjectID: testProjectID, Nombre: "Proyecto Bugs Contenedor"}); err != nil {
+	if err := orch.CreateProject(ctx, &domain.Project{ProjectID: testProjectID, Name: "Proyecto Bugs Contenedor"}); err != nil {
 		log.Fatalf("error creando proyecto: %v", err)
 	}
 

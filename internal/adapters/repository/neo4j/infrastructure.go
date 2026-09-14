@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/ports"
@@ -1686,11 +1687,41 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 	defer session.Close(ctx)
 
 	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (interface{}, error) {
-		// Mapa de identificador del JSON -> elementId asignado por Neo4j
+		// Identificador del nodo en el JSON -> elementId asignado por Neo4j
 		nodeLookup := make(map[string]string)
+		// Valor de la clave canónica (id, cve_id…) -> elementId. Las relaciones de formatos
+		// no nativos referencian por este valor, pero no lleva etiqueta: un mismo id puede
+		// pertenecer a nodos de tipos distintos (un Finding 151 y un Patch 151). Los valores
+		// que apuntan a más de un nodo se marcan como ambiguos y no se usan, porque resolverlos
+		// enganchaba relaciones al nodo equivocado.
+		keyLookup := make(map[string]string)
+		ambiguousKeys := make(map[string]bool)
+		indexKey := func(key, elemID string) {
+			if key == "" {
+				return
+			}
+			if prev, exists := keyLookup[key]; exists && prev != elemID {
+				ambiguousKeys[key] = true
+			} else {
+				keyLookup[key] = elemID
+			}
+		}
+
+		// Las IPs no tienen identidad propia: son un dato del activo que las declara. Se
+		// guardan aparte y se crean al procesar su HAS_IP, una por dueño. Fusionarlas por
+		// (ip, vlan) en toda la base hacía que endpoints de proyectos distintos compartieran
+		// el mismo nodo, y editar las IPs de uno las borraba en los demás.
+		pendingIPs := make(map[string]map[string]interface{})
+
+		// Ids de activo del fichero que en la base ya usa un activo de otro proyecto: se
+		// reasignan antes de ingestar para no fusionar activos ajenos.
+		idAliases, err := remapCollidingAssetIDs(ctx, tx, data)
+		if err != nil {
+			return nil, err
+		}
 
 		// 1. Ingestar nodos
-		for _, node := range data.Nodes {
+		for nodeIndex, node := range data.Nodes {
 			if len(node.Labels) == 0 {
 				continue
 			}
@@ -1705,6 +1736,23 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 			}
 
 			props := normalizeProperties(node.Properties)
+
+			// Propiedades retiradas del esquema que aún traen los ficheros exportados antes de
+			// retirarlas: sin esto, importar un fichero antiguo las volvería a escribir.
+			switch primaryLabel {
+			case "Project":
+				// El nombre del proyecto se unificó en `name`.
+				if nombre, ok := props["nombre"]; ok {
+					if name, hasName := props["name"]; !hasName || name == nil || fmt.Sprint(name) == "" {
+						props["name"] = nombre
+					}
+					delete(props, "nombre")
+				}
+			case "Vulnerability":
+				// Campos que nunca llegaron a usarse: el mapeo a TTPs vive en relaciones.
+				delete(props, "ttp_related")
+				delete(props, "TTPs")
+			}
 
 			// Seleccionar la clave canónica de MERGE según el tipo de nodo,
 			// para respetar las constraints UNIQUE existentes en la BD.
@@ -1728,16 +1776,11 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 					matchProps = map[string]interface{}{"category": cat, "severity": sev}
 				}
 			case "IPAddress":
-				// Mismo caso que SLAConfig: SaveIPs las crea como {ip, vlan_id} y sin `id`,
-				// así que esa pareja es su identidad. Sin esto, cada importación duplicaba
-				// las direcciones del inventario en vez de reutilizarlas.
-				ip, hasIP := props["ip"]
-				if hasIP && ip != nil {
-					matchProps = map[string]interface{}{"ip": ip}
-					if vlan, ok := props["vlan_id"]; ok && vlan != nil {
-						matchProps["vlan_id"] = vlan
-					}
+				// Se crea al procesar su HAS_IP (ver pendingIPs).
+				if ip, hasIP := props["ip"]; hasIP && ip != nil && node.ID != "" {
+					pendingIPs[node.ID] = props
 				}
+				continue
 			case "Vulnerability":
 				if cveVal, exists := props["cve_id"]; exists && cveVal != nil {
 					matchKey = "cve_id"
@@ -1770,6 +1813,17 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 					matchKey = "id"
 					matchVal = idVal
 				}
+			case "Finding":
+				// Un finding es "un CVE en un activo" y su identidad es finding_key. Fusionar por
+				// id mezclaba hallazgos distintos que compartían id, y el `n += $properties`
+				// sobrescribía a todos con las propiedades de uno solo.
+				if keyVal, exists := props["finding_key"]; exists && keyVal != nil && fmt.Sprint(keyVal) != "" {
+					matchKey = "finding_key"
+					matchVal = keyVal
+				} else if idVal, exists := props["id"]; exists && idVal != nil {
+					matchKey = "id"
+					matchVal = idVal
+				}
 			case "CAPEC":
 				if capecVal, exists := props["capec_id"]; exists && capecVal != nil {
 					matchKey = "capec_id"
@@ -1777,6 +1831,20 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 				} else if idVal, exists := props["id"]; exists && idVal != nil {
 					matchKey = "id"
 					matchVal = idVal
+				}
+			case "Software":
+				// El CPE es la clave natural del catálogo de software: fusionar por id
+				// duplicaba el mismo producto cuando dos bases le habían dado ids distintos.
+				if cpe := softwareCPEParam(fmt.Sprint(props["cpe"])); props["cpe"] != nil && cpe != nil {
+					props["cpe"] = cpe
+					matchKey = "cpe"
+					matchVal = cpe
+				} else {
+					delete(props, "cpe")
+					if idVal, exists := props["id"]; exists && idVal != nil {
+						matchKey = "id"
+						matchVal = idVal
+					}
 				}
 			default:
 				if idVal, exists := props["id"]; exists && idVal != nil {
@@ -1794,6 +1862,23 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 					props["id"] = node.ID
 				}
 				matchProps = map[string]interface{}{matchKey: matchVal}
+			}
+
+			// El id de un finding fusionado por finding_key no se copia tal cual: si el nodo ya
+			// existe conserva el suyo, y si se crea se le asigna después comprobando que no esté
+			// en uso (ver más abajo).
+			isKeyedFinding := primaryLabel == "Finding" && matchKey == "finding_key"
+			var wantedFindingID interface{}
+			if isKeyedFinding {
+				wantedFindingID = props["id"]
+				delete(props, "id")
+			}
+			// Mismo criterio para el software fusionado por CPE.
+			isKeyedSoftware := primaryLabel == "Software" && matchKey == "cpe"
+			var wantedSoftwareID interface{}
+			if isKeyedSoftware {
+				wantedSoftwareID = props["id"]
+				delete(props, "id")
 			}
 
 			// Construir query MERGE dinámico y aplicar todas las etiquetas del nodo
@@ -1842,14 +1927,44 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 						nodeLookup[node.ID] = elemIdStr
 					}
 					// Los nodos de clave simple se indexan además por su valor de clave, que es
-					// como los referencian las relaciones del fichero exportado.
+					// como los referencian las relaciones de formatos no nativos. También por el
+					// id que traía el fichero cuando no es el que acaba teniendo el nodo.
 					if matchVal != nil {
-						if matchValStr := fmt.Sprint(matchVal); matchValStr != "" {
-							nodeLookup[matchValStr] = elemIdStr
+						indexKey(fmt.Sprint(matchVal), elemIdStr)
+					}
+					if alias, ok := idAliases[nodeIndex]; ok {
+						indexKey(alias, elemIdStr)
+					}
+
+					if isKeyedFinding {
+						if wantedFindingID != nil {
+							indexKey(fmt.Sprint(wantedFindingID), elemIdStr)
+						}
+						if err := assignImportedFindingID(ctx, tx, elemIdStr, wantedFindingID); err != nil {
+							return nil, fmt.Errorf("error asignando id al finding importado %v: %w", matchVal, err)
+						}
+					}
+					if isKeyedSoftware {
+						if wantedSoftwareID != nil {
+							indexKey(fmt.Sprint(wantedSoftwareID), elemIdStr)
+						}
+						if err := assignImportedSoftwareID(ctx, tx, elemIdStr, wantedSoftwareID); err != nil {
+							return nil, fmt.Errorf("error asignando id al software importado %v: %w", matchVal, err)
 						}
 					}
 				}
 			}
+		}
+
+		resolveRef := func(ref string) (string, bool) {
+			if elemID, ok := nodeLookup[ref]; ok {
+				return elemID, true
+			}
+			if ambiguousKeys[ref] {
+				return "", false
+			}
+			elemID, ok := keyLookup[ref]
+			return elemID, ok
 		}
 
 		// 2. Ingestar relaciones
@@ -1860,8 +1975,24 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 
 			relProps := normalizeProperties(rel.Properties)
 
-			sourceElemId, sourceOk := nodeLookup[rel.Source]
-			targetElemId, targetOk := nodeLookup[rel.Target]
+			if ipProps, isIP := pendingIPs[rel.Target]; isIP {
+				ownerElemID, ownerOk := resolveRef(rel.Source)
+				if rel.Type != "HAS_IP" || !ownerOk {
+					fmt.Printf("Aviso: relación %s -[%s]-> IP %s omitida: una IP solo se importa colgando de su activo\n", rel.Source, rel.Type, rel.Target)
+					continue
+				}
+				if err := importOwnedIP(ctx, tx, ownerElemID, ipProps, relProps); err != nil {
+					return nil, fmt.Errorf("error importando la IP %v: %w", ipProps["ip"], err)
+				}
+				continue
+			}
+			if _, isIP := pendingIPs[rel.Source]; isIP {
+				fmt.Printf("Aviso: relación %s -[%s]-> %s omitida: una IP no puede ser origen de relaciones\n", rel.Source, rel.Type, rel.Target)
+				continue
+			}
+
+			sourceElemId, sourceOk := resolveRef(rel.Source)
+			targetElemId, targetOk := resolveRef(rel.Target)
 
 			if sourceOk && targetOk {
 				query := fmt.Sprintf(`
@@ -1880,22 +2011,50 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 					fmt.Printf("Aviso: no se pudo relacionar %s -[%s]-> %s: %v\n", rel.Source, rel.Type, rel.Target, err)
 				}
 			} else {
-				// Fallback si origen o destino no estaban en la lista de nodos importados
+				// Fallback si origen o destino no estaban en la lista de nodos importados: solo se
+				// buscan en la base los catálogos globales, por su clave pública y con su
+				// etiqueta. Ni ids ni elementIds del fichero sirven aquí: un id numérico coincide
+				// con nodos de cualquier tipo, y Neo4j reutiliza los elementIds de nodos borrados,
+				// así que ambos enganchaban relaciones a nodos ajenos (p. ej. CAPEC-[:HAS_FINDING]->Finding).
 				query := fmt.Sprintf(`
-					MATCH (s), (t)
-					WHERE (elementId(s) = $source OR s.id = $source OR toString(s.id) = $source OR s.cve_id = $source OR s.ttp_id = $source)
-					  AND (elementId(t) = $target OR t.id = $target OR toString(t.id) = $target OR t.cve_id = $target OR t.ttp_id = $target)
+					MATCH (s)
+					WHERE ($sourceElemId <> '' AND elementId(s) = $sourceElemId)
+					   OR ($sourceElemId = '' AND (
+					       (s:Vulnerability AND s.cve_id = $source) OR (s:TTP AND s.ttp_id = $source) OR
+					       (s:CWE AND s.cwe_id = $source) OR (s:CAPEC AND s.capec_id = $source) OR
+					       (s:ThreatActor AND s.actor_id = $source)))
+					WITH collect(s) AS sources
+					MATCH (t)
+					WHERE ($targetElemId <> '' AND elementId(t) = $targetElemId)
+					   OR ($targetElemId = '' AND (
+					       (t:Vulnerability AND t.cve_id = $target) OR (t:TTP AND t.ttp_id = $target) OR
+					       (t:CWE AND t.cwe_id = $target) OR (t:CAPEC AND t.capec_id = $target) OR
+					       (t:ThreatActor AND t.actor_id = $target)))
+					WITH sources, collect(t) AS targets
+					WHERE size(sources) = 1 AND size(targets) = 1
+					WITH sources[0] AS s, targets[0] AS t
 					MERGE (s)-[r:%s]->(t)
 					SET r += $properties
+					RETURN count(r) AS linked
 				`, rel.Type)
 
-				_, err := tx.Run(ctx, query, map[string]interface{}{
-					"source":     rel.Source,
-					"target":     rel.Target,
-					"properties": relProps,
+				res, err := tx.Run(ctx, query, map[string]interface{}{
+					"source":       rel.Source,
+					"target":       rel.Target,
+					"sourceElemId": sourceElemId,
+					"targetElemId": targetElemId,
+					"properties":   relProps,
 				})
 				if err != nil {
 					fmt.Printf("Aviso: no se pudo relacionar %s -[%s]-> %s: %v\n", rel.Source, rel.Type, rel.Target, err)
+					continue
+				}
+				linked := int64(0)
+				if res.Next(ctx) {
+					linked = getInt64(res.Record().AsMap(), "linked")
+				}
+				if linked == 0 {
+					fmt.Printf("Aviso: relación %s -[%s]-> %s omitida: algún extremo no existe o es ambiguo\n", rel.Source, rel.Type, rel.Target)
 				}
 			}
 		}
@@ -1903,6 +2062,242 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 		return nil, nil
 	})
 
+	return err
+}
+
+// primaryLabelOf devuelve la etiqueta de negocio de un nodo del fichero, ignorando las
+// etiquetas técnicas comunes.
+func primaryLabelOf(node domain.GraphNode) string {
+	for _, l := range node.Labels {
+		if l != "BaseNode" && l != "Persistable" {
+			return l
+		}
+	}
+	if len(node.Labels) > 0 {
+		return node.Labels[0]
+	}
+	return ""
+}
+
+// projectScopedIDLabels son los activos de proyecto sin clave natural cuyo id genera la
+// aplicación. La importación los fusiona por id, así que un id repetido entre bases o
+// proyectos acababa uniendo activos que no tienen nada que ver.
+var projectScopedIDLabels = map[string]bool{
+	"Endpoint":             true,
+	"Container":            true,
+	"SoftwareInstallation": true,
+	"Hardware":             true,
+}
+
+// remapCollidingAssetIDs reasigna, antes de ingestar, los ids de activo del fichero que en
+// la base ya pertenecen a un activo que no cuelga de ninguno de los proyectos del fichero.
+//
+// Reimportar un proyecto sobre sí mismo sigue fusionando (el activo existente es de ese
+// proyecto); lo que se evita es fusionar con el activo de otro proyecto o con un nodo
+// huérfano. Como la finding_key y el container_id de los findings contienen el id de su
+// activo, se reescriben con el id nuevo para que el hallazgo no acabe unido al del activo
+// ajeno.
+//
+// Devuelve, por índice de nodo, el id original para poder seguir resolviendo referencias
+// del fichero que lo usen.
+func remapCollidingAssetIDs(ctx context.Context, tx neo4j.ManagedTransaction, data *domain.GraphData) (map[int]string, error) {
+	aliases := make(map[int]string)
+
+	projectIDs := make([]interface{}, 0)
+	for _, node := range data.Nodes {
+		if primaryLabelOf(node) == "Project" {
+			if id := normalizeProperties(node.Properties)["id"]; id != nil {
+				projectIDs = append(projectIDs, id)
+			}
+		}
+	}
+
+	nextIntID := make(map[string]int64)
+	allocateIntID := func(label string) (int64, error) {
+		if _, ok := nextIntID[label]; !ok {
+			res, err := tx.Run(ctx, fmt.Sprintf(`MATCH (x:%s) RETURN coalesce(max(x.id), 0) AS maxId`, label), nil)
+			if err != nil {
+				return 0, err
+			}
+			maxID := int64(0)
+			if res.Next(ctx) {
+				maxID = getInt64(res.Record().AsMap(), "maxId")
+			}
+			for _, other := range data.Nodes {
+				if primaryLabelOf(other) != label {
+					continue
+				}
+				if v, ok := normalizeProperties(other.Properties)["id"].(int64); ok && v > maxID {
+					maxID = v
+				}
+			}
+			nextIntID[label] = maxID
+		}
+		nextIntID[label]++
+		return nextIntID[label], nil
+	}
+
+	ownerRemap := make(map[string]string)
+	allocated := 0
+	for i := range data.Nodes {
+		node := data.Nodes[i]
+		label := primaryLabelOf(node)
+		if !projectScopedIDLabels[label] || node.Properties == nil {
+			continue
+		}
+		oldID := normalizeProperties(node.Properties)["id"]
+		if oldID == nil {
+			continue
+		}
+
+		res, err := tx.Run(ctx, fmt.Sprintf(`
+			MATCH (x:%s {id: $id})
+			RETURN count(x) AS existing,
+			       count(CASE WHEN EXISTS { MATCH (p:Project)-[*1..4]->(x) WHERE p.id IN $projects } THEN 1 END) AS own
+		`, label), map[string]interface{}{"id": oldID, "projects": projectIDs})
+		if err != nil {
+			return nil, fmt.Errorf("error comprobando el id %v de %s: %w", oldID, label, err)
+		}
+		existing, own := int64(0), int64(0)
+		if res.Next(ctx) {
+			rec := res.Record().AsMap()
+			existing, own = getInt64(rec, "existing"), getInt64(rec, "own")
+		}
+		if existing == 0 || own > 0 {
+			continue
+		}
+
+		allocated++
+		switch oldID.(type) {
+		case int64:
+			newID, err := allocateIntID(label)
+			if err != nil {
+				return nil, fmt.Errorf("error generando id para %s: %w", label, err)
+			}
+			node.Properties["id"] = float64(newID)
+		default:
+			prefix := "inst"
+			if label == "Container" {
+				prefix = "container"
+			}
+			newID := fmt.Sprintf("%s-%d-%d", prefix, time.Now().UnixNano(), allocated)
+			node.Properties["id"] = newID
+			ownerRemap[fmt.Sprint(oldID)] = newID
+		}
+		aliases[i] = fmt.Sprint(oldID)
+		fmt.Printf("Aviso: el id %v de %s ya pertenece a otro proyecto; se importa como %v\n", oldID, label, node.Properties["id"])
+	}
+
+	if len(ownerRemap) == 0 {
+		return aliases, nil
+	}
+	for i := range data.Nodes {
+		node := data.Nodes[i]
+		if primaryLabelOf(node) != "Finding" || node.Properties == nil {
+			continue
+		}
+		if key, ok := node.Properties["finding_key"].(string); ok {
+			parts := strings.Split(key, "|")
+			if newOwner, ok := ownerRemap[parts[0]]; ok {
+				parts[0] = newOwner
+				node.Properties["finding_key"] = strings.Join(parts, "|")
+			}
+		}
+		if containerID, ok := node.Properties["container_id"]; ok && containerID != nil {
+			if newID, ok := ownerRemap[fmt.Sprint(containerID)]; ok {
+				node.Properties["container_id"] = newID
+			}
+		}
+	}
+	return aliases, nil
+}
+
+// importOwnedIP crea la IP colgando de su activo. El MERGE es sobre el camino completo, así
+// que reutiliza la IP que ese mismo activo ya tuviera, pero nunca la de otro activo.
+func importOwnedIP(ctx context.Context, tx neo4j.ManagedTransaction, ownerElemID string, ipProps, relProps map[string]interface{}) error {
+	pattern := "ip: $ip"
+	params := map[string]interface{}{
+		"owner":      ownerElemID,
+		"ip":         ipProps["ip"],
+		"properties": ipProps,
+		"relProps":   relProps,
+	}
+	if vlan, ok := ipProps["vlan_id"]; ok && vlan != nil {
+		pattern += ", vlan_id: $vlan_id"
+		params["vlan_id"] = vlan
+	}
+	res, err := tx.Run(ctx, fmt.Sprintf(`
+		MATCH (o)
+		WHERE elementId(o) = $owner AND (o:Endpoint OR o:Container)
+		MERGE (o)-[r:HAS_IP]->(ip:IPAddress {%s})
+		SET ip += $properties, r += $relProps
+		RETURN count(ip) AS linked
+	`, pattern), params)
+	if err != nil {
+		return err
+	}
+	if res.Next(ctx) && getInt64(res.Record().AsMap(), "linked") == 0 {
+		fmt.Printf("Aviso: IP %v omitida: su dueño no es un Endpoint ni un Container\n", ipProps["ip"])
+	}
+	return nil
+}
+
+// assignImportedSoftwareID da id a un Software recién creado por la importación: conserva
+// el del fichero si está libre y, si no, toma el siguiente libre. Los que ya existían (por
+// CPE) conservan el suyo.
+func assignImportedSoftwareID(ctx context.Context, tx neo4j.ManagedTransaction, elemID string, wantedID interface{}) error {
+	res, err := tx.Run(ctx, `
+		MATCH (n:Software)
+		WHERE elementId(n) = $elem_id AND n.id IS NULL
+		OPTIONAL MATCH (other:Software {id: $wanted_id})
+		WITH n, count(other) AS taken
+		OPTIONAL MATCH (anySoftware:Software)
+		WITH n, taken, max(anySoftware.id) AS maxId
+		SET n.id = CASE
+		    WHEN $wanted_id IS NOT NULL AND taken = 0 THEN $wanted_id
+		    ELSE coalesce(maxId, 0) + 1
+		END
+	`, map[string]interface{}{"elem_id": elemID, "wanted_id": wantedID})
+	if err != nil {
+		return err
+	}
+	_, err = res.Consume(ctx)
+	return err
+}
+
+// assignImportedFindingID da id a un finding recién creado por la importación.
+//
+// Conserva el id del fichero si está libre y, si no, toma el siguiente de la secuencia
+// finding_id. En ambos casos deja la secuencia por encima del id asignado: antes la
+// importación creaba findings con ids que la secuencia no conocía, y los escaneos
+// posteriores volvían a repartir esos mismos ids.
+//
+// Los findings que ya existían (tienen id) no se tocan.
+func assignImportedFindingID(ctx context.Context, tx neo4j.ManagedTransaction, elemID string, wantedID interface{}) error {
+	query := `
+		MATCH (n:Finding)
+		WHERE elementId(n) = $elem_id AND n.id IS NULL
+		MERGE (seq:Sequence {name: 'finding_id'})
+		ON CREATE SET seq.value = 0
+		WITH n, seq
+		OPTIONAL MATCH (other:Finding {id: $wanted_id})
+		WITH n, seq, count(other) AS taken
+		WITH n, seq,
+		     CASE
+		         WHEN $wanted_id IS NOT NULL AND taken = 0 THEN $wanted_id
+		         ELSE coalesce(seq.value, 0) + 1
+		     END AS assigned
+		SET n.id = assigned,
+		    seq.value = CASE WHEN assigned > coalesce(seq.value, 0) THEN assigned ELSE seq.value END
+	`
+	res, err := tx.Run(ctx, query, map[string]interface{}{
+		"elem_id":   elemID,
+		"wanted_id": wantedID,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = res.Consume(ctx)
 	return err
 }
 
@@ -2390,7 +2785,7 @@ func (r *infrastructureRepo) IsProjectNameDuplicate(ctx context.Context, name st
 
 	query := `
 		MATCH (p:Project)
-		WHERE toLower(trim(coalesce(p.nombre, p.name, ''))) = $name
+		WHERE toLower(trim(coalesce(p.name, ''))) = $name
 		  AND ($excludeID IS NULL OR $excludeID = '' OR $excludeID = '0' OR toString(p.id) <> toString($excludeID))
 		RETURN count(p) > 0 AS exists
 	`

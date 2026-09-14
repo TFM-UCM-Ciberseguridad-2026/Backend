@@ -2,6 +2,7 @@ package neo4j
 
 import (
 	"context"
+	"strings"
 
 	"github.com/TFM-UCM-Ciberseguridad-2026/Backend/internal/core/domain"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
@@ -15,6 +16,17 @@ type softwareRepo struct {
 	driver neo4j.DriverWithContext
 }
 
+// softwareCPEParam normaliza el CPE para guardarlo. El CPE es la clave única del catálogo
+// de software: los valores vacíos o "N/A" se guardan como nulo, porque como cadena
+// chocarían entre sí con la constraint de unicidad.
+func softwareCPEParam(cpe string) any {
+	cpe = strings.TrimSpace(cpe)
+	if cpe == "" || strings.EqualFold(cpe, "N/A") {
+		return nil
+	}
+	return cpe
+}
+
 func (r *softwareRepo) Save(ctx context.Context, s *domain.Software) error {
 	query := `
 		MERGE (n:Software {id: $id})
@@ -25,7 +37,7 @@ func (r *softwareRepo) Save(ctx context.Context, s *domain.Software) error {
 		"name":    s.Name,
 		"version": s.Version,
 		"type":    s.Type,
-		"cpe":     s.CPE,
+		"cpe":     softwareCPEParam(s.CPE),
 		"purl":    s.PURL,
 		"vendor":  s.Vendor,
 		"url":     s.URL,
@@ -43,7 +55,7 @@ func (r *softwareRepo) Update(ctx context.Context, s *domain.Software) error {
 		"name":    s.Name,
 		"version": s.Version,
 		"type":    s.Type,
-		"cpe":     s.CPE,
+		"cpe":     softwareCPEParam(s.CPE),
 		"purl":    s.PURL,
 		"vendor":  s.Vendor,
 		"url":     s.URL,
@@ -54,6 +66,33 @@ func (r *softwareRepo) Update(ctx context.Context, s *domain.Software) error {
 func (r *softwareRepo) GetByID(ctx context.Context, id int64) (*domain.Software, error) {
 	query := `MATCH (n:Software {id: $id}) RETURN properties(n) AS props`
 	props, err := executeReadHelper(ctx, r.driver, query, map[string]any{"id": id})
+	if err != nil || props == nil {
+		return nil, err
+	}
+	return &domain.Software{
+		SoftwareID: getInt64(props, "id"),
+		Name:       getString(props, "name"),
+		Version:    getString(props, "version"),
+		Type:       getString(props, "type"),
+		CPE:        getString(props, "cpe"),
+		PURL:       getString(props, "purl"),
+		Vendor:     getString(props, "vendor"),
+		URL:        getString(props, "url"),
+	}, nil
+}
+
+func (r *softwareRepo) GetByCPE(ctx context.Context, cpe string) (*domain.Software, error) {
+	normalized := softwareCPEParam(cpe)
+	if normalized == nil {
+		return nil, nil
+	}
+	query := `
+		MATCH (n:Software {cpe: $cpe})
+		RETURN properties(n) AS props
+		ORDER BY n.id
+		LIMIT 1
+	`
+	props, err := executeReadHelper(ctx, r.driver, query, map[string]any{"cpe": normalized})
 	if err != nil || props == nil {
 		return nil, err
 	}

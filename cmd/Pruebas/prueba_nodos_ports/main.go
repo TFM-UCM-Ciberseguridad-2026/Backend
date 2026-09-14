@@ -80,7 +80,7 @@ func main() {
 	_ = patchRepo.Save(ctx, patch)
 
 	// 10. Project
-	proj := &domain.Project{ProjectID: 1, Nombre: "Auditoría Q1 2026"}
+	proj := &domain.Project{ProjectID: 1, Name: "Auditoría Q1 2026"}
 	_ = projectRepo.Save(ctx, proj)
 
 	fmt.Println("✅ Nodos inyectados con éxito. Recuperando...")

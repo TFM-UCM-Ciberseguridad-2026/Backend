@@ -63,7 +63,7 @@ func main() {
 
 	// 5. Inyectar datos de prueba
 	now := time.Now().UTC()
-	project := &domain.Project{ProjectID: 1, Nombre: "Proyecto de Prueba de Vulnerabilidades"}
+	project := &domain.Project{ProjectID: 1, Name: "Proyecto de Prueba de Vulnerabilidades"}
 	if err := orchestrator.CreateProject(ctx, project); err != nil {
 		log.Fatalf("Error creando proyecto: %v", err)
 	}

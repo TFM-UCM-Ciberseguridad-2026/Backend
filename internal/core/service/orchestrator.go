@@ -262,8 +262,8 @@ func (o *Orchestrator) nextInstallationID() string {
 
 // CreateProject guarda el proyecto principal.
 func (o *Orchestrator) CreateProject(ctx context.Context, project *domain.Project) error {
-	if project.Nombre != "" && o.infraPort != nil {
-		if exists, err := o.infraPort.IsProjectNameDuplicate(ctx, project.Nombre, 0); err == nil && exists {
+	if project.Name != "" && o.infraPort != nil {
+		if exists, err := o.infraPort.IsProjectNameDuplicate(ctx, project.Name, 0); err == nil && exists {
 			return fmt.Errorf("Ya existe un proyecto con este nombre. Por favor, elige un nombre único.")
 		}
 	}
@@ -482,6 +482,27 @@ func (o *Orchestrator) ResolveSoftwareCPE(ctx context.Context, software *domain.
 	}, nil
 }
 
+// assignSoftwareID da id al software que se va a registrar. El CPE es la clave natural del
+// catálogo: si ya hay un Software con ese CPE se reutiliza su nodo, en lugar de crear otro
+// con un id nuevo (así se duplicaban log4j o http_server en cada alta).
+func (o *Orchestrator) assignSoftwareID(ctx context.Context, software *domain.Software) error {
+	if software.SoftwareID != 0 {
+		return nil
+	}
+	if existing, err := o.softwarePort.GetByCPE(ctx, software.CPE); err != nil {
+		return fmt.Errorf("error buscando software por CPE: %w", err)
+	} else if existing != nil {
+		software.SoftwareID = existing.SoftwareID
+		return nil
+	}
+	swID, err := o.nextNodeID(ctx, "Software")
+	if err != nil {
+		return fmt.Errorf("error generando ID de software: %w", err)
+	}
+	software.SoftwareID = swID
+	return nil
+}
+
 // RegisterSoftwareInstallation guarda la definición del software, la instancia instalada,
 // asocia la instancia al endpoint y el software genérico a la instancia instalada.
 func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpointID int64, software *domain.Software, installation *domain.SoftwareInstallation) error {
@@ -498,12 +519,8 @@ func (o *Orchestrator) RegisterSoftwareInstallation(ctx context.Context, endpoin
 	// 1. Resolver CPE multinivel y aplicar alias guardados
 	_, _ = o.ResolveSoftwareCPE(ctx, software, true)
 
-	if software.SoftwareID == 0 {
-		swID, err := o.nextNodeID(ctx, "Software")
-		if err != nil {
-			return fmt.Errorf("error generando ID de software: %w", err)
-		}
-		software.SoftwareID = swID
+	if err := o.assignSoftwareID(ctx, software); err != nil {
+		return err
 	}
 
 	// 2. Guardar nodo :Software genérico en Neo4j
@@ -543,12 +560,8 @@ func (o *Orchestrator) RegisterContainerSoftwareInstallation(ctx context.Context
 	// 1. Resolver CPE multinivel y aplicar alias guardados
 	_, _ = o.ResolveSoftwareCPE(ctx, software, true)
 
-	if software.SoftwareID == 0 {
-		swID, err := o.nextNodeID(ctx, "Software")
-		if err != nil {
-			return fmt.Errorf("error generando ID de software: %w", err)
-		}
-		software.SoftwareID = swID
+	if err := o.assignSoftwareID(ctx, software); err != nil {
+		return err
 	}
 
 	// 2. Guardar nodo :Software genérico en Neo4j
@@ -628,7 +641,69 @@ func (o *Orchestrator) ImportInfrastructure(ctx context.Context, data *domain.Gr
 	if data == nil {
 		return fmt.Errorf("los datos de infraestructura a importar son nulos")
 	}
+	if err := o.validateImportedProjectName(ctx, data); err != nil {
+		return err
+	}
 	return o.infraPort.ImportGraphData(ctx, data)
+}
+
+// validateImportedProjectName impide que una importación cree un proyecto con el nombre de
+// otro que ya existe. Crear y renombrar ya lo comprobaban; la importación era la única vía
+// de alta sin esta comprobación, y el aviso del modal solo se evaluaba al elegir el fichero,
+// así que un nombre repetido escrito después en el campo de renombrado pasaba sin control.
+//
+// Se excluye el id del propio proyecto del fichero: reimportarlo sobre sí mismo actualiza
+// ese proyecto, no crea otro con el mismo nombre.
+func (o *Orchestrator) validateImportedProjectName(ctx context.Context, data *domain.GraphData) error {
+	if o.infraPort == nil {
+		return nil
+	}
+	for _, node := range data.Nodes {
+		if !hasLabel(node.Labels, "Project") {
+			continue
+		}
+		// Los ficheros exportados antes de unificar el esquema traen el nombre en `nombre`.
+		name := strings.TrimSpace(stringProp(node.Properties, "name"))
+		if name == "" {
+			name = strings.TrimSpace(stringProp(node.Properties, "nombre"))
+		}
+		if name == "" {
+			continue
+		}
+		exists, err := o.infraPort.IsProjectNameDuplicate(ctx, name, normalizeJSONID(node.Properties["id"]))
+		if err != nil {
+			return fmt.Errorf("error comprobando el nombre del proyecto importado: %w", err)
+		}
+		if exists {
+			return fmt.Errorf("%w: ya existe un proyecto con el nombre %q. Por favor, elige un nombre único", domain.ErrDuplicateProject, name)
+		}
+	}
+	return nil
+}
+
+func hasLabel(labels []string, label string) bool {
+	for _, l := range labels {
+		if l == label {
+			return true
+		}
+	}
+	return false
+}
+
+func stringProp(props map[string]interface{}, key string) string {
+	if value, ok := props[key]; ok && value != nil {
+		return fmt.Sprint(value)
+	}
+	return ""
+}
+
+// normalizeJSONID convierte los ids numéricos que llegan de JSON (float64) a entero, para
+// que se comparen igual que los ids guardados en Neo4j.
+func normalizeJSONID(id interface{}) interface{} {
+	if f, ok := id.(float64); ok && f == float64(int64(f)) {
+		return int64(f)
+	}
+	return id
 }
 
 // GetTopAPTs obtiene la lista rankeada de Actores de Amenaza (APT) que más TTPs comparten

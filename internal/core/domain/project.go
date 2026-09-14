@@ -13,7 +13,7 @@ Propósito arquitectónico y teórico:
 // Project representa la entidad de dominio de un proyecto (nodo Project en Neo4j).
 type Project struct {
 	ProjectID int64  `json:"project_id"`
-	Nombre    string `json:"nombre"`
+	Name      string `json:"name"`
 
 	RiskScore      float64    `json:"risk_score"`
 	RiskTier       string     `json:"risk_tier"`
