@@ -119,12 +119,22 @@ func getInt64(m map[string]any, k string) int64 {
 	return 0
 }
 
-func getFloat64(m map[string]any, k string) float64 {
-	if v, ok := m[k].(float64); ok {
-		return v
-	}
-	return 0.0
-}
+func getFloat64(m map[string]any, key string) float64 {
+        switch value := m[key].(type) {
+        case float64:
+                return value
+        case float32:
+                return float64(value)
+        case int:
+                return float64(value)
+        case int32:
+                return float64(value)
+        case int64:
+                return float64(value)
+        default:
+                return 0.0
+        }
+  }
 
 func getBool(m map[string]any, k string) bool {
 	if v, ok := m[k].(bool); ok {
