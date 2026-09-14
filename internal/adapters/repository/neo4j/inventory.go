@@ -86,8 +86,8 @@ func (r *infrastructureRepo) GetPaginatedInventory(ctx context.Context, query do
 		       ($internet_exposed = "TRUE" AND (n.internet_exposed = true OR toString(n.internet_exposed) = "true")) OR
 		       ($internet_exposed = "FALSE" AND (n.internet_exposed = false OR toString(n.internet_exposed) = "false"))
 		      )
-		  AND ($status = "" OR $status = "ALL" OR toLower(coalesce(n.status, n.estado, "")) = toLower($status))
-		  AND ($exec_state = "" OR $exec_state = "ALL" OR toLower(coalesce(n.state, "")) = toLower($exec_state))
+		  AND ($status = "" OR $status = "ALL" OR toLower(coalesce(n.status, n.estado, n.state, "")) = toLower($status))
+		  AND ($exec_state = "" OR $exec_state = "ALL" OR toLower(coalesce(n.state, n.status, n.estado, "")) = toLower($exec_state))
 		  AND ($risk_tier = "" OR $risk_tier = "ALL" OR toLower(coalesce(n.risk_tier, n.severity, "")) = toLower($risk_tier))
 
 		WITH collect(n) AS matchedNodes, count(n) AS totalCount
