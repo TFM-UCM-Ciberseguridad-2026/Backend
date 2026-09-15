@@ -99,8 +99,11 @@ func ValidateAndNormalizeHardware(hw *Hardware) error {
 	hw.Model = strings.TrimSpace(hw.Model)
 	hw.SerialNumber = strings.TrimSpace(hw.SerialNumber)
 
-	if hw.Manufacturer == "" && hw.Model == "" {
-		return fmt.Errorf("%w: indica al menos el fabricante o el modelo del componente", ErrInvalidHardware)
+	if hw.Manufacturer == "" {
+		return fmt.Errorf("%w: el fabricante del componente es obligatorio", ErrInvalidHardware)
+	}
+	if hw.Model == "" {
+		return fmt.Errorf("%w: el modelo del componente es obligatorio", ErrInvalidHardware)
 	}
 	if len(hw.Manufacturer) > MaxHardwareTxt {
 		return fmt.Errorf("%w: el fabricante no puede superar los %d caracteres", ErrInvalidHardware, MaxHardwareTxt)

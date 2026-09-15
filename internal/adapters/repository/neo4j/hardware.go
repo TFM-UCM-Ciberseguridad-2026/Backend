@@ -44,18 +44,16 @@ func (r *hardwareRepo) Save(ctx context.Context, h *domain.Hardware) error {
 }
 
 func (r *hardwareRepo) Update(ctx context.Context, h *domain.Hardware) error {
-	// Los campos de texto que llegan vacíos conservan el valor previo. El modal de edición
-	// no siempre envía todos (durante mucho tiempo no incluyó el número de serie) y un SET
-	// incondicional borraba el dato sin dejar rastro en la auditoría.
 	query := `
 		MATCH (n:Hardware {id: $id})
-		SET n.model = CASE WHEN $m = '' THEN n.model ELSE $m END,
-		    n.architecture = CASE WHEN $arch = '' THEN n.architecture ELSE $arch END,
-		    n.manufacturer = CASE WHEN $mf = '' THEN n.manufacturer ELSE $mf END,
-		    n.serial_number = CASE WHEN $serial = '' THEN n.serial_number ELSE $serial END,
-		    n.cpu_cores = CASE WHEN $cores = 0 THEN n.cpu_cores ELSE $cores END,
-		    n.ram = CASE WHEN $ram = 0 THEN n.ram ELSE $ram END,
-		    n.storage = CASE WHEN $st = 0 THEN n.storage ELSE $st END
+		SET n.model = $m,
+		    n.architecture = $arch,
+		    n.manufacturer = $mf,
+		    n.serial_number = $serial,
+		    n.cpu_cores = $cores,
+		    n.ram = $ram,
+		    n.storage = $st
+		REMOVE n.modelo, n.tipo, n.cpu, n.ram_gb, n.storage_gb, n.fabricante
 	`
 	return executeWriteUpdateHelper(ctx, r.driver, query, hardwareParams(h))
 }
