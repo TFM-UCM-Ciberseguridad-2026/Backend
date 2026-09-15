@@ -1826,18 +1826,17 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 					matchVal = idVal
 				}
 			case "Software":
-				// El CPE es la clave natural del catálogo de software: fusionar por id
-				// duplicaba el mismo producto cuando dos bases le habían dado ids distintos.
+				// Se fusiona por id, como el resto de activos de proyecto: cada instalación tiene
+				// su propio Software (ver projectScopedIDLabels). Fusionar por CPE unía el software
+				// de activos y proyectos distintos en un único nodo. El CPE solo se normaliza.
 				if cpe := softwareCPEParam(fmt.Sprint(props["cpe"])); props["cpe"] != nil && cpe != nil {
 					props["cpe"] = cpe
-					matchKey = "cpe"
-					matchVal = cpe
 				} else {
 					delete(props, "cpe")
-					if idVal, exists := props["id"]; exists && idVal != nil {
-						matchKey = "id"
-						matchVal = idVal
-					}
+				}
+				if idVal, exists := props["id"]; exists && idVal != nil {
+					matchKey = "id"
+					matchVal = idVal
 				}
 			default:
 				if idVal, exists := props["id"]; exists && idVal != nil {
@@ -1864,13 +1863,6 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 			var wantedFindingID interface{}
 			if isKeyedFinding {
 				wantedFindingID = props["id"]
-				delete(props, "id")
-			}
-			// Mismo criterio para el software fusionado por CPE.
-			isKeyedSoftware := primaryLabel == "Software" && matchKey == "cpe"
-			var wantedSoftwareID interface{}
-			if isKeyedSoftware {
-				wantedSoftwareID = props["id"]
 				delete(props, "id")
 			}
 
@@ -1935,14 +1927,6 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 						}
 						if err := assignImportedFindingID(ctx, tx, elemIdStr, wantedFindingID); err != nil {
 							return nil, fmt.Errorf("error asignando id al finding importado %v: %w", matchVal, err)
-						}
-					}
-					if isKeyedSoftware {
-						if wantedSoftwareID != nil {
-							indexKey(fmt.Sprint(wantedSoftwareID), elemIdStr)
-						}
-						if err := assignImportedSoftwareID(ctx, tx, elemIdStr, wantedSoftwareID); err != nil {
-							return nil, fmt.Errorf("error asignando id al software importado %v: %w", matchVal, err)
 						}
 					}
 				}
@@ -2080,6 +2064,20 @@ var projectScopedIDLabels = map[string]bool{
 	"Container":            true,
 	"SoftwareInstallation": true,
 	"Hardware":             true,
+	// Cada instalación tiene su propio Software: fusionarlo con el de otro proyecto volvía a
+	// unir en un nodo el software de activos distintos.
+	"Software": true,
+}
+
+// saltosDesdeProyecto es la distancia máxima a la que un activo de ese tipo cuelga de su
+// proyecto. El Software de una instalación dentro de un contenedor está a 5 saltos
+// (Project→Endpoint→Container→SoftwareInstallation→Software): con 4 se tomaba por ajeno al
+// reimportar el proyecto sobre sí mismo, y la instalación acababa con dos Software.
+func saltosDesdeProyecto(label string) int {
+	if label == "Software" {
+		return 5
+	}
+	return 4
 }
 
 // remapCollidingAssetIDs reasigna, antes de ingestar, los ids de activo del fichero que en
@@ -2146,8 +2144,8 @@ func remapCollidingAssetIDs(ctx context.Context, tx neo4j.ManagedTransaction, da
 		res, err := tx.Run(ctx, fmt.Sprintf(`
 			MATCH (x:%s {id: $id})
 			RETURN count(x) AS existing,
-			       count(CASE WHEN EXISTS { MATCH (p:Project)-[*1..4]->(x) WHERE p.id IN $projects } THEN 1 END) AS own
-		`, label), map[string]interface{}{"id": oldID, "projects": projectIDs})
+			       count(CASE WHEN EXISTS { MATCH (p:Project)-[*1..%d]->(x) WHERE p.id IN $projects } THEN 1 END) AS own
+		`, label, saltosDesdeProyecto(label)), map[string]interface{}{"id": oldID, "projects": projectIDs})
 		if err != nil {
 			return nil, fmt.Errorf("error comprobando el id %v de %s: %w", oldID, label, err)
 		}
@@ -2233,29 +2231,6 @@ func importOwnedIP(ctx context.Context, tx neo4j.ManagedTransaction, ownerElemID
 		fmt.Printf("Aviso: IP %v omitida: su dueño no es un Endpoint ni un Container\n", ipProps["ip"])
 	}
 	return nil
-}
-
-// assignImportedSoftwareID da id a un Software recién creado por la importación: conserva
-// el del fichero si está libre y, si no, toma el siguiente libre. Los que ya existían (por
-// CPE) conservan el suyo.
-func assignImportedSoftwareID(ctx context.Context, tx neo4j.ManagedTransaction, elemID string, wantedID interface{}) error {
-	res, err := tx.Run(ctx, `
-		MATCH (n:Software)
-		WHERE elementId(n) = $elem_id AND n.id IS NULL
-		OPTIONAL MATCH (other:Software {id: $wanted_id})
-		WITH n, count(other) AS taken
-		OPTIONAL MATCH (anySoftware:Software)
-		WITH n, taken, max(anySoftware.id) AS maxId
-		SET n.id = CASE
-		    WHEN $wanted_id IS NOT NULL AND taken = 0 THEN $wanted_id
-		    ELSE coalesce(maxId, 0) + 1
-		END
-	`, map[string]interface{}{"elem_id": elemID, "wanted_id": wantedID})
-	if err != nil {
-		return err
-	}
-	_, err = res.Consume(ctx)
-	return err
 }
 
 // assignImportedFindingID da id a un finding recién creado por la importación.

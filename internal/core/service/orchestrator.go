@@ -440,19 +440,13 @@ func (o *Orchestrator) ResolveSoftwareCPE(ctx context.Context, software *domain.
 	}, nil
 }
 
-// assignSoftwareID da id al software que se va a registrar. El CPE es la clave natural del
-// catálogo: si ya hay un Software con ese CPE se reutiliza su nodo, en lugar de crear otro
-// con un id nuevo (así se duplicaban log4j o http_server en cada alta).
+// assignSoftwareID da un id nuevo al software de cada alta de instalación.
+//
+// Cada instalación tiene su propio nodo Software, aunque otra tenga el mismo producto y CPE.
+// Compartirlo hacía que editar o borrar el software de un activo afectara a todos los que lo
+// usaban, también en otros proyectos. Por eso tampoco se respeta un software_id que llegue
+// en la petición: reutilizaría un nodo existente.
 func (o *Orchestrator) assignSoftwareID(ctx context.Context, software *domain.Software) error {
-	if software.SoftwareID != 0 {
-		return nil
-	}
-	if existing, err := o.softwarePort.GetByCPE(ctx, software.CPE); err != nil {
-		return fmt.Errorf("error buscando software por CPE: %w", err)
-	} else if existing != nil {
-		software.SoftwareID = existing.SoftwareID
-		return nil
-	}
 	swID, err := o.nextNodeID(ctx, "Software")
 	if err != nil {
 		return fmt.Errorf("error generando ID de software: %w", err)

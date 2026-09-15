@@ -16,9 +16,8 @@ type softwareRepo struct {
 	driver neo4j.DriverWithContext
 }
 
-// softwareCPEParam normaliza el CPE para guardarlo. El CPE es la clave única del catálogo
-// de software: los valores vacíos o "N/A" se guardan como nulo, porque como cadena
-// chocarían entre sí con la constraint de unicidad.
+// softwareCPEParam normaliza el CPE para guardarlo: los valores vacíos o "N/A" se guardan
+// como nulo, para que no haya dos formas de decir "sin CPE".
 func softwareCPEParam(cpe string) any {
 	cpe = strings.TrimSpace(cpe)
 	if cpe == "" || strings.EqualFold(cpe, "N/A") {
@@ -81,49 +80,33 @@ func (r *softwareRepo) GetByID(ctx context.Context, id int64) (*domain.Software,
 	}, nil
 }
 
-func (r *softwareRepo) GetByCPE(ctx context.Context, cpe string) (*domain.Software, error) {
-	normalized := softwareCPEParam(cpe)
-	if normalized == nil {
-		return nil, nil
-	}
-	query := `
-		MATCH (n:Software {cpe: $cpe})
-		RETURN properties(n) AS props
-		ORDER BY n.id
-		LIMIT 1
-	`
-	props, err := executeReadHelper(ctx, r.driver, query, map[string]any{"cpe": normalized})
-	if err != nil || props == nil {
-		return nil, err
-	}
-	return &domain.Software{
-		SoftwareID: getInt64(props, "id"),
-		Name:       getString(props, "name"),
-		Version:    getString(props, "version"),
-		Type:       getString(props, "type"),
-		CPE:        getString(props, "cpe"),
-		PURL:       getString(props, "purl"),
-		Vendor:     getString(props, "vendor"),
-		URL:        getString(props, "url"),
-	}, nil
-}
-
+// DeleteByID borra el Software, sus instalaciones y lo que colgaba solo de ellas: sus
+// hallazgos y las remediaciones que no comparta ningún otro hallazgo.
+//
+// Antes se lanzaba después una limpieza de huérfanos sobre toda la base, que podía eliminar
+// nodos de cualquier proyecto sin relación con este software. Las vulnerabilidades y los
+// parches no se tocan: son catálogo compartido.
 func (r *softwareRepo) DeleteByID(ctx context.Context, id int64) error {
 	query := `
 		MATCH (n:Software)
 		WHERE toString(n.id) = toString($id) OR elementId(n) = toString($id)
 		OPTIONAL MATCH (si:SoftwareInstallation)-[:INSTANCE_OF]->(n)
-		DETACH DELETE n, si
-	`
-	_ = executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
-
-	cleanupQuery := `
-		MATCH (n)
-		WHERE (n:Software OR n:Network OR n:Hardware OR n:IPAddress OR n:SoftwareInstallation OR n:Finding OR n:Remediation OR n:Exploit OR n:Patch OR n:Container OR n:ContainerImage OR n:Vulnerability)
-		  AND NOT EXISTS((n)-[*1..5]-(:Endpoint)) AND NOT EXISTS((n)-[*1..5]-(:Project))
+		OPTIONAL MATCH (si)-[:HAS_FINDING]->(f:Finding)
+		OPTIONAL MATCH (f)-[:HAS_REMEDIATION]->(rem:Remediation)
+		WITH n,
+		     collect(DISTINCT si) AS instalaciones,
+		     collect(DISTINCT f) AS hallazgos,
+		     collect(DISTINCT rem) AS remediaciones
+		FOREACH (x IN hallazgos | DETACH DELETE x)
+		FOREACH (x IN instalaciones | DETACH DELETE x)
 		DETACH DELETE n
+		WITH remediaciones
+		UNWIND remediaciones AS rem
+		WITH rem
+		WHERE NOT EXISTS { MATCH (rem)<-[:HAS_REMEDIATION]-(:Finding) }
+		DETACH DELETE rem
 	`
-	return executeWriteHelper(ctx, r.driver, cleanupQuery, nil)
+	return executeWriteHelper(ctx, r.driver, query, map[string]any{"id": id})
 }
 
 // ==========================================

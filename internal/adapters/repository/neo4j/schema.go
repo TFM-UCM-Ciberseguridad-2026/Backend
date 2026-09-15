@@ -28,9 +28,6 @@ var schemaConstraints = []struct {
 	{"capec_capec_id_unique", `CREATE CONSTRAINT capec_capec_id_unique IF NOT EXISTS FOR (n:CAPEC) REQUIRE n.capec_id IS UNIQUE`},
 	{"threat_actor_actor_id_unique", `CREATE CONSTRAINT threat_actor_actor_id_unique IF NOT EXISTS FOR (n:ThreatActor) REQUIRE n.actor_id IS UNIQUE`},
 
-	// Software: el CPE es su clave natural (los vacíos se guardan como nulo).
-	{"software_cpe_unique", `CREATE CONSTRAINT software_cpe_unique IF NOT EXISTS FOR (n:Software) REQUIRE n.cpe IS UNIQUE`},
-
 	// Activos de proyecto sin clave natural: su id lo genera la aplicación y no puede
 	// repetirse, porque las relaciones y la API los resuelven por id.
 	{"project_id_unique", `CREATE CONSTRAINT project_id_unique IF NOT EXISTS FOR (n:Project) REQUIRE n.id IS UNIQUE`},
@@ -40,13 +37,29 @@ var schemaConstraints = []struct {
 	{"hardware_id_unique", `CREATE CONSTRAINT hardware_id_unique IF NOT EXISTS FOR (n:Hardware) REQUIRE n.id IS UNIQUE`},
 }
 
-// EnsureSchema crea las constraints de unicidad que falten.
+// obsoleteConstraints son constraints que existieron y ya no deben estar. EnsureSchema solo
+// crea, así que sin retirarlas explícitamente seguirían vigentes en las bases existentes.
+var obsoleteConstraints = []struct {
+	name      string
+	statement string
+}{
+	// Software dejó de ser un catálogo compartido por CPE: cada instalación tiene su propio
+	// nodo, así que dos Software con el mismo CPE son legítimos.
+	{"software_cpe_unique", `DROP CONSTRAINT software_cpe_unique IF EXISTS`},
+}
+
+// EnsureSchema retira las constraints obsoletas y crea las de unicidad que falten.
 //
 // Cada constraint se intenta por separado: si la base contiene duplicados de un tipo, esa
 // creación falla pero no impide crear las demás. Se devuelven todos los errores juntos para
 // que el arranque los registre sin tumbar el servicio.
 func EnsureSchema(ctx context.Context, driver neo4j.DriverWithContext) error {
 	var errs []error
+	for _, constraint := range obsoleteConstraints {
+		if err := executeWriteHelper(ctx, driver, constraint.statement, nil); err != nil {
+			errs = append(errs, fmt.Errorf("retirando constraint %s: %w", constraint.name, err))
+		}
+	}
 	for _, constraint := range schemaConstraints {
 		if err := executeWriteHelper(ctx, driver, constraint.statement, nil); err != nil {
 			errs = append(errs, fmt.Errorf("constraint %s: %w", constraint.name, err))

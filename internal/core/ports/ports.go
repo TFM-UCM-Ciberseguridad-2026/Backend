@@ -44,9 +44,6 @@ type SoftwarePort interface {
 	Save(ctx context.Context, software *domain.Software) error
 	Update(ctx context.Context, software *domain.Software) error
 	GetByID(ctx context.Context, id int64) (*domain.Software, error)
-	// GetByCPE devuelve el Software con ese CPE, o (nil, nil) si no existe. El CPE es la
-	// clave natural del catálogo de software.
-	GetByCPE(ctx context.Context, cpe string) (*domain.Software, error)
 	DeleteByID(ctx context.Context, id int64) error
 }
 
