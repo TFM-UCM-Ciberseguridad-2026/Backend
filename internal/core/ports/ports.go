@@ -35,6 +35,9 @@ type VulnerabilityPort interface {
 	// menos que las propuestas: solo se enlazan las que existen en el catálogo.
 	LinkTTPsToVulnerability(ctx context.Context, cveID, cweID string, ttps []string, confidence, source string) ([]string, error)
 	GetUnmappedVulnerabilities(ctx context.Context, projectID int64) ([]domain.Vulnerability, error) // projectID=0 → sin filtro (sweep global)
+	// GetProjectIDsForVulnerability devuelve los proyectos que contienen la CVE,
+	// con el mismo ámbito que usan el barrido y la matriz.
+	GetProjectIDsForVulnerability(ctx context.Context, cveID string) ([]int64, error)
 }
 
 type SoftwarePort interface {
@@ -420,15 +423,31 @@ type RiskPort interface {
 	UpdateContainerRiskAndPriority(ctx context.Context, summary domain.ContainerRiskSummary) error
 }
 
-// TTPMappedEvent se emite por el worker de TTPs cada vez que una CVE queda mapeada.
-// ProjectID = 0 indica origen global (sweep automático, cron, o escaneo sin contexto de proyecto).
+// Resultados posibles del worker de TTPs para una CVE.
+const (
+	ResultadoTTPMapeada     = "mapped"
+	ResultadoTTPSinTecnicas = "no_ttps"
+	ResultadoTTPError       = "error"
+)
+
+// TTPMappedEvent se emite por el worker de TTPs cada vez que termina una CVE,
+// con cualquier resultado: si solo se avisara de los éxitos, un proyecto cuya
+// última CVE no produjera técnicas nunca sabría que su mapeo ha acabado.
+//
+// Va dirigido a VARIOS proyectos a la vez: los que pidieron la CVE y los que la
+// contienen aunque no la pidieran. Un 0 en ProjectIDs indica que también la
+// pidió el barrido global.
 type TTPMappedEvent struct {
 	CVEID      string   `json:"cve_id"`
 	TTPs       []string `json:"ttps"`
 	Confidence string   `json:"confidence"`
 	Source     string   `json:"source"`
-	ProjectID  int64    `json:"project_id"` // 0 = global
-	Log        string   `json:"log"`
+	ProjectIDs []int64  `json:"project_ids"`
+	Result     string   `json:"result"` // ResultadoTTP*
+	// Remaining es lo que le queda en cola a cada proyecto de ProjectIDs tras
+	// terminar esta CVE: el frontend lo usa para saber cuándo ha acabado.
+	Remaining map[int64]int `json:"remaining"`
+	Log       string        `json:"log"`
 }
 
 // NotificationPort desacopla el worker de TTPs de cualquier detalle de transporte (WebSocket, SSE, etc.).

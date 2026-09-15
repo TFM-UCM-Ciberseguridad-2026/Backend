@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,43 +29,7 @@ Propósito arquitectónico y teórico:
 4. Neutralidad Tecnológica: No expone tipos HTTP ni dependencias de frameworks web, garantizando que las reglas de negocio puedan ser llamadas por un servidor HTTP, un CLI de consola o un proceso de ejecución programada (cron).
 */
 
-type ProjectTTPSyncState struct {
-	Processing bool
-	CurrentCVE string
-	Logs       []string
-	QueuedCVEs map[string]bool
-}
-
-// maxTTPLogs acota el histórico de líneas que el servidor conserva por proyecto.
-// Es el mismo tope que ya aplicaba el cliente (.slice(-200)); sin él, el barrido
-// periódico —que se repite cada 10 minutos indefinidamente— hacía crecer el slice
-// sin límite y engordaba cada respuesta de estado, que además se sondea cada 1,5 s.
-const maxTTPLogs = 200
-
-type TTPBackgroundSyncManager struct {
-	mu            sync.RWMutex
-	projectStates map[int64]*ProjectTTPSyncState
-	// inFlight deduplica CVEs de forma GLOBAL, independientemente del proyecto.
-	// QueuedCVEs es por proyecto y sirve para informar del progreso, pero no vale
-	// como control de duplicados: el barrido periódico encola con projectID=0 y el
-	// disparo manual con projectID=N, así que la misma CVE podía estar en las dos
-	// colas y recibir dos inferencias del modelo.
-	inFlight map[string]bool
-}
-
-type TTPBackgroundSyncResponse struct {
-	Processing  bool     `json:"processing"`
-	CurrentCVE  string   `json:"current_cve"`
-	QueueLength int      `json:"queue_length"`
-	Logs        []string `json:"logs"`
-}
-
-// ttpTask agrupa el CVE ID y el project_id del contexto que originó el encolado.
-// ProjectID = 0 significa origen global (sweep automático, cron, escaneo sin contexto de proyecto).
-type ttpTask struct {
-	cveID     string
-	projectID int64
-}
+// El estado y la cola del worker de mapeo de TTPs viven en ttp_cola.go.
 
 type Orchestrator struct {
 	projectPort         ports.ProjectPort
@@ -98,9 +63,7 @@ type Orchestrator struct {
 	notifier            ports.NotificationPort // nil si no se inyecta
 	govService          ports.GovernanceService // nil si no se inyecta
 	cpeService          *CPEService
-	ttpSync             TTPBackgroundSyncManager
-	ttpQueueHigh        chan ttpTask
-	ttpQueueLow         chan ttpTask
+	ttpCola             *colaMapeoTTP
 	CapecReady          chan struct{}
 	nodeIDMutex         sync.Mutex
 }
@@ -139,13 +102,8 @@ func NewOrchestrator(
 		dbHelper:         dbHelper,
 		vulnScannerPort:  vulnScannerPort,
 		nvdSyncSem:       make(chan struct{}, 2), // máximo 2 llamadas NVD síncronas en total a la vez
-		ttpQueueHigh:     make(chan ttpTask, 1000),
-		ttpQueueLow:      make(chan ttpTask, 10000),
+		ttpCola:          nuevaColaMapeoTTP(1000, 10000),
 		CapecReady:       make(chan struct{}),
-		ttpSync: TTPBackgroundSyncManager{
-			projectStates: make(map[int64]*ProjectTTPSyncState),
-			inFlight:      make(map[string]bool),
-		},
 	}
 }
 
@@ -3393,68 +3351,24 @@ func (o *Orchestrator) GetATTACKCatalogInfo(ctx context.Context) (*domain.ATTACK
 	return o.infraPort.GetATTACKCatalogInfo(ctx)
 }
 
-func (o *Orchestrator) StartBackgroundTTPMapping(projectID int64) int {
-	// Disparo manual: ejecuta un barrido acotado al proyecto indicado y devuelve cuántos CVEs encoló
+// StartBackgroundTTPMapping es el disparo manual: barre las CVEs sin mapear del
+// proyecto indicado y devuelve qué ha pasado con cada una (ver ResumenBarrido).
+func (o *Orchestrator) StartBackgroundTTPMapping(projectID int64) ResumenBarrido {
 	return o.runSweep(context.Background(), projectID)
 }
 
 func (o *Orchestrator) StartTTPWorker(ctx context.Context) {
-	// 1. Worker Consumidor Principal
+	// 1. Worker consumidor único. El orden (turnos entre proyectos, prioridad sobre
+	// el barrido global, paso periódico a la baja) lo decide la cola: ttp_cola.go.
 	go func() {
-		var highCount int
 		for {
-			var task ttpTask
-			var ok bool
-
-			// Prevención de Inanición (Starvation):
-			// Si hemos procesado 10 tareas de alta prioridad seguidas, intentamos
-			// forzar el consumo de 1 tarea de baja prioridad si está disponible.
-			if highCount >= 10 {
-				select {
-				case task, ok = <-o.ttpQueueLow:
-					if !ok {
-						return
-					}
-					highCount = 0
-					goto process
-				default:
-					highCount = 0
-				}
-			}
-
-			// Prioridad: Intentar leer primero de High
-			select {
-			case <-ctx.Done():
+			cveID, ok := o.ttpCola.Siguiente(ctx)
+			if !ok {
 				return
-			case task, ok = <-o.ttpQueueHigh:
-				if !ok {
-					return
-				}
-				highCount++
-			default:
-				// Si High está vacía, bloquear esperando en cualquiera de las dos
-				select {
-				case <-ctx.Done():
-					return
-				case task, ok = <-o.ttpQueueHigh:
-					if !ok {
-						return
-					}
-					highCount++
-				case task, ok = <-o.ttpQueueLow:
-					if !ok {
-						return
-					}
-					highCount = 0
-				}
 			}
-
-		process:
-			o.startProcessingCVE(task.cveID, task.projectID)
-			if err := o.processSingleCVE(ctx, task); err != nil {
-				o.addTTPLog(fmt.Sprintf("Error procesando %s: %v", task.cveID, err), task.projectID)
-			}
-			o.endProcessingCVE(task.cveID, task.projectID)
+			resultado := o.processSingleCVE(ctx, cveID)
+			interesados := o.ttpCola.Terminar(cveID)
+			o.publicarResultadoTTP(ctx, resultado, interesados)
 		}
 	}()
 
@@ -3477,101 +3391,63 @@ func (o *Orchestrator) StartTTPWorker(ctx context.Context) {
 	}()
 }
 
-func (o *Orchestrator) runSweep(ctx context.Context, projectID int64) int {
+func (o *Orchestrator) runSweep(ctx context.Context, projectID int64) ResumenBarrido {
+	var resumen ResumenBarrido
 	vulns, err := o.vulnPort.GetUnmappedVulnerabilities(ctx, projectID)
 	if err != nil {
 		log.Printf("[TTP-BG-SWEEP] Error obteniendo vulnerabilidades no mapeadas: %v", err)
-		return 0
+		return resumen
 	}
+	resumen.Encontradas = len(vulns)
 	if len(vulns) > 0 {
 		log.Printf("[TTP-BG-SWEEP] Encolando %d vulnerabilidades sin TTP (projectID=%d)...", len(vulns), projectID)
 		for _, v := range vulns {
-			o.EnqueueCVE(v.CVEID, projectID)
+			resumen.Contar(o.EnqueueCVE(v.CVEID, projectID))
 		}
+		log.Printf("[TTP-BG-SWEEP] projectID=%d: %d nuevas, %d ya en cola, %d promovidas, %d descartadas por cola llena",
+			projectID, resumen.Nuevas, resumen.YaPendientes, resumen.Promovidas, resumen.Descartadas)
 	}
-	return len(vulns)
+	return resumen
 }
 
-func (o *Orchestrator) getProjectState(projectID int64) *ProjectTTPSyncState {
-	o.ttpSync.mu.Lock()
-	defer o.ttpSync.mu.Unlock()
-	state, exists := o.ttpSync.projectStates[projectID]
-	if !exists {
-		state = &ProjectTTPSyncState{
-			Logs:       []string{},
-			QueuedCVEs: make(map[string]bool),
-		}
-		o.ttpSync.projectStates[projectID] = state
+// EnqueueCVE pide el mapeo de una CVE en nombre de un proyecto (0 = sin contexto
+// de proyecto: barrido periódico, cron NIST, escaneo de imagen).
+//
+// Una CVE se procesa una sola vez aunque la pidan varios proyectos, pero todos
+// quedan registrados y reciben el resultado (ver ttp_cola.go).
+func (o *Orchestrator) EnqueueCVE(cveID string, projectID int64) ResultadoEncolado {
+	resultado := o.ttpCola.Encolar(cveID, projectID)
+	if resultado == EncoladoDescartado {
+		o.ttpCola.Registrar(fmt.Sprintf("Advertencia: Cola de mapeo TTP llena, descartado temporalmente: %s", cveID), []int64{projectID})
 	}
-	return state
+	return resultado
 }
 
-func (o *Orchestrator) EnqueueCVE(cveID string, projectID int64) {
-	state := o.getProjectState(projectID)
-
-	o.ttpSync.mu.Lock()
-	// La deduplicación es global (ver TTPBackgroundSyncManager.inFlight): una CVE
-	// solo se procesa una vez, venga del barrido global o del disparo manual.
-	if o.ttpSync.inFlight[cveID] {
-		o.ttpSync.mu.Unlock()
-		return // Ya está encolado o procesándose en algún contexto
-	}
-	o.ttpSync.inFlight[cveID] = true
-	state.QueuedCVEs[cveID] = true
-	state.Processing = true
-	o.ttpSync.mu.Unlock()
-
-	queue := o.ttpQueueHigh
-	if projectID == 0 {
-		queue = o.ttpQueueLow
-	}
-
-	select {
-	case queue <- ttpTask{cveID: cveID, projectID: projectID}:
-		// Encolado con éxito
-	default:
-		// Sacar de los mapas si se descarta de la cola (para que pueda volver a re-encolarse en el barrido)
-		o.ttpSync.mu.Lock()
-		delete(o.ttpSync.inFlight, cveID)
-		delete(state.QueuedCVEs, cveID)
-		// Revertir también la bandera. Si esta era la única CVE del estado, nadie
-		// volvería a llamar a endProcessingCVE y el proyecto quedaba "procesando"
-		// para siempre: el modal del frontend giraba sin fin y bloqueaba el botón
-		// de recalcular.
-		state.Processing = len(state.QueuedCVEs) > 0
-		o.ttpSync.mu.Unlock()
-		o.addTTPLog(fmt.Sprintf("Advertencia: Cola de mapeo TTP llena, descartado temporalmente: %s", cveID), projectID)
-	}
+// resultadoMapeoTTP es lo que produce el worker para una CVE. Publicarlo (logs y
+// WebSocket) se hace aparte, en publicarResultadoTTP, porque va dirigido a todos
+// los proyectos afectados y no a quien la encoló.
+type resultadoMapeoTTP struct {
+	CVEID      string
+	Estado     string // ports.ResultadoTTP*
+	Aceptadas  []string
+	Propuestas int
+	Confidence string
+	Source     string
+	Duracion   time.Duration
+	Err        error
 }
 
-func (o *Orchestrator) startProcessingCVE(cveID string, projectID int64) {
-	state := o.getProjectState(projectID)
-	o.ttpSync.mu.Lock()
-	defer o.ttpSync.mu.Unlock()
-	state.CurrentCVE = cveID
-	state.Processing = true
-}
+func (o *Orchestrator) processSingleCVE(ctx context.Context, cveID string) resultadoMapeoTTP {
+	res := resultadoMapeoTTP{CVEID: cveID, Estado: ports.ResultadoTTPError}
 
-func (o *Orchestrator) endProcessingCVE(cveID string, projectID int64) {
-	state := o.getProjectState(projectID)
-	o.ttpSync.mu.Lock()
-	defer o.ttpSync.mu.Unlock()
-	state.CurrentCVE = ""
-	delete(state.QueuedCVEs, cveID)
-	delete(o.ttpSync.inFlight, cveID)
-
-	if len(state.QueuedCVEs) == 0 {
-		state.Processing = false
-	}
-}
-
-func (o *Orchestrator) processSingleCVE(ctx context.Context, task ttpTask) error {
-	v, err := o.vulnPort.GetByID(ctx, task.cveID)
+	v, err := o.vulnPort.GetByID(ctx, cveID)
 	if err != nil {
-		return fmt.Errorf("error obteniendo vuln: %w", err)
+		res.Err = fmt.Errorf("error obteniendo vuln: %w", err)
+		return res
 	}
 	if v == nil {
-		return fmt.Errorf("vulnerabilidad %s no encontrada", task.cveID)
+		res.Err = fmt.Errorf("vulnerabilidad %s no encontrada", cveID)
+		return res
 	}
 
 	var ttps []string
@@ -3635,10 +3511,13 @@ func (o *Orchestrator) processSingleCVE(ctx context.Context, task ttpTask) error
 		confidence = "medium"
 		source = domain.FuenteLLMEnriched
 	}
-	duration := time.Since(start)
+	res.Duracion = time.Since(start)
+	res.Confidence = confidence
+	res.Source = source
 
 	if err != nil {
-		return err
+		res.Err = err
+		return res
 	}
 
 	// Red de seguridad: aunque la lista de candidatas ya excluye las técnicas
@@ -3646,42 +3525,29 @@ func (o *Orchestrator) processSingleCVE(ctx context.Context, task ttpTask) error
 	// la garantía se mantiene también por la vía CAPEC y si el catálogo no
 	// estuviera disponible y no hubiera habido lista que ofrecer.
 	ttps = o.filtrarIncoherentesConCVSS(ttps, v)
+	res.Propuestas = len(ttps)
 
-	if len(ttps) > 0 {
-		// El registro se emite DESPUÉS de escribir, y con las técnicas realmente
-		// enlazadas. Antes se anunciaba lo que el modelo había propuesto, de modo
-		// que un registro podía decir "mapeado a [T1078 T1079 T1562]" mientras en
-		// el grafo entraba una sola: las otras dos no existen en el catálogo.
-		aceptadas, err := o.vulnPort.LinkTTPsToVulnerability(ctx, v.CVEID, mappedCWE, ttps, confidence, source)
-		if err != nil {
-			return err
-		}
-
-		mensaje := fmt.Sprintf("CVE %s mapeado a TTPs %v en %v (Confianza: %s)",
-			v.CVEID, aceptadas, duration.Round(time.Millisecond), confidence)
-		if descartadas := len(ttps) - len(aceptadas); descartadas > 0 {
-			mensaje += fmt.Sprintf(" — %d de %d propuestas descartadas por no estar en el catálogo",
-				descartadas, len(ttps))
-		}
-		o.addTTPLog(mensaje, task.projectID)
-
-		// Emitir evento WebSocket si el notificador está inyectado
-		if o.notifier != nil {
-			_ = o.notifier.NotifyTTPMapped(ctx, ports.TTPMappedEvent{
-				CVEID:      v.CVEID,
-				TTPs:       aceptadas,
-				Confidence: confidence,
-				Source:     source,
-				ProjectID:  task.projectID,
-				Log:        fmt.Sprintf("CVE %s → TTPs %v (Confianza: %s)", v.CVEID, aceptadas, confidence),
-			})
-		}
-		return nil
+	if len(ttps) == 0 {
+		res.Estado = ports.ResultadoTTPSinTecnicas
+		return res
 	}
 
-	o.addTTPLog(fmt.Sprintf("CVE %s no produjo ninguna TTP en %v (Confianza: %s)",
-		v.CVEID, duration.Round(time.Millisecond), confidence), task.projectID)
-	return nil
+	// El registro se emite DESPUÉS de escribir, y con las técnicas realmente
+	// enlazadas. Antes se anunciaba lo que el modelo había propuesto, de modo
+	// que un registro podía decir "mapeado a [T1078 T1079 T1562]" mientras en
+	// el grafo entraba una sola: las otras dos no existen en el catálogo.
+	aceptadas, err := o.vulnPort.LinkTTPsToVulnerability(ctx, v.CVEID, mappedCWE, ttps, confidence, source)
+	if err != nil {
+		res.Err = err
+		return res
+	}
+	res.Aceptadas = aceptadas
+	if len(aceptadas) == 0 {
+		res.Estado = ports.ResultadoTTPSinTecnicas
+	} else {
+		res.Estado = ports.ResultadoTTPMapeada
+	}
+	return res
 }
 
 // peticionDeMapeo arma la petición para el LLM, incluyendo la lista cerrada de
@@ -3744,61 +3610,84 @@ func (o *Orchestrator) filtrarIncoherentesConCVSS(ttps []string, v *domain.Vulne
 	return conservadas
 }
 
-func (o *Orchestrator) addTTPLog(msg string, projectID int64) {
-	state := o.getProjectState(projectID)
-	o.ttpSync.mu.Lock()
-	defer o.ttpSync.mu.Unlock()
-	logLine := fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), msg)
-	state.Logs = append(state.Logs, logLine)
-	// Anillo acotado: conservamos solo las últimas maxTTPLogs líneas.
-	if len(state.Logs) > maxTTPLogs {
-		state.Logs = state.Logs[len(state.Logs)-maxTTPLogs:]
+// publicarResultadoTTP comunica el resultado de una CVE a todos los proyectos
+// afectados: los que la pidieron y los que la contienen aunque no la pidieran.
+//
+// Lo segundo cubre el caso en que el barrido global se adelanta al disparo
+// manual: sin ello el proyecto no se enteraba de que su CVE ya estaba mapeada.
+// La consulta se ancla en la CVE y cuesta milisegundos, frente a los segundos
+// de la inferencia.
+func (o *Orchestrator) publicarResultadoTTP(ctx context.Context, res resultadoMapeoTTP, interesados []int64) {
+	proyectos := interesados
+	if contenedores, err := o.vulnPort.GetProjectIDsForVulnerability(ctx, res.CVEID); err != nil {
+		log.Printf("[TTP-NOTIFY] No se pudieron obtener los proyectos de %s; se avisa solo a quien la pidió: %v", res.CVEID, err)
+	} else {
+		proyectos = unirProyectos(interesados, contenedores)
 	}
 
-	prefix := "[TTP-BG-GLOBAL]"
-	if projectID > 0 {
-		prefix = fmt.Sprintf("[TTP-PROJ-%d]", projectID)
+	mensaje := mensajeResultadoTTP(res)
+	o.ttpCola.Registrar(mensaje, proyectos)
+
+	if o.notifier != nil {
+		_ = o.notifier.NotifyTTPMapped(ctx, ports.TTPMappedEvent{
+			CVEID:      res.CVEID,
+			TTPs:       res.Aceptadas,
+			Confidence: res.Confidence,
+			Source:     res.Source,
+			ProjectIDs: proyectos,
+			Result:     res.Estado,
+			Remaining:  o.ttpCola.PendientesDe(proyectos),
+			Log:        mensaje,
+		})
 	}
-	log.Printf("%s %s", prefix, msg)
+}
+
+func mensajeResultadoTTP(res resultadoMapeoTTP) string {
+	duracion := res.Duracion.Round(time.Millisecond)
+	switch {
+	case res.Err != nil:
+		return fmt.Sprintf("Error procesando %s: %v", res.CVEID, res.Err)
+	case len(res.Aceptadas) == 0:
+		mensaje := fmt.Sprintf("CVE %s no produjo ninguna TTP en %v (Confianza: %s)", res.CVEID, duracion, res.Confidence)
+		if res.Propuestas > 0 {
+			mensaje += fmt.Sprintf(" — %d propuestas descartadas por no estar en el catálogo", res.Propuestas)
+		}
+		return mensaje
+	default:
+		mensaje := fmt.Sprintf("CVE %s mapeado a TTPs %v en %v (Confianza: %s)", res.CVEID, res.Aceptadas, duracion, res.Confidence)
+		if descartadas := res.Propuestas - len(res.Aceptadas); descartadas > 0 {
+			mensaje += fmt.Sprintf(" — %d de %d propuestas descartadas por no estar en el catálogo", descartadas, res.Propuestas)
+		}
+		return mensaje
+	}
+}
+
+// unirProyectos devuelve la unión ordenada y sin repetidos de dos listas de ids.
+func unirProyectos(a, b []int64) []int64 {
+	vistos := make(map[int64]bool, len(a)+len(b))
+	out := make([]int64, 0, len(a)+len(b))
+	for _, lista := range [][]int64{a, b} {
+		for _, pid := range lista {
+			if !vistos[pid] {
+				vistos[pid] = true
+				out = append(out, pid)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // ForgetProjectTTPState descarta el estado de sincronización de TTPs de un
-// proyecto. Sin esto, projectStates solo crecía: los proyectos borrados seguían
-// ocupando su entrada (y su histórico de logs) mientras el proceso siguiera vivo.
+// proyecto borrado y lo retira como interesado de las CVEs pendientes.
 func (o *Orchestrator) ForgetProjectTTPState(projectID int64) {
-	o.ttpSync.mu.Lock()
-	defer o.ttpSync.mu.Unlock()
-	delete(o.ttpSync.projectStates, projectID)
+	o.ttpCola.Olvidar(projectID)
 }
 
+// GetTTPSyncStatus devuelve el progreso del proyecto consultado, no el de la
+// cola compartida: es lo que el usuario espera leer dentro de "su" proyecto.
 func (o *Orchestrator) GetTTPSyncStatus(projectID int64) TTPBackgroundSyncResponse {
-	o.ttpSync.mu.RLock()
-	defer o.ttpSync.mu.RUnlock()
-
-	state, exists := o.ttpSync.projectStates[projectID]
-	if !exists {
-		return TTPBackgroundSyncResponse{
-			Processing:  false,
-			CurrentCVE:  "",
-			QueueLength: 0,
-			Logs:        []string{},
-		}
-	}
-
-	logsCopy := make([]string, len(state.Logs))
-	copy(logsCopy, state.Logs)
-
-	// La ocupación que se informa es la del proyecto consultado, no la del canal
-	// compartido por todos los proyectos: es lo que el usuario espera leer dentro
-	// del estado de "su" proyecto.
-	queueLen := len(state.QueuedCVEs)
-
-	return TTPBackgroundSyncResponse{
-		Processing:  state.Processing,
-		CurrentCVE:  state.CurrentCVE,
-		QueueLength: queueLen,
-		Logs:        logsCopy,
-	}
+	return o.ttpCola.Estado(projectID)
 }
 
 // AggregateProjectRiskFromCurrentEndpointScores recalcula el riesgo agregado de un proyecto completo, basado en los scores actuales de sus endpoints asociados.

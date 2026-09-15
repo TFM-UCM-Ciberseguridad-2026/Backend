@@ -40,13 +40,16 @@ func NewWSHub() *WSHub {
 //
 // Regla de entrega:
 //   - c.projectID == 0  → cliente global, recibe TODOS los eventos (sweep automático + manuales)
-//   - c.projectID == N  → cliente de proyecto N, recibe SOLO eventos donde event.ProjectID == N
+//   - c.projectID == N  → cliente de proyecto N, recibe el evento si N está en event.ProjectIDs
+//
+// Un mismo evento puede ir a varios proyectos: una CVE compartida, o una CVE que
+// mapeó el barrido global y que contienen proyectos que no la habían pedido.
 //
 // Demostración de aislamiento:
 //
 //	Cliente A: projectID=2, Cliente B: projectID=1
-//	Evento: ProjectID=1 → solo llega a Cliente B (y a cualquier suscriptor global).
-//	Cliente A: c.projectID(2) == 0? NO → c.projectID(2) == event.ProjectID(1)? NO → descartado.
+//	Evento: ProjectIDs=[1] → solo llega a Cliente B (y a cualquier suscriptor global).
+//	Cliente A: c.projectID(2) == 0? NO → 2 en [1]? NO → descartado.
 func (h *WSHub) NotifyTTPMapped(_ context.Context, event ports.TTPMappedEvent) error {
 	data, err := json.Marshal(map[string]any{
 		"type":  "CVE_MAPPED",
@@ -60,8 +63,8 @@ func (h *WSHub) NotifyTTPMapped(_ context.Context, event ports.TTPMappedEvent) e
 	defer h.mu.RUnlock()
 
 	for c := range h.clients {
-		// FILTRO REAL: entregar solo si el cliente es global o coincide el proyecto
-		if c.projectID == 0 || c.projectID == event.ProjectID {
+		// FILTRO REAL: entregar solo si el cliente es global o su proyecto está en el evento
+		if c.projectID == 0 || contieneProyecto(event.ProjectIDs, c.projectID) {
 			select {
 			case c.send <- data:
 			default:
@@ -125,4 +128,13 @@ func (h *WSHub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+}
+
+func contieneProyecto(projectIDs []int64, projectID int64) bool {
+	for _, pid := range projectIDs {
+		if pid == projectID {
+			return true
+		}
+	}
+	return false
 }

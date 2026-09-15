@@ -1673,6 +1673,11 @@ func (h *OrchestratorHandler) GetTTPSyncStatus(w http.ResponseWriter, r *http.Re
 // POST /api/infrastructure/map-ttps
 // Body JSON opcional: {"project_id": 123}
 // Si project_id está ausente o es 0, el sweep cubre toda la base de datos (comportamiento previo).
+//
+// `enqueued` es lo que el proyecto va a ver progresar (su queue_length), no lo
+// que encontró el barrido: antes se devolvía lo encontrado aunque las CVEs ya
+// estuvieran en cola por otro proyecto o por el barrido global, y la interfaz
+// anunciaba un mapeo que ese proyecto nunca llegaba a seguir.
 func (h *OrchestratorHandler) MapTTPsManually(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ProjectID int64 `json:"project_id"`
@@ -1680,17 +1685,25 @@ func (h *OrchestratorHandler) MapTTPsManually(w http.ResponseWriter, r *http.Req
 	// Ignorar errores de decode: si el body está vacío o no tiene project_id, projectID queda en 0
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	projectID := body.ProjectID
-	enqueued := h.orchestrator.StartBackgroundTTPMapping(projectID)
+	resumen := h.orchestrator.StartBackgroundTTPMapping(body.ProjectID)
+	seguidas := resumen.Seguidas()
 
 	msg := "Mapeo de TTPs iniciado en segundo plano"
-	if enqueued == 0 {
+	switch {
+	case resumen.Encontradas == 0:
 		msg = "No hay vulnerabilidades nuevas que mapear"
+	case seguidas == 0:
+		msg = "Cola de mapeo llena: las vulnerabilidades se reintentarán en el próximo barrido"
 	}
 	sendJSON(w, map[string]any{
-		"status":   "success",
-		"message":  msg,
-		"enqueued": enqueued,
+		"status":         "success",
+		"message":        msg,
+		"enqueued":       seguidas,
+		"found":          resumen.Encontradas,
+		"new":            resumen.Nuevas,
+		"already_queued": resumen.YaPendientes,
+		"promoted":       resumen.Promovidas,
+		"dropped":        resumen.Descartadas,
 	}, http.StatusOK)
 }
 
