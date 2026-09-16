@@ -61,7 +61,10 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 		// 673.704 filas de 21 nodos cada una y la consulta no terminaba nunca.
 		//
 		// UNION deduplica por sí mismo, así que el producto no llega a materializarse.
-		// El conjunto de nodos resultante es exactamente el mismo de antes.
+		//
+		// Las CVE de una imagen entran solo a través de sus findings. La rama que las tomaba
+		// por (ci)-[:HAS_VULNERABILITY] se retiró: una imagen compartida con otro proyecto
+		// metía en este grafo CVE sin ningún hallazgo que las respaldara.
 		matchClause = `
 			MATCH (proj:Project)
 			WHERE proj.id = $projectID OR toString(proj.id) = toString($projectID)
@@ -105,8 +108,6 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HOSTS]->()-[:USES_IMAGE]-()-[:HAS_FINDING]->(x:Finding) RETURN x AS n
 				UNION
 				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HOSTS]->()-[:USES_IMAGE]-()-[:HAS_FINDING]->()-[:OF_VULNERABILITY]->(x:Vulnerability) RETURN x AS n
-				UNION
-				WITH proj MATCH (proj)-[:HAS_ENDPOINT]->()-[:HOSTS]->()-[:USES_IMAGE]-()-[:HAS_VULNERABILITY]->(x:Vulnerability) RETURN x AS n
 			}
 			WITH DISTINCT n WHERE n IS NOT NULL
 		`
@@ -193,6 +194,9 @@ func (r *infrastructureRepo) GetGraphData(ctx context.Context, projectID int64) 
 			OPTIONAL MATCH (s)-[rel]->(t)
 			WHERE elementId(s) IN nodeIds
 			  AND elementId(t) IN nodeIds
+			  // HAS_VULNERABILITY de una imagen es dato de escaneo, no un hallazgo del proyecto:
+			  // las CVE de un contenedor se dibujan a través de sus findings.
+			  AND NOT (type(rel) = 'HAS_VULNERABILITY' AND startNode(rel):ContainerImage)
 			  AND NOT (
 					startNode(rel):ThreatActor OR
 					startNode(rel):TTP OR
@@ -788,8 +792,14 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			          AND coalesce(fHosted.remediation_factor, 1.0) > 0.0
 			          AND coalesce(fHosted.risk_score, 0.0) > 0.0
 		      } OR EXISTS {
-		        MATCH (n)-[:HOSTS]-(c:Container)-[:USES_IMAGE]-(ci:ContainerImage)-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(v:Vulnerability)
+		        // Solo findings del propio contenedor: la relación HAS_VULNERABILITY de la imagen
+		        // no cuenta, porque una imagen compartida arrastraba CVE de otro proyecto.
+		        MATCH (n)-[:HOSTS]-(c:Container)-[:USES_IMAGE]-(ci:ContainerImage)-[:HAS_FINDING]->(fImage:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		        WHERE toLower(c.state) = 'running' AND ((v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A') AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(cwe IN coalesce(v.cwe, []) WHERE cwe IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269'])))
+		          AND fImage.container_id = c.id
+		          AND NOT (toUpper(coalesce(fImage.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED', 'SUPERSEDED'])
+		          AND coalesce(fImage.remediation_factor, 1.0) > 0.0
+		          AND coalesce(fImage.risk_score, 0.0) > 0.0
 		      }
 		    )) OR
 		    (n:Container AND toLower(n.state) = 'running' AND (
@@ -805,8 +815,12 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			            AND coalesce(fDirect.remediation_factor, 1.0) > 0.0
 			            AND coalesce(fDirect.risk_score, 0.0) > 0.0
 		        } OR EXISTS {
-		          MATCH (n)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING|HAS_VULNERABILITY*1..2]->(v:Vulnerability)
+		          MATCH (n)-[:USES_IMAGE]->(ci:ContainerImage)-[:HAS_FINDING]->(fDirectImage:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		          WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A' OR coalesce(v.base_score, 0.0) >= 4.0)
+		            AND fDirectImage.container_id = n.id
+		            AND NOT (toUpper(coalesce(fDirectImage.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED', 'SUPERSEDED'])
+		            AND coalesce(fDirectImage.remediation_factor, 1.0) > 0.0
+		            AND coalesce(fDirectImage.risk_score, 0.0) > 0.0
 		        }
 		      ))
 		    ))
@@ -848,17 +862,11 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			// Caso 3a: ep es Endpoint, con vuln en imagen de un contenedor hosteado (con nodo Finding)
 			WITH ep
 			MATCH (ep:Endpoint)-[:HOSTS]-(c:Container)-[:USES_IMAGE]-(ci:ContainerImage)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-			WHERE toLower(c.state) = 'running' AND ((v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A' OR coalesce(v.base_score, 0.0) >= 4.0) AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(cweItem IN coalesce(v.cwe, []) WHERE cweItem IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269'])))
+			WHERE f.container_id = c.id AND toLower(c.state) = 'running' AND ((v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A' OR coalesce(v.base_score, 0.0) >= 4.0) AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(cweItem IN coalesce(v.cwe, []) WHERE cweItem IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269'])))
 			  AND NOT (toUpper(coalesce(f.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED', 'SUPERSEDED'])
 			  AND coalesce(f.remediation_factor, 1.0) > 0.0
 			  AND coalesce(f.risk_score, 0.0) > 0.0
 			RETURN null AS si, ci, f, toString(coalesce(f.id, elementId(f))) AS f_id, v, true AS is_container, c AS container, 3 AS priority
-			UNION
-			// Caso 3b: ep es Endpoint, con vuln directa en imagen de contenedor hosteado sin finding
-			WITH ep
-			MATCH (ep:Endpoint)-[:HOSTS]-(c:Container)-[:USES_IMAGE]-(ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
-			WHERE toLower(c.state) = 'running' AND ((v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A' OR coalesce(v.base_score, 0.0) >= 4.0) AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(cweItem IN coalesce(v.cwe, []) WHERE cweItem IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269'])))
-			RETURN null AS si, ci, {risk_score: coalesce(v.base_score / 10.0, 0.0), severity: coalesce(v.severity, "UNKNOWN"), status: "LEGACY_UNCONTEXTUALIZED", risk_source: "LEGACY_VULNERABILITY_BASE_SCORE"} AS f, elementId(v) AS f_id, v, true AS is_container, c AS container, 4 AS priority
 			UNION
 			// Caso 4: ep es Container directamente enrutado, con vuln en software (AV:N RCE - MAYOR PRIORIDAD PARA CONTENEDORES)
 			WITH ep
@@ -871,24 +879,19 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			// Caso 5a: ep es Container directamente enrutado, con vuln en imagen (con nodo Finding)
 			WITH ep
 			MATCH (ep:Container)-[:USES_IMAGE]-(ci:ContainerImage)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
-			WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A' OR coalesce(v.base_score, 0.0) >= 4.0) AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(cweItem IN coalesce(v.cwe, []) WHERE cweItem IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269']))
+			WHERE f.container_id = ep.id AND (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A' OR coalesce(v.base_score, 0.0) >= 4.0) AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(cweItem IN coalesce(v.cwe, []) WHERE cweItem IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269']))
 			  AND NOT (toUpper(coalesce(f.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED', 'SUPERSEDED'])
 			  AND coalesce(f.remediation_factor, 1.0) > 0.0
 			  AND coalesce(f.risk_score, 0.0) > 0.0
 			RETURN null AS si, ci, f, toString(coalesce(f.id, elementId(f))) AS f_id, v, true AS is_container, ep AS container, 1 AS priority
-			UNION
-			// Caso 5b: ep es Container, con vuln directa sin nodo Finding
-			WITH ep
-			MATCH (ep:Container)-[:USES_IMAGE]-(ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
-			WHERE (v.cvss_vector CONTAINS 'AV:N' OR v.nvd_vector CONTAINS 'AV:N' OR v.cvss_vector CONTAINS 'AV:A' OR coalesce(v.base_score, 0.0) >= 4.0) AND (v.exploit = true OR coalesce(v.kev, false) = true OR any(cweItem IN coalesce(v.cwe, []) WHERE cweItem IN ['CWE-94', 'CWE-78', 'CWE-77', 'CWE-502', 'CWE-434', 'CWE-95', 'CWE-20', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-269']))
-			RETURN null AS si, ci, {risk_score: coalesce(v.base_score / 10.0, 0.0), severity: coalesce(v.severity, "UNKNOWN"), status: "LEGACY_UNCONTEXTUALIZED", risk_source: "LEGACY_VULNERABILITY_BASE_SCORE"} AS f, elementId(v) AS f_id, v, true AS is_container, ep AS container, 2 AS priority
 			UNION
 			// Caso 6: Endpoint (host) atravesado por HOSTS - solo aplica a Endpoints, no a Containers
 			WITH ep, path, indexed, ie
 			MATCH (ep:Endpoint)-[:HOSTS]->(c2:Container)
 			WHERE c2 IN nodes(path) AND ie.index > 0 AND elementId(indexed[ie.index-1].asset) = elementId(c2)
 			OPTIONAL MATCH (c2)-[:HAS_INSTALLATION|USES_IMAGE*1..2]->()-[:HAS_FINDING]->(fLPE:Finding)-[:OF_VULNERABILITY]->(vLPE:Vulnerability)
-			WHERE (toLower(vLPE.description) CONTAINS 'container escape' OR toLower(vLPE.description) CONTAINS 'sandbox escape' OR toLower(vLPE.description) CONTAINS 'escape container' OR toLower(vLPE.description) CONTAINS 'runc escape' OR toLower(vLPE.description) CONTAINS 'docker escape' OR toLower(vLPE.description) CONTAINS 'privilege escalation' OR toLower(vLPE.description) CONTAINS 'privilege' OR toLower(vLPE.description) CONTAINS 'overflow' OR any(cweInList IN coalesce(vLPE.cwe, []) WHERE cweInList IN ['CWE-269', 'CWE-250', 'CWE-270', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-190', 'CWE-125']))
+			WHERE (coalesce(fLPE.context_type, '') <> 'CONTAINER_IMAGE' OR fLPE.container_id = c2.id)
+			  AND (toLower(vLPE.description) CONTAINS 'container escape' OR toLower(vLPE.description) CONTAINS 'sandbox escape' OR toLower(vLPE.description) CONTAINS 'escape container' OR toLower(vLPE.description) CONTAINS 'runc escape' OR toLower(vLPE.description) CONTAINS 'docker escape' OR toLower(vLPE.description) CONTAINS 'privilege escalation' OR toLower(vLPE.description) CONTAINS 'privilege' OR toLower(vLPE.description) CONTAINS 'overflow' OR any(cweInList IN coalesce(vLPE.cwe, []) WHERE cweInList IN ['CWE-269', 'CWE-250', 'CWE-270', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-190', 'CWE-125']))
 			  AND NOT (toUpper(coalesce(fLPE.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED', 'SUPERSEDED'])
 			  AND coalesce(fLPE.remediation_factor, 1.0) > 0.0
 			  AND coalesce(fLPE.risk_score, 0.0) > 0.0
@@ -929,7 +932,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			  } AS hasContLPE,
 			  EXISTS {
 			    MATCH (ep)-[:HOSTS]->(c:Container)-[:USES_IMAGE]-(ci:ContainerImage)-[:HAS_FINDING]->(fImageLocal:Finding)-[:OF_VULNERABILITY]->(vContLocal:Vulnerability)
-			    WHERE toLower(c.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'container escape' OR toLower(vContLocal.description) CONTAINS 'sandbox escape' OR toLower(vContLocal.description) CONTAINS 'escape container' OR toLower(vContLocal.description) CONTAINS 'runc escape' OR toLower(vContLocal.description) CONTAINS 'docker escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation' OR toLower(vContLocal.description) CONTAINS 'privilege' OR toLower(vContLocal.description) CONTAINS 'overflow' OR any(cweInList IN coalesce(vContLocal.cwe, []) WHERE cweInList IN ['CWE-269', 'CWE-250', 'CWE-270', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-190', 'CWE-125']))
+			    WHERE fImageLocal.container_id = c.id AND toLower(c.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'container escape' OR toLower(vContLocal.description) CONTAINS 'sandbox escape' OR toLower(vContLocal.description) CONTAINS 'escape container' OR toLower(vContLocal.description) CONTAINS 'runc escape' OR toLower(vContLocal.description) CONTAINS 'docker escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation' OR toLower(vContLocal.description) CONTAINS 'privilege' OR toLower(vContLocal.description) CONTAINS 'overflow' OR any(cweInList IN coalesce(vContLocal.cwe, []) WHERE cweInList IN ['CWE-269', 'CWE-250', 'CWE-270', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-190', 'CWE-125']))
 			      AND NOT (toUpper(coalesce(fImageLocal.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED', 'SUPERSEDED'])
 			      AND coalesce(fImageLocal.remediation_factor, 1.0) > 0.0
 			      AND coalesce(fImageLocal.risk_score, 0.0) > 0.0
@@ -943,7 +946,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			  } AS hasDirectContLPE,
 			  EXISTS {
 			    MATCH (ep:Container)-[:USES_IMAGE]-(ci:ContainerImage)-[:HAS_FINDING]->(fDirectImageLocal:Finding)-[:OF_VULNERABILITY]->(vContLocal:Vulnerability)
-			    WHERE toLower(ep.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'container escape' OR toLower(vContLocal.description) CONTAINS 'sandbox escape' OR toLower(vContLocal.description) CONTAINS 'escape container' OR toLower(vContLocal.description) CONTAINS 'runc escape' OR toLower(vContLocal.description) CONTAINS 'docker escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation' OR toLower(vContLocal.description) CONTAINS 'privilege' OR toLower(vContLocal.description) CONTAINS 'overflow' OR any(cweInList IN coalesce(vContLocal.cwe, []) WHERE cweInList IN ['CWE-269', 'CWE-250', 'CWE-270', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-190', 'CWE-125']))
+			    WHERE fDirectImageLocal.container_id = ep.id AND toLower(ep.state) = 'running' AND (toLower(vContLocal.description) CONTAINS 'container escape' OR toLower(vContLocal.description) CONTAINS 'sandbox escape' OR toLower(vContLocal.description) CONTAINS 'escape container' OR toLower(vContLocal.description) CONTAINS 'runc escape' OR toLower(vContLocal.description) CONTAINS 'docker escape' OR toLower(vContLocal.description) CONTAINS 'privilege escalation' OR toLower(vContLocal.description) CONTAINS 'privilege' OR toLower(vContLocal.description) CONTAINS 'overflow' OR any(cweInList IN coalesce(vContLocal.cwe, []) WHERE cweInList IN ['CWE-269', 'CWE-250', 'CWE-270', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-190', 'CWE-125']))
 			      AND NOT (toUpper(coalesce(fDirectImageLocal.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED', 'SUPERSEDED'])
 			      AND coalesce(fDirectImageLocal.remediation_factor, 1.0) > 0.0
 			      AND coalesce(fDirectImageLocal.risk_score, 0.0) > 0.0
@@ -994,7 +997,7 @@ func (r *infrastructureRepo) GetExploitationPaths(ctx context.Context, projectID
 			      }
 			      OR EXISTS {
 			        MATCH (e1)-[:USES_IMAGE]-(ci:ContainerImage)-[:HAS_FINDING]->(fEntryImageLPE:Finding)-[:OF_VULNERABILITY]->(vLPE2:Vulnerability)
-			        WHERE (toLower(vLPE2.description) CONTAINS 'container escape' OR toLower(vLPE2.description) CONTAINS 'sandbox escape' OR toLower(vLPE2.description) CONTAINS 'escape container' OR toLower(vLPE2.description) CONTAINS 'runc escape' OR toLower(vLPE2.description) CONTAINS 'docker escape' OR toLower(vLPE2.description) CONTAINS 'privilege escalation' OR toLower(vLPE2.description) CONTAINS 'privilege' OR toLower(vLPE2.description) CONTAINS 'overflow' OR any(cweInList IN coalesce(vLPE2.cwe, []) WHERE cweInList IN ['CWE-269', 'CWE-250', 'CWE-270', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-190', 'CWE-125']))
+			        WHERE fEntryImageLPE.container_id = e1.id AND (toLower(vLPE2.description) CONTAINS 'container escape' OR toLower(vLPE2.description) CONTAINS 'sandbox escape' OR toLower(vLPE2.description) CONTAINS 'escape container' OR toLower(vLPE2.description) CONTAINS 'runc escape' OR toLower(vLPE2.description) CONTAINS 'docker escape' OR toLower(vLPE2.description) CONTAINS 'privilege escalation' OR toLower(vLPE2.description) CONTAINS 'privilege' OR toLower(vLPE2.description) CONTAINS 'overflow' OR any(cweInList IN coalesce(vLPE2.cwe, []) WHERE cweInList IN ['CWE-269', 'CWE-250', 'CWE-270', 'CWE-787', 'CWE-119', 'CWE-120', 'CWE-190', 'CWE-125']))
 			          AND NOT (toUpper(coalesce(fEntryImageLPE.status, 'OPEN')) IN ['PATCHED', 'CLOSED', 'FIXED', 'RESOLVED', 'SUPERSEDED'])
 			          AND coalesce(fEntryImageLPE.remediation_factor, 1.0) > 0.0
 			          AND coalesce(fEntryImageLPE.risk_score, 0.0) > 0.0
@@ -1713,6 +1716,11 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 			return nil, err
 		}
 
+		// El marco de gobierno se ingesta después del resto: su identidad incluye el proyecto
+		// al que pertenece, y ese nodo tiene que existir ya (ver ingestGovernanceNodes).
+		governanceOwner := governanceOwners(data)
+		var deferredGovernance []int
+
 		// 1. Ingestar nodos
 		for nodeIndex, node := range data.Nodes {
 			if len(node.Labels) == 0 {
@@ -1726,6 +1734,11 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 					primaryLabel = l
 					break
 				}
+			}
+
+			if governanceLabels[primaryLabel] {
+				deferredGovernance = append(deferredGovernance, nodeIndex)
+				continue
 			}
 
 			props := normalizeProperties(node.Properties)
@@ -1933,6 +1946,10 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 			}
 		}
 
+		if err := ingestGovernanceNodes(ctx, tx, data, deferredGovernance, governanceOwner, nodeLookup, indexKey); err != nil {
+			return nil, err
+		}
+
 		resolveRef := func(ref string) (string, bool) {
 			if elemID, ok := nodeLookup[ref]; ok {
 				return elemID, true
@@ -2040,6 +2057,152 @@ func (r *infrastructureRepo) ImportGraphData(ctx context.Context, data *domain.G
 	})
 
 	return err
+}
+
+// governanceLabels son los nodos del marco de gobierno. Pertenecen a un proyecto y sus ids
+// se repiten a propósito entre proyectos (la semilla usa pol-1, PROC-01, role-1…), así que
+// su identidad es el id —o el par categoría/severidad en SLAConfig— junto con el proyecto.
+var governanceLabels = map[string]bool{
+	"PolicyDocument": true,
+	"Procedure":      true,
+	"Role":           true,
+	"RACIActivity":   true,
+	"SLAConfig":      true,
+}
+
+// governanceOwners devuelve, por índice de nodo de gobierno, el índice del proyecto del
+// fichero al que pertenece según sus aristas BELONGS_TO.
+func governanceOwners(data *domain.GraphData) map[int]int {
+	refIndex := make(map[string]int)
+	ambiguous := make(map[string]bool)
+	add := func(ref string, i int) {
+		if ref == "" {
+			return
+		}
+		if prev, ok := refIndex[ref]; ok && prev != i {
+			ambiguous[ref] = true
+			return
+		}
+		refIndex[ref] = i
+	}
+	for i, node := range data.Nodes {
+		add(node.ID, i)
+		if id := node.Properties["id"]; id != nil {
+			add(fmt.Sprint(id), i)
+		}
+	}
+	resolve := func(ref string) (int, bool) {
+		if ambiguous[ref] {
+			return 0, false
+		}
+		i, ok := refIndex[ref]
+		return i, ok
+	}
+
+	owners := make(map[int]int)
+	for _, rel := range data.Relationships {
+		if rel.Type != "BELONGS_TO" {
+			continue
+		}
+		gi, okG := resolve(rel.Source)
+		pi, okP := resolve(rel.Target)
+		if !okG || !okP || !governanceLabels[primaryLabelOf(data.Nodes[gi])] || primaryLabelOf(data.Nodes[pi]) != "Project" {
+			continue
+		}
+		if _, known := owners[gi]; !known {
+			owners[gi] = pi
+		}
+	}
+	return owners
+}
+
+// ingestGovernanceNodes crea los nodos del marco de gobierno fusionando por su clave Y por
+// su proyecto. Fusionar solo por id enganchaba el pol-1 de la copia al pol-1 del proyecto
+// de origen: los dos proyectos compartían el nodo y editar uno cambiaba el otro. Lo mismo
+// pasaba con SLAConfig y su par categoría/severidad.
+//
+// Un nodo de gobierno sin proyecto en el fichero se omite: no hay a quién asignarlo.
+func ingestGovernanceNodes(
+	ctx context.Context,
+	tx neo4j.ManagedTransaction,
+	data *domain.GraphData,
+	indices []int,
+	owners map[int]int,
+	nodeLookup map[string]string,
+	indexKey func(key, elemID string),
+) error {
+	for _, gi := range indices {
+		node := data.Nodes[gi]
+		label := primaryLabelOf(node)
+		props := normalizeProperties(node.Properties)
+
+		pi, ok := owners[gi]
+		if !ok {
+			fmt.Printf("Aviso: %s %v omitido: no pertenece a ningún proyecto del fichero\n", label, props["id"])
+			continue
+		}
+		projectElemID, ok := nodeLookup[data.Nodes[pi].ID]
+		if !ok {
+			fmt.Printf("Aviso: %s %v omitido: su proyecto no se ha importado\n", label, props["id"])
+			continue
+		}
+
+		key := map[string]interface{}{}
+		if label == "SLAConfig" {
+			cat, sev := props["category"], props["severity"]
+			if cat == nil || sev == nil {
+				fmt.Printf("Aviso: SLAConfig omitido: le falta categoría o severidad\n")
+				continue
+			}
+			key["category"], key["severity"] = cat, sev
+		} else {
+			if props["id"] == nil || fmt.Sprint(props["id"]) == "" {
+				fmt.Printf("Aviso: %s omitido: no tiene id\n", label)
+				continue
+			}
+			key["id"] = props["id"]
+		}
+
+		keys := make([]string, 0, len(key))
+		for k := range key {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		params := map[string]interface{}{"project": projectElemID, "properties": props}
+		var pattern strings.Builder
+		for i, k := range keys {
+			if i > 0 {
+				pattern.WriteString(", ")
+			}
+			alias := fmt.Sprintf("k_%d", i)
+			pattern.WriteString(k + ": $" + alias)
+			params[alias] = key[k]
+		}
+		var labels strings.Builder
+		for _, l := range node.Labels {
+			labels.WriteString(":" + l)
+		}
+
+		res, err := tx.Run(ctx, fmt.Sprintf(`
+			MATCH (proj:Project) WHERE elementId(proj) = $project
+			MERGE (n:%s {%s})-[:BELONGS_TO]->(proj)
+			SET n%s, n += $properties
+			RETURN elementId(n) AS elemId
+		`, label, pattern.String(), labels.String()), params)
+		if err != nil {
+			return fmt.Errorf("error al importar %s (%v): %w", label, key, err)
+		}
+		if res.Next(ctx) {
+			elemID := fmt.Sprint(res.Record().AsMap()["elemId"])
+			if node.ID != "" {
+				nodeLookup[node.ID] = elemID
+			}
+			if id, ok := key["id"]; ok {
+				indexKey(fmt.Sprint(id), elemID)
+			}
+		}
+	}
+	return nil
 }
 
 // primaryLabelOf devuelve la etiqueta de negocio de un nodo del fichero, ignorando las
@@ -2179,7 +2342,13 @@ func remapCollidingAssetIDs(ctx context.Context, tx neo4j.ManagedTransaction, da
 		fmt.Printf("Aviso: el id %v de %s ya pertenece a otro proyecto; se importa como %v\n", oldID, label, node.Properties["id"])
 	}
 
-	if len(ownerRemap) == 0 {
+	// Las imágenes van después: su id se deriva del id (ya definitivo) de su contenedor.
+	imageRemap, err := remapContainerImages(ctx, tx, data, projectIDs, ownerRemap, aliases)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(ownerRemap) == 0 && len(imageRemap) == 0 {
 		return aliases, nil
 	}
 	for i := range data.Nodes {
@@ -2187,20 +2356,244 @@ func remapCollidingAssetIDs(ctx context.Context, tx neo4j.ManagedTransaction, da
 		if primaryLabelOf(node) != "Finding" || node.Properties == nil {
 			continue
 		}
+		owner := ""
+		if containerID, ok := node.Properties["container_id"]; ok && containerID != nil {
+			owner = fmt.Sprint(containerID)
+			if newID, ok := ownerRemap[owner]; ok {
+				owner = newID
+				node.Properties["container_id"] = newID
+			}
+		}
 		if key, ok := node.Properties["finding_key"].(string); ok {
 			parts := strings.Split(key, "|")
 			if newOwner, ok := ownerRemap[parts[0]]; ok {
 				parts[0] = newOwner
-				node.Properties["finding_key"] = strings.Join(parts, "|")
 			}
+			// Finding de imagen: contenedor|imagen|CVE.
+			if len(parts) == 3 {
+				if newImage, ok := imageRemap[imageRemapKey(parts[0], parts[1])]; ok {
+					parts[1] = newImage
+				}
+			}
+			node.Properties["finding_key"] = strings.Join(parts, "|")
 		}
-		if containerID, ok := node.Properties["container_id"]; ok && containerID != nil {
-			if newID, ok := ownerRemap[fmt.Sprint(containerID)]; ok {
-				node.Properties["container_id"] = newID
+		if imageID, ok := node.Properties["image_id"]; ok && imageID != nil && owner != "" {
+			if newImage, ok := imageRemap[imageRemapKey(owner, fmt.Sprint(imageID))]; ok {
+				node.Properties["image_id"] = newImage
 			}
 		}
 	}
 	return aliases, nil
+}
+
+func imageRemapKey(containerID, oldImageID string) string {
+	return containerID + "\x00" + oldImageID
+}
+
+// remapContainerImages da a cada imagen del fichero el id que le corresponde por diseño,
+// <container_id>_<imagen>: cada contenedor tiene su propio nodo de imagen.
+//
+// Un fichero puede traer imágenes cuyo id es el de la imagen de otro contenedor, por
+// ejemplo la copia de un proyecto, que cambia el id de los contenedores pero conservaba el
+// de sus imágenes. Importado tal cual, el contenedor de la copia se enganchaba a la imagen
+// del original y arrastraba sus CVE. Aquí:
+//
+//   - una imagen con un solo contenedor se renombra si su id ya pertenece a otro proyecto;
+//     reimportar un proyecto sobre sí mismo sigue fusionando con su imagen de siempre;
+//   - una imagen compartida por varios contenedores del fichero se desdobla en un nodo por
+//     contenedor. El primero conserva el nodo del fichero; los demás reciben uno nuevo sin
+//     HAS_VULNERABILITY ni metadatos de escaneo, que se rellenan al escanearlo, y se quedan
+//     con los findings cuyo container_id es el suyo.
+//
+// Devuelve el id nuevo de cada imagen renombrada, indexado por (contenedor, id antiguo).
+func remapContainerImages(
+	ctx context.Context,
+	tx neo4j.ManagedTransaction,
+	data *domain.GraphData,
+	projectIDs []interface{},
+	ownerRemap map[string]string,
+	aliases map[int]string,
+) (map[string]string, error) {
+	remap := make(map[string]string)
+
+	// Referencias del fichero (id de nodo o id de propiedad) -> índice. Las que apuntan a
+	// más de un nodo no se resuelven.
+	refIndex := make(map[string]int)
+	ambiguous := make(map[string]bool)
+	addRef := func(ref string, i int) {
+		if ref == "" {
+			return
+		}
+		if prev, ok := refIndex[ref]; ok && prev != i {
+			ambiguous[ref] = true
+			return
+		}
+		refIndex[ref] = i
+	}
+	for i, node := range data.Nodes {
+		addRef(node.ID, i)
+		if id := node.Properties["id"]; id != nil {
+			addRef(fmt.Sprint(id), i)
+		}
+		if old, ok := aliases[i]; ok {
+			addRef(old, i)
+		}
+	}
+	resolve := func(ref string) (int, bool) {
+		if ambiguous[ref] {
+			return 0, false
+		}
+		i, ok := refIndex[ref]
+		return i, ok
+	}
+
+	// Contenedores de cada imagen, en el orden del fichero y sin repetir.
+	owners := make(map[int][]int)
+	usesImage := make(map[[2]int]int) // (contenedor, imagen) -> índice de la relación
+	var imageOrder []int
+	for ri, rel := range data.Relationships {
+		if rel.Type != "USES_IMAGE" {
+			continue
+		}
+		ci, okC := resolve(rel.Source)
+		ii, okI := resolve(rel.Target)
+		if !okC || !okI || primaryLabelOf(data.Nodes[ci]) != "Container" || primaryLabelOf(data.Nodes[ii]) != "ContainerImage" {
+			continue
+		}
+		pair := [2]int{ci, ii}
+		if _, seen := usesImage[pair]; seen {
+			continue
+		}
+		usesImage[pair] = ri
+		if _, known := owners[ii]; !known {
+			imageOrder = append(imageOrder, ii)
+		}
+		owners[ii] = append(owners[ii], ci)
+	}
+
+	// Id del contenedor antes y después del remapeo, para reconocer sus findings.
+	containerIDs := func(ci int) (final string, all map[string]bool) {
+		final = fmt.Sprint(data.Nodes[ci].Properties["id"])
+		all = map[string]bool{final: true}
+		if old, ok := aliases[ci]; ok {
+			all[old] = true
+		}
+		return final, all
+	}
+
+	belongsElsewhere := func(id string) (bool, error) {
+		res, err := tx.Run(ctx, `
+			MATCH (x:ContainerImage {id: $id})
+			RETURN count(x) AS existing,
+			       count(CASE WHEN EXISTS { MATCH (p:Project)-[*1..4]->(x) WHERE p.id IN $projects } THEN 1 END) AS own
+		`, map[string]interface{}{"id": id, "projects": projectIDs})
+		if err != nil {
+			return false, fmt.Errorf("error comprobando la imagen %s: %w", id, err)
+		}
+		existing, own := int64(0), int64(0)
+		if res.Next(ctx) {
+			rec := res.Record().AsMap()
+			existing, own = getInt64(rec, "existing"), getInt64(rec, "own")
+		}
+		return existing > 0 && own == 0, nil
+	}
+
+	// La relación HAS_FINDING manda: el finding que cuelga de una imagen lleva su id en
+	// image_id y en el segundo tramo de finding_key, sea cual sea el que trajera.
+	apuntarFindingAImagen := func(fi int, imageID string) {
+		props := data.Nodes[fi].Properties
+		props["image_id"] = imageID
+		if key, ok := props["finding_key"].(string); ok {
+			if parts := strings.Split(key, "|"); len(parts) == 3 {
+				parts[1] = imageID
+				props["finding_key"] = strings.Join(parts, "|")
+			}
+		}
+	}
+	findingsDeImagen := func(ii int, visit func(ri, fi int, owner string)) {
+		for ri, rel := range data.Relationships {
+			if rel.Type != "HAS_FINDING" {
+				continue
+			}
+			src, okS := resolve(rel.Source)
+			fi, okF := resolve(rel.Target)
+			if !okS || !okF || src != ii || primaryLabelOf(data.Nodes[fi]) != "Finding" || data.Nodes[fi].Properties == nil {
+				continue
+			}
+			visit(ri, fi, fmt.Sprint(data.Nodes[fi].Properties["container_id"]))
+		}
+	}
+
+	for _, ii := range imageOrder {
+		image := data.Nodes[ii]
+		if image.Properties == nil {
+			continue
+		}
+		oldID := fmt.Sprint(image.Properties["id"])
+		imageName := strings.TrimSpace(fmt.Sprint(image.Properties["image_id"]))
+		if image.Properties["image_id"] == nil || imageName == "" {
+			imageName = strings.TrimSpace(fmt.Sprint(image.Properties["name"]))
+		}
+		if image.Properties["id"] == nil || imageName == "" || imageName == "<nil>" {
+			continue
+		}
+
+		for k, ci := range owners[ii] {
+			cid, cidAll := containerIDs(ci)
+			wanted := cid + "_" + imageName
+
+			if k == 0 {
+				if oldID == wanted {
+					continue
+				}
+				elsewhere, err := belongsElsewhere(oldID)
+				if err != nil {
+					return nil, err
+				}
+				if !elsewhere {
+					continue
+				}
+				image.Properties["id"] = wanted
+				aliases[ii] = oldID
+				for id := range cidAll {
+					remap[imageRemapKey(id, oldID)] = wanted
+				}
+				findingsDeImagen(ii, func(_, fi int, _ string) { apuntarFindingAImagen(fi, wanted) })
+				fmt.Printf("Aviso: la imagen %s ya pertenece a otro proyecto; se importa como %s\n", oldID, wanted)
+				continue
+			}
+
+			// Contenedor adicional de una imagen compartida: nodo propio.
+			props := make(map[string]interface{}, len(image.Properties))
+			for key, val := range image.Properties {
+				if strings.HasPrefix(key, "vuln_scan_") {
+					continue
+				}
+				props[key] = val
+			}
+			props["id"] = wanted
+			clone := domain.GraphNode{
+				ID:         fmt.Sprintf("%s#imagen-de-%s", image.ID, cid),
+				Labels:     append([]string(nil), image.Labels...),
+				Properties: props,
+			}
+			data.Nodes = append(data.Nodes, clone)
+			data.Relationships[usesImage[[2]int{ci, ii}]].Target = clone.ID
+			for id := range cidAll {
+				remap[imageRemapKey(id, oldID)] = wanted
+			}
+
+			findingsDeImagen(ii, func(ri, fi int, owner string) {
+				if cidAll[owner] {
+					data.Relationships[ri].Source = clone.ID
+					apuntarFindingAImagen(fi, wanted)
+				}
+			})
+			fmt.Printf("Aviso: la imagen %s la comparten varios contenedores; %s recibe su propio nodo %s\n", oldID, cid, wanted)
+		}
+	}
+
+	return remap, nil
 }
 
 // importOwnedIP crea la IP colgando de su activo. El MERGE es sobre el camino completo, así

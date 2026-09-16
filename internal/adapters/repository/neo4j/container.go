@@ -22,6 +22,9 @@ func (r *containerRepo) SaveContainerImage(ctx context.Context, image *domain.Co
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
+	// La imagen se identifica solo por el id del nodo. Antes se copiaban además etiqueta,
+	// digest y metadatos de escaneo a toda imagen con ese nombre, que son nodos de otros
+	// contenedores y otros proyectos.
 	query := `
 		MERGE (i:ContainerImage {id: $id})
 		SET i.name = $name,
@@ -34,17 +37,6 @@ func (r *containerRepo) SaveContainerImage(ctx context.Context, image *domain.Co
 		    i.vuln_scan_total_available = coalesce($vuln_scan_total_available, i.vuln_scan_total_available),
 		    i.vuln_scan_processed = coalesce($vuln_scan_processed, i.vuln_scan_processed),
 		    i.vuln_scan_pages_fetched = coalesce($vuln_scan_pages_fetched, i.vuln_scan_pages_fetched)
-		WITH i
-		OPTIONAL MATCH (ci:ContainerImage) WHERE ci.image_id = $id OR ci.name = $id
-		SET ci.tag = $tag,
-		    ci.digest = $digest,
-		    ci.risk_score = $risk_score,
-		    ci.vuln_scan_started_at = coalesce($vuln_scan_started_at, ci.vuln_scan_started_at),
-		    ci.vuln_scan_completed_at = coalesce($vuln_scan_completed_at, ci.vuln_scan_completed_at),
-		    ci.vuln_scan_cache_hit = coalesce($vuln_scan_cache_hit, ci.vuln_scan_cache_hit),
-		    ci.vuln_scan_total_available = coalesce($vuln_scan_total_available, ci.vuln_scan_total_available),
-		    ci.vuln_scan_processed = coalesce($vuln_scan_processed, ci.vuln_scan_processed),
-		    ci.vuln_scan_pages_fetched = coalesce($vuln_scan_pages_fetched, ci.vuln_scan_pages_fetched)
 	`
 	params := map[string]any{
 		"id":                        image.ImageID,
@@ -440,14 +432,17 @@ func (r *containerRepo) GetContainer(ctx context.Context, containerID string) (*
 	return res.(*domain.Container), nil
 }
 
-// GetContainerIDsByImage devuelve los IDs de todos los contenedores que usan la imagen indicada.
+// GetContainerIDsByImage devuelve los IDs de los contenedores que usan la imagen indicada.
+//
+// La imagen se identifica solo por el id del nodo, que es propio de cada contenedor
+// (<container_id>_<imagen>). Buscar también por image_id o name devolvía los contenedores
+// de cualquier imagen con ese nombre, de este o de otro proyecto.
 func (r *containerRepo) GetContainerIDsByImage(ctx context.Context, imageID string) ([]string, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
 	query := `
-		MATCH (c:Container)-[:USES_IMAGE]->(ci:ContainerImage)
-		WHERE ci.id = $image_id OR ci.image_id = $image_id OR ci.name = $image_id
+		MATCH (c:Container)-[:USES_IMAGE]->(:ContainerImage {id: $image_id})
 		RETURN c.id AS container_id
 	`
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
@@ -473,14 +468,14 @@ func (r *containerRepo) GetContainerIDsByImage(ctx context.Context, imageID stri
 	return res.([]string), nil
 }
 
-// GetVulnerabilitiesByContainerImage devuelve las vulnerabilidades enlazadas a la imagen (inteligencia compartida).
+// GetVulnerabilitiesByContainerImage devuelve las vulnerabilidades enlazadas a la imagen,
+// identificada solo por el id del nodo.
 func (r *containerRepo) GetVulnerabilitiesByContainerImage(ctx context.Context, imageID string) ([]domain.Vulnerability, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
 	query := `
-		MATCH (ci:ContainerImage)-[:HAS_VULNERABILITY]->(v:Vulnerability)
-		WHERE ci.id = $image_id OR ci.image_id = $image_id OR ci.name = $image_id
+		MATCH (:ContainerImage {id: $image_id})-[:HAS_VULNERABILITY]->(v:Vulnerability)
 		RETURN DISTINCT properties(v) AS props
 	`
 	res, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
@@ -518,13 +513,15 @@ func (r *containerRepo) GetVulnerabilitiesByContainerImage(ctx context.Context, 
 	return res.([]domain.Vulnerability), nil
 }
 
-// LinkVulnerabilityToImage enlaza una imagen de contenedor con un CVE para inteligencia compartida (HAS_VULNERABILITY)
+// LinkVulnerabilityToImage enlaza una imagen de contenedor con un CVE (HAS_VULNERABILITY).
+// La imagen se identifica solo por el id del nodo: por nombre, el enlace caía también en
+// las imágenes de otros contenedores con el mismo nombre.
 func (r *containerRepo) LinkVulnerabilityToImage(ctx context.Context, imageID string, cveID string) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
 	query := `
-		MATCH (ci:ContainerImage) WHERE ci.id = $image_id OR ci.image_id = $image_id OR ci.name = $image_id
+		MATCH (ci:ContainerImage {id: $image_id})
 		MATCH (v:Vulnerability {cve_id: $cve_id})
 		MERGE (ci)-[:HAS_VULNERABILITY]->(v)
 	`

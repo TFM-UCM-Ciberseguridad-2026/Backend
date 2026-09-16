@@ -582,7 +582,9 @@ func (r *findingRepo) EnsureForContainerImageContextAndCVE(
 	findingKey := containerID + "|" + imageID + "|" + cveID
 
 	query := `
-			MATCH (c:Container {id: $container_id})-[:USES_IMAGE]->(ci:ContainerImage)
+			// La imagen es la escaneada, por su id de nodo: sin acotarla, el finding colgaba de
+			// cualquier imagen del contenedor, incluida una compartida con otro proyecto.
+			MATCH (c:Container {id: $container_id})-[:USES_IMAGE]->(ci:ContainerImage {id: $image_id})
 			MATCH (v:Vulnerability {cve_id: $cve_id})
 
 			MERGE (n:Finding {finding_key: $finding_key})

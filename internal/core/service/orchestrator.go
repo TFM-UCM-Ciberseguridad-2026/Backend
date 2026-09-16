@@ -2613,7 +2613,18 @@ func (o *Orchestrator) ScanAndSaveContainerImage(ctx context.Context, imageName 
 		}
 	}
 
-	// 1. Llamar a Docker Scout
+	// 1. Llamar a Docker Scout con el nombre real de la imagen. El id del nodo es
+	// <container_id>_<imagen> y el recorte de arriba solo reconoce los contenedores con
+	// prefijo "container": el de una copia (id numérico) llegaba a Scout como
+	// "1789…_docker:18.06-dind" y el escaneo fallaba.
+	if image, err := o.containerPort.GetContainerImage(scanCtx, imageID); err == nil && image != nil {
+		if name := strings.TrimSpace(image.Name); name != "" {
+			if tag := strings.TrimSpace(image.Tag); tag != "" && !strings.Contains(name, ":") {
+				name += ":" + tag
+			}
+			imageName = name
+		}
+	}
 	vulns, err := o.scoutPort.ScanImage(scanCtx, imageName)
 	if err != nil {
 		return nil, fmt.Errorf("error escaneando imagen %s: %w", imageName, err)
@@ -2816,7 +2827,7 @@ func (o *Orchestrator) updateContainerImageScanMetadata(ctx context.Context, ima
 	}
 
 	query := `
-		MATCH (ci:ContainerImage) WHERE ci.id = $image_id OR ci.image_id = $image_id OR ci.name = $image_id
+		MATCH (ci:ContainerImage {id: $image_id})
 		SET ci.vuln_scan_started_at = $started_at,
 		    ci.vuln_scan_completed_at = $completed_at,
 		    ci.vuln_scan_cache_hit = $cache_hit,

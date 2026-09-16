@@ -70,19 +70,15 @@ func (r *patchRepo) SaveApplication(ctx context.Context, a *domain.AppliedPatch)
 // /api/vulnerabilities/{cve}/patches sería un N+1 desde el navegador.
 //
 // El alcance replica el de la matriz de TTPs: una CVE entra si el proyecto tiene un
-// hallazgo suyo, o si cuelga de la imagen de un contenedor por HAS_VULNERABILITY, que es
-// el camino por el que llegan las CVE de imagen todavía sin hallazgo. Con projectID 0 no
-// se acota nada y se devuelve el grafo entero.
+// hallazgo suyo. La relación HAS_VULNERABILITY de una imagen no cuenta: es el resultado
+// del escaneo, y una imagen compartida con otro proyecto le traía CVE sin hallazgo. Con
+// projectID 0 no se acota nada y se devuelve el grafo entero.
 func (r *patchRepo) GetByProject(ctx context.Context, projectID int64) ([]domain.CVEPatches, error) {
 	query := `
 		MATCH (p:Patch)-[:FIXES]->(v:Vulnerability)
 		WHERE $project_id = 0 OR toString($project_id) = "0"
 		   OR EXISTS {
 		        MATCH (proj:Project)-[:HAS_ENDPOINT]->(scoped)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(asset)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v)
-		        WHERE proj.id = $project_id OR toString(proj.id) = toString($project_id) OR proj.name = toString($project_id)
-		      }
-		   OR EXISTS {
-		        MATCH (proj:Project)-[:HAS_ENDPOINT]->(scoped)-[:HAS_INSTALLATION|HOSTS|USES_IMAGE*1..3]->(img:ContainerImage)-[:HAS_VULNERABILITY]->(v)
 		        WHERE proj.id = $project_id OR toString(proj.id) = toString($project_id) OR proj.name = toString($project_id)
 		      }
 		WITH v, p

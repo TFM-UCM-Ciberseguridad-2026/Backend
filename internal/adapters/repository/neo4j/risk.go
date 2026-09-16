@@ -104,6 +104,7 @@ func (r *riskRepo) GetFindingContextsByEndpoint(ctx context.Context, endpointID 
 		WHERE NOT toLower(coalesce(e.estado, e.status, '')) IN ['decomisado', 'decommissioned']
 		MATCH (ci)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE f.context_type = 'CONTAINER_IMAGE'
+		  AND f.container_id = c.id
 		  AND f.image_id = ci.id
 		  AND NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED']
 		  AND coalesce(f.remediation_factor, 1.0) > 0.0

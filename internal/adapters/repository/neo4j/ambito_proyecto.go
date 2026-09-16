@@ -15,6 +15,11 @@ La lista es la UNIÓN de todas. Algunas rutas no las escribe hoy la aplicación
 del proyecto), pero ImportGraphData crea relaciones del tipo que traiga el
 fichero, así que pueden aparecer en datos importados. Una ruta sin datos solo
 cuesta un EXISTS que no encuentra nada.
+
+Las CVE de una imagen de contenedor entran solo a través de sus findings. Las
+rutas (ContainerImage)-[:HAS_VULNERABILITY]->(v) se retiraron: esa relación es el
+resultado del escaneo de la imagen, no un hallazgo del proyecto, y una imagen
+compartida con otro proyecto le traía CVE sin ningún finding que las respaldara.
 */
 
 // rutasAmbitoProyecto enumera cómo llega un proyecto a una vulnerabilidad. Cada
@@ -24,11 +29,9 @@ var rutasAmbitoProyecto = []string{
 	`(p)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v)`,
 	`(p)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v)`,
 	`(p)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v)`,
-	`(p)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v)`,
 	`(p)-[:HAS_ENDPOINT]->(:Endpoint)-[:HAS_VULNERABILITY]->(v)`,
 	`(p)-[:HAS_ENDPOINT]->(:Container)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v)`,
 	`(p)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_FINDING]->(:Finding)-[:OF_VULNERABILITY]->(v)`,
-	`(p)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v)`,
 	`(p)-[:HAS_ENDPOINT]->(:Container)-[:HAS_VULNERABILITY]->(v)`,
 }
 

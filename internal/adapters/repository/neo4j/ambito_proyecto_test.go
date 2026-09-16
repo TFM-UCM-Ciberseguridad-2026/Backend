@@ -34,6 +34,14 @@ var rutasPrevias = map[string][]string{
 	},
 }
 
+// Rutas que usaban las consultas previas y se retiraron a propósito: HAS_VULNERABILITY de
+// una imagen es resultado del escaneo, no un hallazgo, y una imagen compartida con otro
+// proyecto metía por aquí CVE sin finding.
+var rutasRetiradas = map[string]bool{
+	`(p)-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v)`: true,
+	`(p)-[:HAS_ENDPOINT]->(:Container)-[:USES_IMAGE]->(:ContainerImage)-[:HAS_VULNERABILITY]->(v)`:                       true,
+}
+
 func TestAmbitoCanonicoContieneLasRutasDeTodasLasConsultas(t *testing.T) {
 	canonicas := make(map[string]bool, len(rutasAmbitoProyecto))
 	for _, r := range rutasAmbitoProyecto {
@@ -46,6 +54,9 @@ func TestAmbitoCanonicoContieneLasRutasDeTodasLasConsultas(t *testing.T) {
 	union := map[string]bool{}
 	for consulta, rutas := range rutasPrevias {
 		for _, r := range rutas {
+			if rutasRetiradas[r] {
+				continue
+			}
 			union[r] = true
 			if !canonicas[r] {
 				t.Errorf("la ruta de %s no está en el ámbito canónico: %s", consulta, r)
@@ -56,6 +67,14 @@ func TestAmbitoCanonicoContieneLasRutasDeTodasLasConsultas(t *testing.T) {
 	// unión, no una ampliación.
 	if len(union) != len(canonicas) {
 		t.Errorf("el ámbito canónico tiene %d rutas y la unión de las previas %d", len(canonicas), len(union))
+	}
+}
+
+func TestAmbitoNoTomaCVEDeImagenSinFinding(t *testing.T) {
+	for _, r := range rutasAmbitoProyecto {
+		if rutasRetiradas[r] || strings.Contains(r, "(:ContainerImage)-[:HAS_VULNERABILITY]") {
+			t.Errorf("el ámbito no debe tomar CVE de una imagen sin finding: %s", r)
+		}
 	}
 }
 
