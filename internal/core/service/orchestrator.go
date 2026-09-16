@@ -1348,12 +1348,7 @@ func (o *Orchestrator) RegisterPatchesForVulnerability(ctx context.Context, cveI
 		if pCopy.URL != "" {
 			existing, err := o.patchPort.GetByURL(ctx, pCopy.URL)
 			if err == nil && existing != nil {
-				// El parche ya está en el grafo: reutilizamos su nodo y actualizamos
-				// la clasificación para corregir registros creados antes de estos campos.
-				pCopy.PatchID = existing.PatchID
-				if err := o.patchPort.Update(ctx, &pCopy); err != nil {
-					continue
-				}
+				// El parche ya existe: se reutiliza sin sobrescribir sus metadatos.
 				_ = o.relationshipPort.LinkPatchToVulnerability(ctx, existing.PatchID, cveID)
 				continue
 			}
@@ -1603,7 +1598,13 @@ func (o *Orchestrator) DeclarePatchApplied(
 		software, err := o.softwareInstPort.GetInstalledSoftware(ctx, installationID)
 		if err == nil && software != nil {
 			software.Version = cleanTargetVer
-			software.CPE = domain.GenerateCPE23(software.Type, software.Vendor, software.Name, cleanTargetVer)
+			cpeParts := strings.Split(software.CPE, ":")
+			if len(cpeParts) == 13 {
+				cpeParts[5] = cleanTargetVer
+				software.CPE = strings.Join(cpeParts, ":")
+			} else {
+				software.CPE = domain.GenerateCPE23(software.Type, software.Vendor, software.Name, cleanTargetVer)
+			}
 
 			if updateErr := o.softwarePort.Update(ctx, software); updateErr == nil {
 				// Regla B: Comparación diferencial contra el nuevo escaneo de NVD
