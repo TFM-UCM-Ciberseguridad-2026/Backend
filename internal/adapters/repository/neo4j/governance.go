@@ -457,7 +457,7 @@ func (r *governanceRepository) GetSLAConfigs(ctx context.Context, projectID int6
 
 	// Completar los huecos con la política por defecto del dominio, para que la respuesta
 	// siempre traiga la matriz entera y la pantalla no tenga que inventar valores.
-	configs := make([]domain.SLAConfig, 0, 8)
+	configs := make([]domain.SLAConfig, 0, len(domain.DefaultSLAConfigs()))
 	for _, def := range domain.DefaultSLAConfigs() {
 		if conf, ok := stored[string(def.Category)+"|"+def.Severity]; ok && conf.Days > 0 {
 			configs = append(configs, conf)
@@ -510,28 +510,57 @@ func (r *governanceRepository) GetSLABreaches(ctx context.Context, projectID int
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	// Vulnerabilidades activas de este proyecto, agrupadas por CVE Y por categoría del
-	// activo afectado: el plazo depende de dónde está la vulnerabilidad, así que la misma
-	// CVE presente en un servidor y en un puesto son dos compromisos distintos y se
-	// devuelven como dos filas.
+	// Vulnerabilidades activas de este proyecto, una fila por CVE Y activo afectado: el
+	// plazo depende de dónde está la vulnerabilidad, así que la misma CVE en un servidor y
+	// en un puesto son dos compromisos distintos, y en dos contenedores son dos imágenes
+	// que reconstruir. Agrupar por categoría los fundía en una fila con un contador, que
+	// no decía de qué activo se trataba.
 	//
 	// Una CVE ya parcheada no tiene plazo que incumplir, así que los hallazgos cerrados
 	// quedan fuera con el mismo criterio que usan la cola de parcheo y el motor de riesgo.
 	// Las MITIGADAS sí siguen contando: una mitigación temporal o un workaround dejan el
 	// software vulnerable instalado y el reloj del SLA tiene que seguir corriendo.
 	//
-	// La fecha de detección de cada grupo es la MÁS ANTIGUA de sus hallazgos: el reloj del
-	// SLA empieza a contar la primera vez que se supo, no la última.
+	// El reloj del SLA arranca en v.first_detected_at, la primera vez que se supo de la CVE
+	// en el proyecto, no la primera vez que se vio en este activo concreto: las filas de una
+	// misma CVE comparten por tanto plazo y días restantes.
+	//
+	// La segunda rama recoge los hallazgos que viven dentro de un contenedor —en la propia
+	// imagen, en el software empaquetado en ella o, en grafos antiguos, colgados del
+	// contenedor— y los mide contra el SLA de contenedores, sea cual sea el tipo del host:
+	// se remedian reconstruyendo la imagen, no parcheando la máquina. Sin esta rama quedaban
+	// fuera de todo acuerdo y el cumplimiento describía solo el software del host.
+	//
+	// El filtro por container_id evita que una imagen compartida por dos contenedores le
+	// atribuya a cada uno los hallazgos contextuales del otro.
+	//
+	// finding_count agrupa los hallazgos de esa CVE en ese activo —más de uno cuando la
+	// misma CVE afecta a varios paquetes instalados en él— y es lo que permite contar el
+	// cumplimiento en hallazgos, la unidad del resto del reporting.
 	query := `
-		MATCH (:Project {id: $projectID})-[:HAS_ENDPOINT]->(e:Endpoint)-[:HAS_INSTALLATION]->(s:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		MATCH (:Project {id: $projectID})-[:HAS_ENDPOINT]->(e:Endpoint)-[:HAS_INSTALLATION]->(:SoftwareInstallation)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
 		WHERE NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED']
-		WITH v, coalesce(e.category, '') AS category, e,
-		     coalesce(v.first_detected_at, timestamp()) AS detected
-		RETURN v.cve_id           AS cve_id,
-		       v.base_score       AS base_score,
-		       category           AS category,
-		       min(detected)      AS first_detected_at,
-		       count(DISTINCT e)  AS asset_count
+		RETURN v.cve_id                        AS cve_id,
+		       v.base_score                    AS base_score,
+		       coalesce(e.category, '')        AS category,
+		       e.id                            AS asset_id,
+		       coalesce(e.hostname, e.id)      AS asset_name,
+		       coalesce(v.first_detected_at, timestamp()) AS first_detected_at,
+		       count(DISTINCT f)               AS finding_count
+
+		UNION ALL
+
+		MATCH (:Project {id: $projectID})-[:HAS_ENDPOINT]->(:Endpoint)-[:HOSTS]->(c:Container)-[:HAS_INSTALLATION|USES_IMAGE*0..1]->(a)-[:HAS_FINDING]->(f:Finding)-[:OF_VULNERABILITY]->(v:Vulnerability)
+		WHERE (a:Container OR a:SoftwareInstallation OR a:ContainerImage)
+		  AND (f.container_id IS NULL OR f.container_id = c.id)
+		  AND NOT toUpper(coalesce(f.status, 'OPEN')) IN ['RESOLVED', 'FIXED', 'PATCHED', 'CLOSED', 'SUPERSEDED']
+		RETURN v.cve_id                        AS cve_id,
+		       v.base_score                    AS base_score,
+		       'Container'                     AS category,
+		       c.id                            AS asset_id,
+		       coalesce(c.name, c.id)          AS asset_name,
+		       coalesce(v.first_detected_at, timestamp()) AS first_detected_at,
+		       count(DISTINCT f)               AS finding_count
 	`
 	res, err := session.Run(ctx, query, map[string]interface{}{"projectID": projectID})
 	if err != nil {
@@ -552,15 +581,19 @@ func (r *governanceRepository) GetSLABreaches(ctx context.Context, projectID int
 
 		cveID, _ := rec.Values[0].(string)
 		category, _ := rec.Values[2].(string)
-		detected, _ := rec.Values[3].(int64)
-		assetCount, _ := rec.Values[4].(int64)
+		assetID, _ := rec.Values[3].(string)
+		assetName, _ := rec.Values[4].(string)
+		detected, _ := rec.Values[5].(int64)
+		findingCount, _ := rec.Values[6].(int64)
 
 		breaches = append(breaches, domain.SLABreach{
 			CVEID:           cveID,
 			BaseScore:       baseScore,
 			Category:        domain.EndpointCategory(category),
+			AssetID:         assetID,
+			AssetName:       assetName,
 			FirstDetectedAt: detected,
-			AssetCount:      int(assetCount),
+			FindingCount:    int(findingCount),
 		})
 	}
 	return breaches, nil

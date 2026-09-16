@@ -23,10 +23,16 @@ type SLAPolicy map[EndpointCategory]map[string]int
 //	                CRITICAL   HIGH   MEDIUM   LOW
 //	Servidores          7        30      90     180
 //	Puestos            30        60      90     180
+//	Contenedores        3        15      30      90
 //
 // Los servidores son más exigentes en los dos niveles altos porque concentran la exposición
 // y el impacto; a partir de MEDIUM el plazo converge, ya que ahí manda la ventana de
 // mantenimiento y no la urgencia.
+//
+// Los contenedores tienen el plazo más corto en todas las severidades. No es que sean más
+// críticos, es que remediarlos es más barato: la imagen se reconstruye sobre una base
+// actualizada y se redespliega desde el pipeline, sin ventana de mantenimiento ni reinicio de
+// un host compartido (NIST SP 800-190).
 var defaultSLAPolicy = SLAPolicy{
 	CategoryServer: {
 		"Critical": 7,
@@ -40,6 +46,12 @@ var defaultSLAPolicy = SLAPolicy{
 		"Medium":   90,
 		"Low":      180,
 	},
+	CategoryContainer: {
+		"Critical": 3,
+		"High":     15,
+		"Medium":   30,
+		"Low":      90,
+	},
 }
 
 // severityOrder fija el orden de presentación de las severidades, de más grave a menos.
@@ -51,6 +63,7 @@ var severityOrder = []string{"Critical", "High", "Medium", "Low"}
 var slaCategoryLabels = map[EndpointCategory]string{
 	CategoryServer:      "Servidores",
 	CategoryWorkstation: "Puestos de trabajo",
+	CategoryContainer:   "Contenedores",
 }
 
 // SLADaysFor devuelve el plazo por defecto para una categoría y una severidad.
@@ -98,9 +111,19 @@ func SLASeverities() []string {
 }
 
 // SLACategories devuelve las categorías de activo que tienen SLA propio, en orden de
-// presentación: primero la exigente.
+// presentación: primero los dos grupos de endpoint y después los contenedores.
 func SLACategories() []EndpointCategory {
-	return []EndpointCategory{CategoryServer, CategoryWorkstation}
+	return []EndpointCategory{CategoryServer, CategoryWorkstation, CategoryContainer}
+}
+
+// IsSLACategory indica si la categoría tiene un acuerdo propio que se pueda configurar.
+func IsSLACategory(category EndpointCategory) bool {
+	for _, c := range SLACategories() {
+		if c == category {
+			return true
+		}
+	}
+	return false
 }
 
 // SLACategoryLabel devuelve el nombre de la categoría para mostrar al usuario.

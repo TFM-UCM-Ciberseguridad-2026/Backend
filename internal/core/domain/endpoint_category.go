@@ -27,6 +27,15 @@ const (
 	CategoryServer      EndpointCategory = "Server"
 )
 
+// CategoryContainer es un bucket de SLA, no una categoría de endpoint: ningún tipo de
+// endpoint se traduce a ella y por eso no figura en endpointTypeToCategory.
+//
+// Agrupa los hallazgos que viven dentro de un contenedor, tanto los de la imagen como los
+// del software empaquetado en ella. NIST SP 800-190 los trata aparte porque su ciclo de vida
+// no es el de un host: la imagen es inmutable, no se parchea en caliente sino que se
+// reconstruye y se redespliega, y por eso admite un plazo propio y más corto.
+const CategoryContainer EndpointCategory = "Container"
+
 // endpointTypeToCategory es la ÚNICA fuente de verdad del mapeo rol técnico → categoría.
 //
 // Domain Controller, Firewall y Router se gobiernan hoy como servidores. Si en el futuro los

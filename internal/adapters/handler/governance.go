@@ -271,8 +271,8 @@ func (h *GovernanceHandler) SaveSLAConfigs(w http.ResponseWriter, r *http.Reques
 		// La categoría se valida porque es parte de la clave con la que se persiste: un valor
 		// inventado crearía un SLA que después nunca se aplica a ningún activo, y el usuario
 		// vería su configuración guardada sin ningún efecto.
-		if conf.Category != domain.CategoryServer && conf.Category != domain.CategoryWorkstation {
-			http.Error(w, "SLA category must be 'Server' or 'Workstation'", http.StatusBadRequest)
+		if !domain.IsSLACategory(conf.Category) {
+			http.Error(w, "SLA category must be 'Server', 'Workstation' or 'Container'", http.StatusBadRequest)
 			return
 		}
 	}

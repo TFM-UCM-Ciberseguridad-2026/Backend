@@ -87,15 +87,17 @@ type Role struct {
 // está. Una misma severidad no admite el mismo plazo en un servidor que en el puesto de un
 // usuario, porque no comparten ni exposición ni ventana de mantenimiento.
 type SLAConfig struct {
-	Category EndpointCategory `json:"category"` // Server | Workstation
+	Category EndpointCategory `json:"category"` // Server | Workstation | Container
 	Severity string           `json:"severity"` // Critical, High, Medium, Low
 	Days     int              `json:"days"`
 }
 
 // SLABreach represents a vulnerability and its SLA compliance status.
 //
-// La misma CVE puede aparecer dos veces, una por categoría de activo, y con plazos
-// distintos: es precisamente lo que hace visible que hay dos SLAs y no uno.
+// Hay una fila por CVE y activo afectado, no una por CVE: la misma CVE en dos
+// contenedores son dos filas, igual que en dos servidores. Agrupar por categoría
+// obligaba a un contador «×N» que solo asomaba cuando un activo compartía imagen con
+// otro, y que además no decía cuál de los dos había que reconstruir.
 type SLABreach struct {
 	CVEID           string  `json:"cve_id"`
 	Severity        string  `json:"severity"`
@@ -105,10 +107,21 @@ type SLABreach struct {
 	DaysRemaining   int     `json:"days_remaining"` // Negative means breached
 
 	// Category es el bucket de SLA aplicado. Vacía cuando el activo afectado no tiene un
-	// tipo reconocido: en ese caso no hay plazo que exigir y AssetCount indica a cuántos
-	// activos sin clasificar corresponde.
-	Category   EndpointCategory `json:"category"`
-	AssetCount int              `json:"asset_count"`
+	// tipo reconocido: en ese caso no hay plazo que exigir. Container cuando el hallazgo
+	// vive dentro de un contenedor, sea en la imagen o en el software empaquetado en ella.
+	Category EndpointCategory `json:"category"`
+
+	// AssetID y AssetName identifican el activo de la fila: el endpoint en el software del
+	// host, el contenedor en los hallazgos de contenedor. El nombre es lo que se enseña; el
+	// id es lo que distingue dos activos que se llaman igual.
+	AssetID   string `json:"asset_id"`
+	AssetName string `json:"asset_name"`
+
+	// FindingCount es el número de hallazgos que la fila agrupa: los de esa CVE en ese
+	// activo. Normalmente uno, más de uno cuando la misma CVE afecta a varios paquetes
+	// instalados en él. Sumarlo da el cumplimiento medido en hallazgos y no en CVE, que es
+	// la unidad del resto del reporting.
+	FindingCount int `json:"finding_count"`
 }
 
 // RACIActivity represents an activity in the RACI matrix and its associated roles
