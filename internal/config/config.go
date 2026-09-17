@@ -136,7 +136,7 @@ func LoadConfig() (*Config, error) {
 		Port:          getEnv("PORT", "8080"),
 		Env:           getEnv("ENV", "development"),
 		Neo4jURI:      getEnv("NEO4J_URI", "bolt://localhost:7687"),
-		Neo4jUser:     getEnv("NEO4J_USER", "neo4j"),
+		Neo4jUser:     getEnv("NEO4J_USER", getEnv("NEO4J_USERNAME", "neo4j")),
 		Neo4jPassword: getEnv("NEO4J_PASSWORD", "password"),
 		Database: DatabaseConfig{
 			Host:     getEnv("DB_HOST", "localhost"),
